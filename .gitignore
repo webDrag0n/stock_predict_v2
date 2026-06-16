@@ -1,0 +1,14 @@
+# 凭证（含 tushare token，切勿提交）
+config_credentials.toml
+
+# Python 环境与缓存
+.venv/
+__pycache__/
+*.pyc
+
+# 数据缓存与产出
+data_cache/
+outputs/
+models/
+
+jane-street-baseline-lgb-xgb-and-catboost.ipynb
