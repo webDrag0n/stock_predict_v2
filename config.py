@@ -60,82 +60,11 @@ DATA_SOURCE = os.environ.get("DATA_SOURCE", "tushare")  # only "tushare" for now
 DEFAULT_INDEX = os.environ.get("DEFAULT_INDEX", "399300.SZ")
 UNIVERSE_SIZE = int(os.environ.get("UNIVERSE_SIZE", "300"))
 
-# Optional explicit symbol list (tushare ts_code, e.g. "600519.SH"). Non-empty
-# => skip all universe-API calls entirely (recommended when your tushare token
-# has limited quota — the free tier rate-limits stock_basic / daily_basic to
-# 1 call / hour). The list below is 50 core 沪深300 blue-chips.
-# Set to [] to fall back to the market-cap screening via API.
-DEFAULT_SYMBOLS: list[str] = [
-    # 白酒
-    "600519.SH",  # 贵州茅台
-    "000858.SZ",  # 五粮液
-    "000568.SZ",  # 泸州老窖
-    "600809.SH",  # 山西汾酒
-    "600436.SH",  # 片仔癀
-    # 银行
-    "600036.SH",  # 招商银行
-    "601328.SH",  # 交通银行
-    "601166.SH",  # 兴业银行
-    "600016.SH",  # 民生银行
-    "601398.SH",  # 工商银行
-    "601939.SH",  # 建设银行
-    "600000.SH",  # 浦发银行
-    "000001.SZ",  # 平安银行
-    # 保险 / 金融
-    "601318.SH",  # 中国平安
-    "601628.SH",  # 中国人寿
-    "601601.SH",  # 中国太保
-    "600030.SH",  # 中信证券
-    "600837.SH",  # 海通证券
-    "600999.SH",  # 招商证券
-    # 消费 / 食品
-    "600887.SH",  # 伊利股份
-    "000333.SZ",  # 美的集团
-    "000651.SZ",  # 格力电器
-    # 新能源 / 汽车
-    "300750.SZ",  # 宁德时代
-    "002594.SZ",  # 比亚迪
-    "601012.SH",  # 隆基绿能
-    "600438.SH",  # 通威股份
-    "601633.SH",  # 长城汽车
-    # 医药 / 医疗
-    "600276.SH",  # 恒瑞医药
-    "300760.SZ",  # 迈瑞医疗
-    "603259.SH",  # 药明康德
-    # 科技 / 电子
-    "002415.SZ",  # 海康威视
-    "002230.SZ",  # 科大讯飞
-    "300059.SZ",  # 东方财富
-    # 地产 / 建筑
-    "000002.SZ",  # 万科A
-    "600048.SH",  # 保利发展
-    "601800.SH",  # 中国交建
-    "601390.SH",  # 中国中铁
-    "601669.SH",  # 中国电建
-    # 能源 / 化工
-    "601088.SH",  # 中国神华
-    "600309.SH",  # 万华化学
-    "000338.SZ",  # 潍柴动力
-    # 交通 / 物流
-    "600009.SH",  # 上海机场
-    "601888.SH",  # 中国中免
-    # 重工 / 机械
-    "600031.SH",  # 三一重工
-    # 通信
-    "600050.SH",  # 中国联通
-    # 零售 / 互联网
-    "603986.SH",  # 兆易创新
-    "300122.SZ",  # 智飞生物
-    "300124.SZ",  # 汇川技术
-    "600196.SH",  # 复星医药
-]
-
-# USE_SCREENING=1 empties the curated list above, so the universe is built by
-# whole-market market-cap screening (UNIVERSE_SIZE names). Use when you want a
-# wider cross-section than the curated 50 (price fetched per-stock via pro_bar,
-# which is not the rate-limited endpoint).
-if os.environ.get("USE_SCREENING", "0") == "1":
-    DEFAULT_SYMBOLS = []
+# Universe is always built by whole-market market-cap screening: rank all listed
+# stocks by total_mv at the backtest start date, take the largest UNIVERSE_SIZE,
+# excluding ST names and recent IPOs. Avoids survivorship bias and the narrow
+# cross-section problem of a curated 49-stock list (IC≈0 on that set).
+DEFAULT_SYMBOLS: list[str] = []
 
 # Date range for historical data (None = auto: ~5 years back to today).
 START_DATE = os.environ.get("START_DATE", None)  # YYYY-MM-DD
