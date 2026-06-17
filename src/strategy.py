@@ -25,20 +25,30 @@ import config as C
 
 
 def _long_topk(df: pd.DataFrame, pred: np.ndarray, ratio: float) -> np.ndarray:
-    """Long the top `ratio` fraction of predictions each day, equal weight.
+    """Long the top `ratio` fraction each day, weighted by prediction rank.
 
-    Positions are >= 0 (long-only), and sum to 1 within each date (fully
-    invested across the selected names). This is the tradeable A-share book.
+    Rank-proportional: within the selected stocks, weight ∝ (rank among selected)
+    so the highest-predicted stock gets the most weight. Sums to GROSS_LEVERAGE.
+    Captures more signal than equal-weight — stocks ranked #1 matter more.
     """
     tmp = pd.DataFrame({"date": df[C.DATE_COL].to_numpy(), "pred": pred})
-    # Per-date percentile rank; select the top `ratio`.
-    rank = tmp.groupby("date")["pred"].rank(pct=True, method="first")
-    selected = (rank > (1.0 - ratio)).to_numpy()
-    pos = selected.astype(np.float64)
-    # Normalize so each date's longs sum to GROSS_LEVERAGE (equal weight).
-    sums = pd.Series(pos).groupby(tmp["date"]).transform("sum").to_numpy()
-    pos = np.where(sums > 0, C.GROSS_LEVERAGE * pos / sums, 0.0)
-    return pos
+    rank_pct = tmp.groupby("date")["pred"].rank(pct=True, method="first")
+    selected = rank_pct > (1.0 - ratio)
+
+    # Within selected stocks: rank again 1..K, then weight proportionally
+    tmp["sel"] = selected
+    tmp["rank_pct"] = rank_pct
+    def _rank_weight(g):
+        sel = g["sel"]
+        if not sel.any():
+            return pd.Series(0.0, index=g.index)
+        w = g["rank_pct"].where(sel, 0.0)
+        total = w.sum()
+        return (C.GROSS_LEVERAGE * w / total) if total > 1e-12 else pd.Series(0.0, index=g.index)
+
+    pos = tmp.groupby("date", group_keys=False).apply(
+        _rank_weight, include_groups=False)
+    return np.asarray(pos.reindex(tmp.index), dtype=np.float64)
 
 
 def _tanh(pred: np.ndarray, scale: float) -> np.ndarray:

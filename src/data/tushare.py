@@ -257,3 +257,87 @@ class TushareConnector(DataConnector):
         allv = allv[(allv["date"] >= s) & (allv["date"] <= e)]
         return allv.reset_index(drop=True)
 
+
+    def fetch_financial_factors(self, symbols: list[str]) -> pd.DataFrame:
+        """Quarterly fundamental factors via akshare stock_financial_abstract (free).
+
+        Fetches ROE, revenue, net profit, gross margin per stock, applies a
+        point-in-time delay (announcement lag), derives YoY growth rates, and
+        forward-fills to daily frequency so it can be merged with the price panel.
+
+        Announcement delay (Chinese A-share rules):
+          Q1/Q3 reports: +31 days after period end
+          Semi-annual:   +62 days
+          Annual:        +120 days (usually released by April 30)
+        We use +62 days for all to stay conservative.
+
+        Returns long DataFrame: date, symbol, roe, gross_margin,
+                                 revenue_yoy, profit_yoy
+        """
+        import time
+        import akshare as ak
+
+        cache_dir = os.path.join(C.CACHE_DIR, "akshare_financial")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        METRICS = {
+            "净资产收益率(ROE)":  "roe",
+            "毛利率":            "gross_margin",
+            "归母净利润":        "net_profit",
+            "营业总收入":        "revenue",
+        }
+
+        frames = []
+        n = len(symbols)
+        for i, ts_code in enumerate(symbols):
+            code = ts_code.split(".")[0]
+            cache = os.path.join(cache_dir, f"fin_{code}.parquet")
+            if os.path.exists(cache):
+                df = pd.read_parquet(cache)
+            else:
+                try:
+                    raw = ak.stock_financial_abstract(symbol=code)
+                    if raw is None or raw.empty:
+                        continue
+                    # keep only needed rows
+                    raw = raw[raw["指标"].isin(METRICS)].copy()
+                    # melt: (metric × period) → long
+                    period_cols = [c for c in raw.columns if c.isdigit() and len(c) == 8]
+                    melted = raw.melt(id_vars=["指标"], value_vars=period_cols,
+                                      var_name="period", value_name="value")
+                    melted["metric"] = melted["指标"].map(METRICS)
+                    melted["value"] = pd.to_numeric(melted["value"], errors="coerce")
+                    melted = melted.dropna(subset=["value"])
+                    # pivot: one column per metric
+                    piv = (melted.pivot_table(index="period", columns="metric",
+                                              values="value", aggfunc="first")
+                                 .reset_index())
+                    piv["period_dt"] = pd.to_datetime(piv["period"], format="%Y%m%d")
+                    # announcement delay: 62 days for all quarters
+                    piv["date"] = piv["period_dt"] + pd.Timedelta(days=62)
+                    piv = piv.sort_values("date")
+                    # YoY growth (4 rows back = same quarter last year)
+                    for col in ("net_profit", "revenue"):
+                        if col in piv.columns:
+                            prior = piv[col].shift(4)
+                            piv[f"{col}_yoy"] = (piv[col] - prior) / prior.abs().clip(lower=1e-9)
+                    piv["symbol"] = ts_code
+                    keep = ["date", "symbol", "roe", "gross_margin",
+                            "revenue_yoy", "profit_yoy"]
+                    if "net_profit_yoy" in piv.columns:
+                        piv = piv.rename(columns={"net_profit_yoy": "profit_yoy",
+                                                  "revenue_yoy": "revenue_yoy"})
+                    df = piv[[c for c in keep if c in piv.columns]].copy()
+                    df.to_parquet(cache, index=False)
+                    time.sleep(0.5)
+                except Exception as ex:
+                    print(f"  [{i+1}/{n}] {ts_code} 财务数据失败: {str(ex)[:60]}")
+                    continue
+            frames.append(df)
+            if (i + 1) % 20 == 0 or i + 1 == n:
+                print(f"  财务因子: {i+1}/{n}")
+
+        if not frames:
+            print("  ⚠️ 未获取到任何财务数据")
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)

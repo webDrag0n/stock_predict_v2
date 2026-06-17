@@ -250,6 +250,28 @@ def add_factor_regime_features(df: pd.DataFrame, factors: list[str] = None,
     return df
 
 
+def merge_financial_factors(df: pd.DataFrame, fin: pd.DataFrame) -> pd.DataFrame:
+    """Point-in-time merge of quarterly financial factors onto the daily panel.
+
+    Uses merge_asof (backward per symbol): each trading day sees only the most
+    recent quarterly report whose announcement date has already passed.
+    Adds: roe, gross_margin, revenue_yoy, profit_yoy (+ cross-sectional ranks).
+    """
+    if fin is None or fin.empty:
+        return df
+    df = df.sort_values("date").reset_index(drop=True)
+    fin = fin.sort_values(["symbol", "date"]).reset_index(drop=True)
+    df["date"] = pd.to_datetime(df["date"]).astype("datetime64[us]")
+    fin["date"] = pd.to_datetime(fin["date"]).astype("datetime64[us]")
+    fin = fin.sort_values("date")   # merge_asof needs global sort on key
+
+    merged = pd.merge_asof(df, fin, on="date", by="symbol", direction="backward")
+    for col in ("roe", "gross_margin", "revenue_yoy", "profit_yoy"):
+        if col in merged.columns:
+            merged[f"{col}_rank"] = merged.groupby("date")[col].rank(pct=True)
+    return merged
+
+
 def add_industry_features(df: pd.DataFrame, industry_map: dict) -> pd.DataFrame:
     """Add industry column + P0a neutralized features + P1 composite + P2 momentum.
 
@@ -348,6 +370,7 @@ def transform_to_jane_street_format(df: pd.DataFrame) -> pd.DataFrame:
     exclude_cols = ["date", "symbol", "open", "high", "low", "close", "volume",
                     "turnover_rate", "volume_ratio", "pct_chg", "industry",
                     "snap_date", "pe_ttm", "pb", "ps_ttm", "total_mv", "circ_mv",
+                    "net_profit", "revenue",   # raw financials; keep yoy/rank versions
                     "date_id", "time_id", "symbol_id", "responder_6", "weight",
                     "future_close"] + [c for c in df.columns
                                        if c.startswith("ma_")
@@ -430,11 +453,15 @@ def load_data(
     if C.USE_FUNDAMENTALS and hasattr(connector, "fetch_fundamentals"):
         fund = connector.fetch_fundamentals(start_date, end_date, C.FUND_SAMPLE_DAYS)
         df = merge_fundamentals(df, fund)
+    if C.USE_FINANCIAL_FACTORS and hasattr(connector, "fetch_financial_factors"):
+        fin = connector.fetch_financial_factors(symbols)
+        df = merge_financial_factors(df, fin)
     if C.INDUSTRY_NEUTRAL and hasattr(connector, "get_industry_map"):
         df = add_industry_features(df, connector.get_industry_map())
     df = prepare_target_and_weight(df, forward_window=C.FORWARD_WINDOW,
                                    market_neutral_target=C.MARKET_NEUTRAL_TARGET)
-    df = add_factor_regime_features(df)   # Method C: rolling IC, after target exists
+    if C.REGIME_IC_FEATURES:
+        df = add_factor_regime_features(df)
     df = transform_to_jane_street_format(df)
     df = reduce_mem_usage(df, float16_as32=False)
     df.to_parquet(processed_cache, index=False)
@@ -487,15 +514,20 @@ def load_factor_panel(
     if C.USE_FUNDAMENTALS and hasattr(connector, "fetch_fundamentals"):
         fund = connector.fetch_fundamentals(start_date, end_date, C.FUND_SAMPLE_DAYS)
         df = merge_fundamentals(df, fund)
+    if C.USE_FINANCIAL_FACTORS and hasattr(connector, "fetch_financial_factors"):
+        fin = connector.fetch_financial_factors(symbols)
+        df = merge_financial_factors(df, fin)
     if C.INDUSTRY_NEUTRAL and hasattr(connector, "get_industry_map"):
         df = add_industry_features(df, connector.get_industry_map())
     df = prepare_target_and_weight(df, forward_window=C.FORWARD_WINDOW,
                                    market_neutral_target=C.MARKET_NEUTRAL_TARGET)
-    df = add_factor_regime_features(df)   # Method C: rolling IC, after target exists
+    if C.REGIME_IC_FEATURES:
+        df = add_factor_regime_features(df)
     # Keep named factors: drop raw OHLCV, intermediates, and categorical industry label.
     drop = {"open", "high", "low", "close", "volume", "future_close",
             "weight", "log_return", "snap_date", "industry",
-            "pe_ttm", "pb", "ps_ttm", "total_mv", "circ_mv"}
+            "pe_ttm", "pb", "ps_ttm", "total_mv", "circ_mv",
+            "net_profit", "revenue"}
     drop |= {c for c in df.columns if c.startswith("ma_")
              or c.startswith("bb_upper") or c.startswith("bb_lower")}
     keep = [c for c in df.columns if c not in drop]

@@ -154,6 +154,7 @@ MARKET_NEUTRAL_TARGET = os.environ.get("MARKET_NEUTRAL_TARGET", "1") == "1"
 # rate-limited to 1 call/min on the free tier, so the first build is slow
 # (~1 snapshot/min) but fully cached afterwards. Set to "0" to skip.
 USE_FUNDAMENTALS = os.environ.get("USE_FUNDAMENTALS", "1") == "1"
+USE_FINANCIAL_FACTORS = os.environ.get("USE_FINANCIAL_FACTORS", "1") == "1"
 FUND_SAMPLE_DAYS = int(os.environ.get("FUND_SAMPLE_DAYS", "21"))  # snapshot interval
 
 
@@ -194,6 +195,11 @@ WF_STEP = int(os.environ.get("WF_STEP", str(TEST_WINDOW)))
 # industry-internal excess return (forward return minus the same-day industry
 # mean) rather than the universe mean. Requires industry labels from stock_basic.
 INDUSTRY_NEUTRAL = os.environ.get("INDUSTRY_NEUTRAL", "1") == "1"
+
+# Rolling IC meta-features (Method C). Disabled by default: IC at test dates
+# uses forward returns inside the test window (subtle look-ahead). Safe to re-
+# enable only when computing IC from training dates exclusively (see walkforward).
+REGIME_IC_FEATURES = os.environ.get("REGIME_IC_FEATURES", "0") == "1"
 
 # --- Strategy --------------------------------------------------------------
 # Default tradeable strategy for A-share retail: long the top-K% names.
