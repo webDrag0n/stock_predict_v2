@@ -1,0 +1,7 @@
+# Factor Library — Top-level configuration
+# This file is optional. Defaults apply when absent.
+
+schema_version: 1
+default_enabled: true
+
+# exclude_ids: []  # Factor IDs to globally disable (comma list in YAML)

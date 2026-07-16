@@ -1,0 +1,60 @@
+# === Volume & Liquidity Factors ===
+
+factors:
+
+  - id: vol_ratio_5
+    name: "5-day Volume Ratio"
+    description: >
+      Today's volume divided by the 5-day moving average of volume.
+      High values indicate abnormal interest; low values indicate
+      quiet accumulation or disinterest.
+    category: volume
+    source: custom
+    formula: "safe_div(volume, ts_mean(volume, 5))"
+    tags: [volume, ratio, short-term]
+    expected_sign: 1
+
+  - id: vol_ratio_20
+    name: "20-day Volume Ratio"
+    description: >
+      Volume relative to 20-day average. Longer look-back reduces
+      false signals from single-day spikes.
+    category: volume
+    source: custom
+    formula: "safe_div(volume, ts_mean(volume, 20))"
+    tags: [volume, ratio, medium-term]
+    expected_sign: 0
+
+  - id: vol_change_5
+    name: "5-day Volume Change"
+    description: >
+      Relative change in volume over 5 days.
+    category: volume
+    source: custom
+    formula: "safe_div(ts_delta(volume, 5), ts_delay(volume, 5) + 0.01)"
+    tags: [volume, change]
+    expected_sign: 0
+
+  - id: amihud_simple
+    name: "Simple Amihud Illiquidity (Daily)"
+    description: >
+      Absolute daily return divided by dollar volume. Daily
+      approximation of the classic Amihud (2002) illiquidity measure.
+      Higher = less liquid.  Unlike the native amihud_20 this is
+      a daily snapshot, not a 20-day average.
+    category: liquidity
+    source: "Amihud (2002), simplified daily variant"
+    formula: "safe_div(abs(return_1d), volume * close * 100 + 1)"
+    tags: [liquidity, illiquidity, amihud]
+    expected_sign: -1
+
+  - id: turnover_intensity
+    name: "Turnover Intensity"
+    description: >
+      Turnover rate divided by its 20-day average. Signals whether
+      current trading activity is elevated relative to recent norms.
+    category: volume
+    source: custom
+    formula: "safe_div(turnover_rate, ts_mean(turnover_rate, 20) + 0.001)"
+    tags: [turnover, intensity]
+    expected_sign: 1

@@ -1,0 +1,42 @@
+# === GTJA191 Alpha Factors (ported from Python to formula) ===
+# These reproduce selected native gtja191 alphas as formula definitions.
+# Used to validate consistency between the native Python and YAML paths.
+
+factors:
+
+  - id: gtja_alpha001_formula
+    name: "[Formula] GTJA Alpha001 — Volume-Reversal Correlation"
+    description: >
+      Negative correlation between the rank of 1-day log-volume change
+      and the rank of intraday return (close-open)/open, over 6 days.
+      Original DolphinDB: -1*CORR(RANK(DELTA(LOG(VOLUME),1)),RANK((CLOSE-OPEN)/OPEN),6)
+    category: gtja191
+    source: "Guotai Junan 191 Alpha Factors"
+    formula: "-ts_corr(cs_rank(ts_delta(log(volume), 1)), cs_rank((close - open) / open), 6)"
+    tags: [gtja191, volume, reversal, correlation, short-term]
+    expected_sign: -1
+
+  - id: gtja_alpha041_formula
+    name: "[Formula] GTJA Alpha041 — Price-VWAP Deviation"
+    description: >
+      Rank of the signed cube of (close - VWAP). Penalises large
+      deviations from the volume-weighted average price.
+      Original: RANK(SIGNED_POWER(CLOSE-VWAP, 3))
+      VWAP is proxied by amount/volume when available.
+    category: gtja191
+    source: "Guotai Junan 191 Alpha Factors"
+    formula: "cs_rank(signed_power(close - safe_div(amount, volume), 3))"
+    tags: [gtja191, price, vwap, power]
+    expected_sign: -1
+
+  - id: gtja_alpha020_formula
+    name: "[Formula] GTJA Alpha020 — Opening Gap Reversal"
+    description: >
+      Negative rank product of opening gap vs prior high, opening
+      gap vs prior close, and volume change. Captures overnight
+      gap fade with volume confirmation.
+    category: gtja191
+    source: "Guotai Junan 191 Alpha Factors"
+    formula: "-cs_rank(open - ts_delay(high, 1)) * cs_rank(open - ts_delay(close, 1)) * cs_rank(ts_delta(volume, 1))"
+    tags: [gtja191, reversal, gap, volume]
+    expected_sign: -1

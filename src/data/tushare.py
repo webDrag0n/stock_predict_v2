@@ -39,22 +39,24 @@ class TushareConnector(DataConnector):
     def get_universe(self, index_code: str,
                      start_date: str | None = None,
                      end_date: str | None = None) -> list[str]:
-        """Return the stock universe via whole-market market-cap screening.
+        """Return the stock universe via whole-market quality screening.
 
         This token tier cannot access any index-constituent API
-        (index_weight / index_member_all / hs_const all require 2000+ points),
-        so instead of literal CSI-300 membership we approximate a large-cap
-        universe: rank the entire market by total market value on a trade day
-        *near the backtest start* and keep the top ``C.UNIVERSE_SIZE`` names.
+        (index_weight / index_member_all / hs_const all require 2000+ points).
+        With UNIVERSE_SIZE=0 (default) the function returns the whole tradable
+        market after quality filters. A positive UNIVERSE_SIZE is deprecated:
+        small fixed pools (e.g. 300 large caps) destroy cross-sectional
+        correlation and produce unstable OOS alpha.
 
-        Anchoring the ranking at the START of the window (not the end) avoids
-        look-ahead bias — we only use information available at backtest open.
         ST / *ST names and recently-listed stocks (< 1y before the anchor) are
         filtered out. ``index_code`` is accepted for API compatibility but the
-        selection is purely cap-based.
+        selection is purely quality-based.
         """
         anchor = (start_date or C.START_DATE or "").replace("-", "")
-        return self._screen_by_mktcap(anchor, C.UNIVERSE_SIZE)
+        size = getattr(C, "UNIVERSE_SIZE", 0)
+        if size == 0:
+            return self._screen_by_mktcap(anchor, top_n=0)
+        return self._screen_by_mktcap(anchor, size)
 
     def _screen_by_mktcap(self, anchor_date: str, top_n: int) -> list[str]:
         """Top-N large-cap stocks using stock_basic heuristics.
@@ -63,6 +65,7 @@ class TushareConnector(DataConnector):
         Fallback (rate-limited or insufficient points): sort by list_date
         ascending — longest-listed companies in the main board are typically
         large-cap. Either way, ST names and IPOs < 1y before anchor are excluded.
+        When ``top_n`` is 0, return all filtered stocks (whole market).
         """
         cache_key = f"screen_{anchor_date or 'latest'}_{top_n}"
         if cache_key in self._universe_cache:
@@ -111,10 +114,11 @@ class TushareConnector(DataConnector):
             sb = sb.sort_values("list_date")
             print(f"  daily_basic 不可用，改用上市年龄排序（近似大盘股）")
 
-        members = sb.head(top_n)["ts_code"].tolist()
+        members = sb["ts_code"].tolist() if top_n == 0 else sb.head(top_n)["ts_code"].tolist()
         if not members:
             raise ValueError("市值筛选后股票池为空，请检查 token 与网络")
-        print(f"  股票池: 主板 {'市值' if mktcap_ok else '上市年龄'} 前 {len(members)} 只"
+        label = "全部" if top_n == 0 else f"前 {len(members)}"
+        print(f"  股票池: 主板 {'市值' if mktcap_ok else '上市年龄'} {label} 只"
               f"（剔除ST/次新）")
         pd.DataFrame({"ts_code": members}).to_parquet(cache, index=False)
         self._universe_cache[cache_key] = members
@@ -125,8 +129,8 @@ class TushareConnector(DataConnector):
         """Fetch one symbol's qfq daily bars from pro_bar (cached).
 
         We do NOT call daily_basic per-symbol — it is rate-limited to 1/hour on
-        the free tier, making 300-stock × multi-year fetches impossible.
-        pct_chg comes from pro_bar directly and is used for the limit-flag feature.
+        the free tier, making per-symbol fundamental fetches at market scale
+        infeasible. pct_chg comes from pro_bar directly.
         """
         key = f"{ts_code}_{start}_{end}".replace("-", "")
         cache = os.path.join(self._cache_dir, f"bar_{key}.parquet")
@@ -193,6 +197,152 @@ class TushareConnector(DataConnector):
         if not frames:
             raise ValueError("所有股票均未获取到数据，请检查 token 与网络")
         return pd.concat(frames, ignore_index=True)
+
+    # -- whole-market by-date fetch -----------------------------------------
+    def _find_cached_trade_dates(self, start: str, end: str) -> list[str] | None:
+        """Return cached trading dates covering [start, end] if one exists."""
+        import re
+        start_i = int(start.replace("-", ""))
+        end_i = int(end.replace("-", ""))
+        best = None
+        best_score = -1
+        for f in os.listdir(self._cache_dir):
+            m = re.match(r"tradecal_(\d{8})_(\d{8})\.parquet$", f)
+            if not m:
+                continue
+            cs, ce = int(m.group(1)), int(m.group(2))
+            if cs <= start_i and ce >= end_i:
+                # Prefer the narrowest calendar that still covers the range.
+                score = -(ce - cs)
+                if score > best_score:
+                    best_score = score
+                    best = os.path.join(self._cache_dir, f)
+        if best is None:
+            return None
+        df = pd.read_parquet(best)
+        if "cal_date" not in df.columns:
+            return None
+        dates = sorted(df["cal_date"].astype(str).tolist())
+        return [d for d in dates if start_i <= int(d) <= end_i]
+
+    def _trade_dates_from_daily_cache(self, start: str, end: str) -> list[str] | None:
+        """Derive trading dates from already cached daily_*.parquet files.
+
+        This avoids the tushare trade_cal API entirely when we have already
+        fetched whole-market daily bars. Returns dates in [start, end] (YYYYMMDD).
+        """
+        import re
+        start_i = int(start.replace("-", ""))
+        end_i = int(end.replace("-", ""))
+        dates = []
+        for f in os.listdir(self._cache_dir):
+            m = re.match(r"daily_(\d{8})\.parquet$", f)
+            if not m:
+                continue
+            d = int(m.group(1))
+            if start_i <= d <= end_i:
+                dates.append(str(d))
+        return sorted(dates) if dates else None
+
+    def _trade_dates(self, start: str, end: str) -> list[str]:
+        """Trading-calendar dates in [start, end] (YYYYMMDD). Cached.
+
+        Avoids calling the tushare trade_cal API wherever possible because the
+        free tier is limited to 1 call/hour. We first look for an already cached
+        calendar that covers the requested range, then derive from existing daily
+        bar caches, and only fall back to the API as a last resort.
+        """
+        s, e = start.replace("-", ""), end.replace("-", "")
+        cache = os.path.join(self._cache_dir, f"tradecal_{s}_{e}.parquet")
+        if os.path.exists(cache):
+            df = pd.read_parquet(cache)
+            if "cal_date" in df.columns:
+                return sorted(df["cal_date"].astype(str).tolist())
+
+        cached = self._find_cached_trade_dates(s, e)
+        if cached is not None:
+            pd.DataFrame({"cal_date": cached}).to_parquet(cache, index=False)
+            return cached
+
+        derived = self._trade_dates_from_daily_cache(s, e)
+        if derived is not None:
+            pd.DataFrame({"cal_date": derived}).to_parquet(cache, index=False)
+            return derived
+
+        cal = self._pro.trade_cal(exchange="SSE", start_date=s, end_date=e,
+                                  is_open="1", fields="cal_date")
+        if cal is None or cal.empty or "cal_date" not in cal.columns:
+            raise RuntimeError(
+                f"无法获取交易日历 ({s}~{e})。tushare trade_cal 接口受限或返回为空；"
+                "请检查 token 权限，或手动提供交易日历缓存。")
+        dates = sorted(cal["cal_date"].astype(str).tolist())
+        pd.DataFrame({"cal_date": dates}).to_parquet(cache, index=False)
+        return dates
+
+    def _fetch_one_date(self, trade_date: str) -> pd.DataFrame:
+        """All stocks' daily bars for one trading date (1 API call, cached).
+
+        Uses daily(trade_date=) — returns the whole market in a single call
+        (~5500 rows / 0.3s), the only feasible way to fetch whole-market history
+        without 5000+ per-symbol calls. adj=None (raw price), consistent with
+        _fetch_one; ratio-based factors are scale-invariant.
+        """
+        cache = os.path.join(self._cache_dir, f"daily_{trade_date}.parquet")
+        if os.path.exists(cache):
+            return pd.read_parquet(cache)
+        bars = self._pro.daily(trade_date=trade_date)
+        if bars is None or bars.empty:
+            return pd.DataFrame()
+        out = pd.DataFrame({
+            "date":   pd.to_datetime(bars["trade_date"], format="%Y%m%d"),
+            "symbol": bars["ts_code"],
+            "open":   bars["open"],
+            "high":   bars["high"],
+            "low":    bars["low"],
+            "close":  bars["close"],
+            "volume": bars["vol"],
+            "amount": bars["amount"],     # 成交额(千元) — for liquidity filter
+            "pct_chg": bars["pct_chg"],
+        })
+        out.to_parquet(cache, index=False)
+        return out
+
+    def fetch_ohlcv_whole_market(self, start_date: str, end_date: str,
+                                 symbols: list[str] | None = None) -> pd.DataFrame:
+        """Whole-market daily bars via per-date fetch (1 call/trading-day).
+
+        The efficient path for the entire A-share market: instead of N per-symbol
+        calls, iterate the trading calendar and pull every stock for each date in
+        one call. Per-date parquet cache → incremental daily updates cost 1 call.
+        If `symbols` is given, the result is filtered to those codes (but the
+        fetch still pulls the whole market per date, which is cached for reuse).
+        """
+        import time
+        dates = self._trade_dates(start_date, end_date)
+        n = len(dates)
+        frames = []
+        n_calls = 0
+        for i, d in enumerate(dates):
+            cached = os.path.exists(os.path.join(self._cache_dir, f"daily_{d}.parquet"))
+            try:
+                df = self._fetch_one_date(d)
+                if not df.empty:
+                    frames.append(df)
+                if not cached:
+                    n_calls += 1
+                    time.sleep(0.32)        # ~190 req/min, under the 200/min cap
+                if (i + 1) % 50 == 0 or i + 1 == n:
+                    print(f"  全市场按日拉取 {i+1}/{n} 个交易日"
+                          f"（新增API调用 {n_calls}）")
+            except Exception as ex:
+                print(f"  [{i+1}/{n}] {d}: 获取失败 {str(ex)[:80]}")
+                time.sleep(1.0)
+        if not frames:
+            raise ValueError("全市场按日拉取无数据，请检查 token 与网络")
+        out = pd.concat(frames, ignore_index=True)
+        if symbols is not None:
+            out = out[out["symbol"].isin(set(symbols))].reset_index(drop=True)
+        return out
 
     # -- fundamentals (valuation factors) -----------------------------------
     def fetch_fundamentals(self, start_date: str, end_date: str,

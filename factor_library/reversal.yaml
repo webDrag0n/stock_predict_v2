@@ -1,0 +1,65 @@
+# === Reversal & Over-reaction Factors ===
+
+factors:
+
+  - id: reversal_5d
+    name: "5-day Short-Term Reversal"
+    description: >
+      Negative of 5-day return. Classic short-term reversal: stocks
+      that dropped recently tend to bounce, and vice versa (Jegadeesh
+      1990). Expects negative correlation with forward returns in
+      A-shares (where retail-driven reversal is strong).
+    category: reversal
+    source: "Jegadeesh (1990) — short-term reversal"
+    formula: "-(adj_close / ts_delay(adj_close, 5) - 1)"
+    tags: [reversal, short-term, contrarian]
+    expected_sign: 1
+
+  - id: reversal_20d
+    name: "20-day Medium-Term Reversal"
+    description: >
+      Negative of 20-day return. Medium-term reversal often
+      dominates in A-shares due to retail over-reaction cycles.
+    category: reversal
+    source: custom
+    formula: "-(adj_close / ts_delay(adj_close, 20) - 1)"
+    tags: [reversal, medium-term, contrarian]
+    expected_sign: 1
+
+  - id: gap_reversal
+    name: "Overnight Gap Reversal"
+    description: >
+      Negative of (open - yesterday close) / yesterday close.
+      Measures overnight gap. In A-shares, large gaps often
+      partially revert during the session.
+    category: reversal
+    source: custom
+    formula: "-safe_div(open - ts_delay(close, 1), ts_delay(close, 1) + 0.01)"
+    tags: [reversal, gap, overnight]
+    expected_sign: 1
+
+  - id: intraday_reversal
+    name: "Intraday Reversal"
+    description: >
+      Negative of (close - open) / open. The intraday return.
+      Negative sign means: strong intraday rallies tend to reverse
+      tomorrow (and vice versa).
+    category: reversal
+    source: custom
+    formula: "-(close - open) / open"
+    tags: [reversal, intraday]
+    expected_sign: 1
+
+  - id: extreme_reversal
+    name: "Extreme Return Reversal"
+    description: >
+      Signed square of the 5-day return — penalises extreme moves in
+      either direction (losses get negative, gains get positive, but
+      the squared magnitude amplifies extremes).  Combined with the
+      negative sign of the raw return, this amplifies the reversal
+      signal for large moves.
+    category: reversal
+    source: custom
+    formula: "-signed_power(adj_close / ts_delay(adj_close, 5) - 1, 2)"
+    tags: [reversal, extreme, power]
+    expected_sign: 1

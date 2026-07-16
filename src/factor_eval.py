@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+import os
 import pandas as pd
 from scipy import stats
 
@@ -66,6 +67,35 @@ class FactorReport:
             and self.monotonicity >= GATE_MONOTONIC
         )
         return self
+
+
+def _windows(dates: np.ndarray):
+    """复刻 walkforward.run_walkforward 的窗口切分,逐个 yield (tr_dates, te_dates)。
+
+    供诊断/优化脚本复用，保证所有脚本的窗口切分与主回测完全一致。
+    """
+    train_w, test_w = C.TRAIN_WINDOW, C.TEST_WINDOW
+    step, embargo = C.WF_STEP, C.EMBARGO_DAYS
+    n = len(dates)
+    start = train_w + embargo
+    win_id = 0
+    while start + test_w <= n:
+        tr = dates[start - embargo - train_w: start - embargo]
+        te = dates[start: start + test_w]
+        yield win_id, tr, te
+        start += step
+        win_id += 1
+
+
+def _daily_rank_ic(sub: pd.DataFrame, factor: str, target: str) -> pd.Series:
+    """sub 内每个截面日的 Spearman RankIC 序列(防泄露由调用方保证:sub=OOS段)。"""
+    def _one(g):
+        x, y = g[factor], g[target]
+        m = x.notna() & y.notna()
+        if m.sum() < 5 or x[m].nunique() < 2 or y[m].nunique() < 2:
+            return np.nan
+        return stats.spearmanr(x[m], y[m]).correlation
+    return sub.groupby("date", group_keys=False).apply(_one, include_groups=False)
 
 
 def _winsorize(s: pd.Series, lower: float = 0.01, upper: float = 0.99) -> pd.Series:
@@ -199,19 +229,58 @@ def evaluate_factor(panel: pd.DataFrame, factor: str, target: str = None,
 
 
 def evaluate_panel(panel: pd.DataFrame, factors: list[str] = None,
-                   target: str = None, n_layers: int = 5) -> pd.DataFrame:
-    """评估面板中所有因子，返回按 |RankICIR| 排序的汇总表。"""
+                   target: str = None, n_layers: int = 5,
+                   n_jobs: int = -1, verbose: bool = True,
+                   chunk_size: int = 16) -> pd.DataFrame:
+    """评估面板中所有因子，返回按 |RankICIR| 排序的汇总表。
+
+    全市场面板的因子评估是 CPU 密集且可并行的：每个因子独立计算，因此对
+    每个因子只保留 [date, symbol, factor, target] 四列后交给 joblib 并行处理，
+    避免把整个大 panel 拷给每个 worker。为避免一次性构造全部任务子集导致内存
+    峰值过高，按 ``chunk_size`` 分批构造并执行。
+    """
     from data import list_factor_columns
+    from joblib import Parallel, delayed
+
     factors = factors or list_factor_columns(panel)
-    rows = []
-    for f in factors:
-        if panel[f].notna().sum() < 100 or panel[f].nunique() < 5:
-            continue
+    target = target or C.TARGET
+    needed = ["date", "symbol", target]
+
+    # Pre-filter and count; avoid building all subsets at once.
+    valid_factors = [f for f in factors
+                     if panel[f].notna().sum() >= 100 and panel[f].nunique() >= 5]
+    if not valid_factors:
+        return pd.DataFrame()
+
+    n_workers = n_jobs if n_jobs > 0 else max(1, os.cpu_count() - 1)
+    # Cap workers to limit memory pressure; each worker gets a ~150 MB subset.
+    n_workers = min(n_workers, 4)
+    if verbose:
+        print(f"  评估 {len(valid_factors)} 个因子 (workers={n_workers}, chunk={chunk_size})...")
+
+    def _eval_one(name_sub):
+        name, sub = name_sub
         try:
-            r = evaluate_factor(panel, f, target=target, n_layers=n_layers)
-            rows.append(r)
+            return evaluate_factor(sub, factor=name, target=target,
+                                   n_layers=n_layers)
         except Exception as ex:
-            print(f"  因子 {f} 评估失败: {ex}")
+            if verbose:
+                print(f"  因子 {name} 评估失败: {ex}")
+            return None
+
+    rows = []
+    n_chunks = (len(valid_factors) + chunk_size - 1) // chunk_size
+    for i in range(n_chunks):
+        chunk_factors = valid_factors[i * chunk_size:(i + 1) * chunk_size]
+        if verbose:
+            print(f"  chunk {i + 1}/{n_chunks}: {len(chunk_factors)} 个因子")
+        chunk = [(f, panel[needed + [f]].copy()) for f in chunk_factors]
+        results = Parallel(n_jobs=n_workers, return_as="list", verbose=0)(
+            delayed(_eval_one)(t) for t in chunk
+        )
+        rows.extend([r for r in results if r is not None])
+        del chunk
+
     if not rows:
         return pd.DataFrame()
     table = pd.DataFrame([{
@@ -228,7 +297,6 @@ def evaluate_panel(panel: pd.DataFrame, factors: list[str] = None,
         "换手": r.turnover,
         "准入": "✓" if r.passed else "",
     } for r in rows])
-    # 按显著性（|IC_t|）排序——小横截面下这是最可靠的强弱指标
     table["_abs"] = table["IC_t"].abs()
     table = table.sort_values("_abs", ascending=False).drop(columns="_abs")
     return table.reset_index(drop=True)

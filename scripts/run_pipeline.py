@@ -24,7 +24,9 @@ import sys
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _PROJECT_ROOT)
+sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src"))
 
 import config as C
 from data import load_data, split_dates

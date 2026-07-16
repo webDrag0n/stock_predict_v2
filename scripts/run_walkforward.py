@@ -18,7 +18,9 @@ import sys
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _PROJECT_ROOT)
+sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src"))
 
 import config as C
 from data import load_factor_panel, list_factor_columns
@@ -37,6 +39,16 @@ def _summarize(tag: str, res: dict) -> None:
           f"为正窗口={int((wm['Sharpe']>0).sum())}/{len(wm)}")
     print(f"  PnL:    均值={wm['PnL'].mean():+.4f} 为正窗口={int((wm['PnL']>0).sum())}/{len(wm)}")
     print(f"  胜率:   均值={wm['hit'].mean():.1%}")
+    if "pred_ic" in m and m["pred_ic"] == m["pred_ic"]:
+        wmean = (wm["PredIC"].mean() if "PredIC" in wm else float("nan"))
+        npos = int((wm["PredIC"] > 0).sum()) if "PredIC" in wm else 0
+        print(f"  预测OOS IC（精度核心指标）: 连续={m['pred_ic']:+.4f} "
+              f"ICIR={m['pred_icir']:+.3f} | 各窗口均值={wmean:+.4f} "
+              f"为正窗口={npos}/{len(wm)}")
+    if "mean_price_rmse" in m and m["mean_price_rmse"] == m["mean_price_rmse"]:
+        print(f"  预测价格RMSE: 连续OOS均值=¥{m['mean_price_rmse']:.4f}"
+              + (f" | 各窗口均值=¥{wm['PriceRMSE'].mean():.4f}"
+                 if "PriceRMSE" in wm else ""))
 
 
 def main() -> None:
@@ -50,7 +62,7 @@ def main() -> None:
 
     os.makedirs(C.OUTPUT_DIR, exist_ok=True)
     print("加载命名因子面板...")
-    panel = load_factor_panel()
+    panel = load_factor_panel(keep_price=True)
     factors = list_factor_columns(panel)
     print(f"候选因子 {len(factors)} 个 | 训练窗口 {C.TRAIN_WINDOW} | "
           f"测试窗口 {C.TEST_WINDOW} | embargo {C.EMBARGO_DAYS} | step {C.WF_STEP}\n")
@@ -71,7 +83,8 @@ def main() -> None:
         _summarize(tag, res)
         safe = "selected" if sel else "allfeat"
         fig = plot_results(res["oos_result"]["curve"], res["oos_result"]["metrics"],
-                           os.path.join(C.OUTPUT_DIR, f"walkforward_{safe}.png"))
+                           os.path.join(C.OUTPUT_DIR, f"walkforward_{safe}.png"),
+                           rmse_curve=res["oos_result"].get("rmse_curve"))
         dash = plot_dashboard(res, os.path.join(C.OUTPUT_DIR, f"dashboard_{safe}.png"),
                               tag=tag)
         res["window_metrics"].to_csv(

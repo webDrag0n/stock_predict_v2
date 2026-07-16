@@ -1,0 +1,82 @@
+# === Price Momentum Factors ===
+# All momentum variants — raw, volatility-adjusted, spread
+
+factors:
+
+  - id: mom_5d_raw
+    name: "5-day Raw Momentum"
+    description: >
+      Simple price momentum: close 5 trading days ago vs today.
+      Pure unadjusted measure, suitable as a building block for
+      more complex factors.
+    category: momentum
+    source: custom
+    formula: "adj_close / ts_delay(adj_close, 5) - 1"
+    tags: [momentum, short-term, price]
+    expected_sign: 1
+
+  - id: mom_20d_raw
+    name: "20-day Raw Momentum"
+    description: >
+      Medium-term price momentum: close 20 trading days ago vs today.
+      Most commonly used momentum horizon in A-share literature.
+    category: momentum
+    source: custom
+    formula: "adj_close / ts_delay(adj_close, 20) - 1"
+    tags: [momentum, medium-term, price]
+    expected_sign: 1
+
+  - id: mom_60d_raw
+    name: "60-day Raw Momentum"
+    description: >
+      Long-term price momentum. Often exhibits reversal or very weak
+      continuation in A-shares depending on the regime.
+    category: momentum
+    source: custom
+    formula: "adj_close / ts_delay(adj_close, 60) - 1"
+    tags: [momentum, long-term, price]
+    expected_sign: 1
+
+  - id: vol_adj_mom_5
+    name: "5-day Volatility-Adjusted Momentum"
+    description: >
+      Momentum scaled by trailing volatility. Higher Sharpe-ratio-like
+      measure that penalises high-volatility moves.
+    category: momentum
+    source: custom
+    formula: "safe_div(adj_close / ts_delay(adj_close, 5) - 1, volatility_20 + 0.005)"
+    tags: [momentum, volatility-adjusted, short-term]
+    expected_sign: 1
+
+  - id: vol_adj_mom_20
+    name: "20-day Volatility-Adjusted Momentum"
+    description: >
+      Medium-term momentum scaled by 20-day trailing volatility.
+    category: momentum
+    source: custom
+    formula: "safe_div(adj_close / ts_delay(adj_close, 20) - 1, volatility_20 + 0.005)"
+    tags: [momentum, volatility-adjusted, medium-term]
+    expected_sign: 1
+
+  - id: mom_spread_5_20
+    name: "5-vs-20 Day Momentum Spread"
+    description: >
+      Short-term minus medium-term momentum. Captures acceleration /
+      deceleration of the trend. Positive when recent momentum is
+      stronger than the medium-term trend.
+    category: momentum
+    source: custom
+    formula: "(adj_close / ts_delay(adj_close, 5) - 1) - (adj_close / ts_delay(adj_close, 20) - 1)"
+    tags: [momentum, spread, acceleration]
+    expected_sign: 1
+
+  - id: mom_accel_5
+    name: "5-day Momentum Acceleration"
+    description: >
+      Second derivative: change in 5-day momentum over the past 5 days.
+      Captures whether momentum is speeding up or slowing down.
+    category: momentum
+    source: custom
+    formula: "ts_delta(adj_close / ts_delay(adj_close, 5) - 1, 5)"
+    tags: [momentum, acceleration]
+    expected_sign: 1

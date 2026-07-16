@@ -1,0 +1,5 @@
+# === Custom / Experimental Factors ===
+# Add your own factor definitions here. They will be automatically
+# picked up on the next panel build.
+
+factors: []

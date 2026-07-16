@@ -1,0 +1,202 @@
+"""会话管理器 —— 创建 / 调度 / 查询 / 删除会话。
+
+设计（基于 jobs.py 的 detached-subprocess + 日志文件模式扩展）：
+  · 状态真相落盘在 outputs/sessions/<id>/session.json（进程重启后仍可读）。
+  · 进程句柄(Popen)仅内存缓存，用于 poll 退出码与 kill。
+  · tick() 是调度心跳：刷新运行中进程状态，并在 running < MAX_CONCURRENT 时
+    启动下一个 queued 会话。前端 dcc.Interval 周期性调用。
+  · MAX_CONCURRENT 模块级可变，默认 1。
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import signal
+import subprocess
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SESSIONS_DIR = os.path.join(ROOT, "outputs", "sessions")
+os.makedirs(SESSIONS_DIR, exist_ok=True)
+PY = os.path.join(ROOT, ".venv", "bin", "python")
+if not os.path.exists(PY):
+    PY = "python"
+
+MAX_CONCURRENT = 1                 # 同时运行的会话数（前端可改）
+_PROCS: dict[str, subprocess.Popen] = {}   # session_id -> Popen（内存态）
+
+
+def _meta_path(sid: str) -> str:
+    return os.path.join(SESSIONS_DIR, sid, "session.json")
+
+
+def _read(sid: str) -> dict | None:
+    p = _meta_path(sid)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _write(sid: str, meta: dict) -> None:
+    p = _meta_path(sid)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+
+
+# --- create ----------------------------------------------------------------
+def create(mode: str, label: str, params: dict) -> str:
+    """创建一个 queued 会话，写好 session.json 骨架。返回 session_id。"""
+    from pipeline import registry
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    sid = f"{mode}_{ts}"
+    # 同秒去重
+    base = sid
+    n = 1
+    while os.path.exists(os.path.join(SESSIONS_DIR, sid)):
+        sid = f"{base}_{n}"
+        n += 1
+    sdir = os.path.join(SESSIONS_DIR, sid)
+    os.makedirs(sdir, exist_ok=True)
+    steps = registry.STEPS[mode]
+    meta = {
+        "id": sid, "mode": mode,
+        "label": label or registry.MODE_LABELS.get(mode, mode),
+        "params": params,
+        "status": "queued",
+        "created": time.time(),
+        "started": 0.0, "finished": 0.0,
+        "current_step": -1,
+        "steps": [{"step": s, "title": t, "status": "pending"}
+                  for s, t, _ in steps],
+    }
+    _write(sid, meta)
+    return sid
+
+
+# --- scheduling ------------------------------------------------------------
+def _refresh_running() -> None:
+    """poll 内存中运行进程的退出码，回写终态（防止 run_session 崩溃未写状态）。"""
+    for sid, proc in list(_PROCS.items()):
+        rc = proc.poll()
+        if rc is None:
+            continue
+        meta = _read(sid)
+        if meta and meta.get("status") == "running":
+            # run_session 正常会自己写 done/failed；这里兜底崩溃情况
+            meta["status"] = "done" if rc == 0 else "failed"
+            meta["finished"] = meta.get("finished") or time.time()
+            _write(sid, meta)
+        _PROCS.pop(sid, None)
+
+
+def _launch(sid: str) -> None:
+    sdir = os.path.join(SESSIONS_DIR, sid)
+    log_path = os.path.join(sdir, "run.log")
+    logf = open(log_path, "w")
+    proc = subprocess.Popen(
+        [PY, "-u", "run_session.py", "--session-dir", sdir],
+        cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT,
+        start_new_session=True)
+    _PROCS[sid] = proc
+    meta = _read(sid)
+    if meta:
+        meta["status"] = "running"
+        meta["started"] = time.time()
+        meta["pid"] = proc.pid
+        _write(sid, meta)
+
+
+def tick() -> None:
+    """调度心跳：刷新运行态 + 按并发上限启动排队会话。"""
+    _refresh_running()
+    sessions = list_sessions()
+    n_running = sum(1 for s in sessions if s["status"] == "running")
+    if n_running >= MAX_CONCURRENT:
+        return
+    # 按创建时间升序启动 queued
+    queued = sorted([s for s in sessions if s["status"] == "queued"],
+                    key=lambda s: s["created"])
+    for s in queued:
+        if n_running >= MAX_CONCURRENT:
+            break
+        _launch(s["id"])
+        n_running += 1
+
+
+# --- query -----------------------------------------------------------------
+def list_sessions() -> list[dict]:
+    out = []
+    for name in os.listdir(SESSIONS_DIR):
+        meta = _read(name)
+        if meta:
+            out.append(meta)
+    return sorted(out, key=lambda s: s.get("created", 0), reverse=True)
+
+
+def get(sid: str) -> dict | None:
+    return _read(sid)
+
+
+def step_reports(sid: str) -> list[dict]:
+    """读取该会话已落盘的全部 step report（按文件名顺序）。"""
+    sdir = os.path.join(SESSIONS_DIR, sid, "steps")
+    if not os.path.isdir(sdir):
+        return []
+    reps = []
+    for fn in sorted(os.listdir(sdir)):
+        if fn.endswith(".json"):
+            try:
+                with open(os.path.join(sdir, fn), "r", encoding="utf-8") as f:
+                    reps.append(json.load(f))
+            except Exception:
+                pass
+    return reps
+
+
+def run_log(sid: str, n: int = 120) -> str:
+    p = os.path.join(SESSIONS_DIR, sid, "run.log")
+    if not os.path.exists(p):
+        return ""
+    try:
+        with open(p, "r", errors="replace") as f:
+            lines = f.readlines()
+        lines = [ln for ln in lines if ln.strip() not in ("'close'",)]
+        return "".join(lines[-n:])
+    except Exception as e:
+        return f"(无法读取日志: {e})"
+
+
+def elapsed(meta: dict) -> float:
+    if meta.get("status") in ("done", "failed", "killed"):
+        return (meta.get("finished") or meta.get("started") or 0) - (meta.get("started") or meta.get("created", 0))
+    if meta.get("status") == "running":
+        return time.time() - (meta.get("started") or meta.get("created", 0))
+    return 0.0
+
+
+# --- delete ----------------------------------------------------------------
+def delete(sid: str) -> bool:
+    """删除会话（运行中先 kill 进程组），再删目录。"""
+    meta = _read(sid)
+    proc = _PROCS.get(sid)
+    if proc is not None and proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            pass
+    _PROCS.pop(sid, None)
+    sdir = os.path.join(SESSIONS_DIR, sid)
+    if os.path.isdir(sdir):
+        try:
+            shutil.rmtree(sdir)
+            return True
+        except Exception:
+            return False
+    return False

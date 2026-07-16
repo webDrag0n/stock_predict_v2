@@ -20,7 +20,7 @@ uv venv                          # 创建 .venv
 uv pip install -r pyproject.toml # 安装依赖
 
 # 3. 配置 tushare token（见下）后运行
-.venv/bin/python run_pipeline.py
+.venv/bin/python scripts/run_pipeline.py
 ```
 
 可选的额外集成模型（XGBoost / CatBoost）：`uv pip install -e ".[full]"`
@@ -39,9 +39,9 @@ token = "你的token"
 ## 快速开始
 
 ```bash
-.venv/bin/python run_pipeline.py            # 自动选策略：验证集选，测试集报
-.venv/bin/python run_pipeline.py --compare  # 额外在测试集展示所有策略（仅研究对比）
-.venv/bin/python run_pipeline.py --strategy long_topk  # 指定策略，跳过自动选择
+.venv/bin/python scripts/run_pipeline.py            # 自动选策略：验证集选，测试集报
+.venv/bin/python scripts/run_pipeline.py --compare  # 额外在测试集展示所有策略（仅研究对比）
+.venv/bin/python scripts/run_pipeline.py --strategy long_topk  # 指定策略，跳过自动选择
 ```
 
 默认 universe 为**沪深300成分股**（约5年历史）。首次运行按股票下载并缓存到 `data_cache/tushare/`，之后秒级加载。
@@ -50,11 +50,11 @@ token = "你的token"
 
 ```bash
 # 切换指数 universe（如中证500）
-DEFAULT_INDEX=000905.SH .venv/bin/python run_pipeline.py
+DEFAULT_INDEX=000905.SH .venv/bin/python scripts/run_pipeline.py
 
 # 自定义日期范围和预测窗口
 START_DATE=2020-01-01 END_DATE=2024-12-31 FORWARD_WINDOW=5 \
-  .venv/bin/python run_pipeline.py
+  .venv/bin/python scripts/run_pipeline.py
 ```
 
 成分股 universe 默认按**回测期间各月成分股的并集**取得，**已修复存活偏差**（被调出指数的股票仍纳入）。
@@ -101,9 +101,9 @@ START_DATE=2020-01-01 END_DATE=2024-12-31 FORWARD_WINDOW=5 \
 因子进模型前先过单因子检验——这是持续因子优化的"度量衡"。
 
 ```bash
-.venv/bin/python eval_factors.py            # 评估全部命名因子
-.venv/bin/python eval_factors.py --plot     # 额外输出分层累计净值曲线
-.venv/bin/python eval_factors.py --layers 10
+.venv/bin/python scripts/eval_factors.py            # 评估全部命名因子
+.venv/bin/python scripts/eval_factors.py --plot     # 额外输出分层累计净值曲线
+.venv/bin/python scripts/eval_factors.py --layers 10
 ```
 
 - 指标：IC、RankIC、ICIR（含年化）、IC 的 t 统计量、分层收益单调性、Top-Bottom 多空、换手
@@ -126,10 +126,10 @@ START_DATE=2020-01-01 END_DATE=2024-12-31 FORWARD_WINDOW=5 \
 
 ```bash
 # 默认（精选50只蓝筹，快）
-.venv/bin/python run_walkforward.py --compare
+.venv/bin/python scripts/run_walkforward.py --compare
 
 # 300只市值筛选横截面（推荐，信号更稳健）—— 须先确认 stock_basic / pro_bar 可用
-USE_SCREENING=1 UNIVERSE_SIZE=300 FORWARD_WINDOW=20 .venv/bin/python run_walkforward.py --compare
+USE_SCREENING=1 UNIVERSE_SIZE=300 FORWARD_WINDOW=20 .venv/bin/python scripts/run_walkforward.py --compare
 ```
 
 修复了三个前瞻泄露源：
@@ -159,15 +159,33 @@ USE_SCREENING=1 UNIVERSE_SIZE=300 FORWARD_WINDOW=20 .venv/bin/python run_walkfor
 ```
 config.py                  # 所有参数 + 凭证读取
 config_credentials.toml    # tushare token（不提交）
-src/data/
-  base.py                  # DataConnector 抽象基类（扩展新数据源的接口）
-  tushare.py               # TushareConnector：成分股 + qfq日线 + daily_basic
-  __init__.py              # 特征工程 + 目标 + Jane Street格式 + load_data/split_dates/质量检查
-src/features.py            # 特征矩阵提取、NaN填充
-src/model.py               # 集成模型（按日期 purged CV）
-src/strategy.py            # 预测转仓位（long_topk / tanh / cross_sectional）
-src/backtest.py            # 回测引擎 + A股成本 + 指标
-run_pipeline.py            # CLI 主程序（三段切分 + 自动选策略）
+run_webapp.py              # 启动前端（推荐入口）
+run_session.py             # 会话执行器
+predict_tomorrow.py        # 生成次日订单
+
+src/
+  data/                    # 数据连接器与因子工程
+  model.py / ensemble.py   # 集成模型
+  walkforward.py           # 滚动回测引擎
+  strategy.py              # 预测 → 持仓
+  trading.py               # 每日决策 + 成交模拟
+  backtest*.py             # 回测引擎
+  factor_eval.py           # 单因子评估
+  measure_alpha.py         # Alpha 显著性检验
+
+scripts/                   # 研究脚本（按功能分类）
+  eval_factors.py          # 单因子评估 CLI
+  run_pipeline.py          # 旧端到端管线
+  run_walkforward.py       # 旧 walk-forward CLI
+  diagnose_factors.py      # 因子诊断
+  ablation/                # 消融实验
+  diagnostics/             # 诊断脚本
+  optimize/                # 参数优化
+  research/                # 研究复现
+
+pipeline/                  # 会话式流水线
+webapp/                    # Dash 前端
+tests/                     # 单元/集成测试
 ```
 
 新增数据源只需在 `src/data/` 下实现 `DataConnector` 的 3 个方法，并在 `__init__.py` 的 `_CONNECTORS` 注册。
@@ -176,22 +194,22 @@ run_pipeline.py            # CLI 主程序（三段切分 + 自动选策略）
 
 ```bash
 # 自动选策略（验证集选，测试集报）
-.venv/bin/python run_pipeline.py
+.venv/bin/python scripts/run_pipeline.py
 
 # 指定策略
-.venv/bin/python run_pipeline.py --strategy long_topk
+.venv/bin/python scripts/run_pipeline.py --strategy long_topk
 
 # 自动选择时只考虑A股可交易（long-only）策略
-.venv/bin/python run_pipeline.py --tradeable-only
+.venv/bin/python scripts/run_pipeline.py --tradeable-only
 
 # 额外在测试集对比所有策略（仅研究）
-.venv/bin/python run_pipeline.py --compare
+.venv/bin/python scripts/run_pipeline.py --compare
 
 # 复用已训练模型
-.venv/bin/python run_pipeline.py --no-train
+.venv/bin/python scripts/run_pipeline.py --no-train
 
 # 切换 universe / 预测窗口
-DEFAULT_INDEX=000905.SH FORWARD_WINDOW=10 .venv/bin/python run_pipeline.py
+DEFAULT_INDEX=000905.SH FORWARD_WINDOW=10 .venv/bin/python scripts/run_pipeline.py
 ```
 
 ## 输出结果
