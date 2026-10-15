@@ -14,9 +14,14 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import warnings
 
 import numpy as np
 import pandas as pd
+
+# pandas 碎片化告警（PerformanceWarning）属构建期噪声；入口脚本显式屏蔽
+# （库模块不再在 import 期动全局 warnings 状态）。
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _PROJECT_ROOT)
@@ -24,8 +29,8 @@ sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src"))
 
 import config as C
 from data import load_factor_panel, list_factor_columns
-from walkforward import run_walkforward, plot_dashboard
-from backtest import format_metrics, plot_results
+from walkforward import run_walkforward
+from backtest import format_metrics
 
 
 def _summarize(tag: str, res: dict) -> None:
@@ -82,15 +87,12 @@ def main() -> None:
         results[tag] = res
         _summarize(tag, res)
         safe = "selected" if sel else "allfeat"
-        fig = plot_results(res["oos_result"]["curve"], res["oos_result"]["metrics"],
-                           os.path.join(C.OUTPUT_DIR, f"walkforward_{safe}.png"),
-                           rmse_curve=res["oos_result"].get("rmse_curve"))
-        dash = plot_dashboard(res, os.path.join(C.OUTPUT_DIR, f"dashboard_{safe}.png"),
-                              tag=tag)
+        # OOS 净值曲线落盘 parquet（替代原 PNG：前端/报表读取数据自行渲染）
+        curve_path = os.path.join(C.OUTPUT_DIR, f"walkforward_oos_curve_{safe}.parquet")
+        res["oos_result"]["curve"].to_parquet(curve_path, index=False)
         res["window_metrics"].to_csv(
             os.path.join(C.OUTPUT_DIR, f"walkforward_windows_{safe}.csv"), index=False)
-        print(f"OOS 净值曲线 -> {fig}")
-        print(f"综合仪表盘（含金额盈亏曲线）-> {dash}")
+        print(f"OOS 净值曲线 -> {curve_path}")
 
     print("\n说明：连续样本外 Sharpe 通常远低于单窗口数字——这才是可信的真实水平。"
           "重点看「为正窗口占比」，它衡量信号能否跨时间稳健复现。")

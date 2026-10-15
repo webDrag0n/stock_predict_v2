@@ -6,7 +6,8 @@
 全量重训每天都要拟合数百万行，回测一轮要数小时。这里改为：
 
   1. 增量续训（init_model）：GBM 用 LightGBM 的 `init_model` 续训接口，每个更新点
-     只在【当日新成熟的标签行】上再长 INCR_TREES 棵树，接在昨日 booster 之上；
+     在【当日新成熟的标签行】上按 INCR_TREES×新成熟天数 续树（两次重建之间总树数
+     硬上限 FULL_TREES×2，超限提前重建），接在昨日 booster 之上；
      每 REBUILD_DAYS 个交易日做一次全量重建（在尾部 TRAIN_WINDOW 天上从零训练），
      防止增量漂移累积。速度从"小时级"降到"分钟级"。
   2. 多模型：gbm_l2（l2 回归）、gbm_ret_weighted（样本权重∝当日前瞻收益排名，
@@ -31,7 +32,6 @@
 """
 from __future__ import annotations
 
-import os
 from collections import deque
 
 import numpy as np
@@ -40,18 +40,13 @@ import lightgbm as lgb
 
 import config as C
 
-# 复用 walkforward 的、已验证的处理函数，保证同分布
-from walkforward import (_cross_sectional_norm, _train_predict_linear,
-                         _per_date_rank)
+# 复用 walkforward 的、已验证的处理函数，保证同分布；GBM 超参唯一真相源也在
+# walkforward（GBM_PARAMS，sklearn 命名），这里经 GBM_PARAMS_NATIVE 映射成
+# 低层 lgb.train 命名以支持 init_model 续训，两处不再各自手工维护。
+from walkforward import (_cross_sectional_norm, _linear_fit, _linear_score,
+                         _per_date_rank, GBM_PARAMS_NATIVE)
 
-
-# GBM 超参（镜像 walkforward._gbm_l2_predict，但用低层 train 以支持 init_model 续训）
-_GBM_PARAMS = dict(
-    objective="l2", learning_rate=0.03, num_leaves=31,
-    bagging_fraction=0.8, bagging_freq=1, feature_fraction=0.6,
-    min_child_samples=40, lambda_l1=0.1, lambda_l2=0.5,
-    verbose=-1,
-)
+_GBM_PARAMS = GBM_PARAMS_NATIVE
 
 
 def _n_threads(n_rows: int) -> int:
@@ -100,39 +95,53 @@ class IncrementalEnsemble:
                  rebuild_days: int = None, train_window: int = None,
                  ic_window: int = None):
         self.feat_cols = list(feat_cols)
-        # 模型清单优先级：显式参数 > 环境变量 > config.ENSEMBLE_MODELS > DEFAULT。
-        # （此前直接读 os.environ 漏掉了 config 默认，导致 attn 默认 leg 不生效。）
-        _cfg_models = getattr(C, "ENSEMBLE_MODELS", "") or ""
-        _env_models = os.environ.get("ENSEMBLE_MODELS", "")
-        _src = models or _env_models or _cfg_models or ""
+        # 模型清单优先级：显式参数 > config.ENSEMBLE_MODELS（env 覆盖在 config
+        # import 时读取，单一来源）> 内置默认。
+        _src = models or C.ENSEMBLE_MODELS or ""
         if isinstance(_src, str):
             _src = _src.split(",")
         self.models = tuple(m.strip() for m in _src if m and m.strip()) or DEFAULT_MODELS
-        self.n_seeds = int(n_seeds if n_seeds is not None
-                           else os.environ.get("N_SEEDS", "1"))
-        self.incr_trees = int(incr_trees if incr_trees is not None
-                              else os.environ.get("INCR_TREES", "60"))
+        # attn leg 依赖可选的 torch（pyproject [attn] extra）。未安装时优雅降级：
+        # 剔除该 leg 并警告一次，而非等训练时才在 fit_attn 里炸 ImportError。
+        if "attn" in self.models:
+            from model_attn import TORCH_AVAILABLE
+            if not TORCH_AVAILABLE:
+                print("[ensemble] 警告: 未安装 torch，attn leg 已剔除"
+                      "（安装：uv sync --extra attn）")
+                self.models = tuple(m for m in self.models if m != "attn")
+                if not self.models:
+                    print("[ensemble] 警告: 剔除 attn 后无可用模型，退回默认集合 "
+                          f"{DEFAULT_MODELS}")
+                    self.models = DEFAULT_MODELS
+        self.n_seeds = int(n_seeds if n_seeds is not None else C.ENSEMBLE_N_SEEDS)
+        self.incr_trees = int(incr_trees if incr_trees is not None else C.INCR_TREES)
         self.rebuild_days = int(rebuild_days if rebuild_days is not None
-                                else os.environ.get("REBUILD_DAYS", "60"))
+                                else C.REBUILD_DAYS)
         self.train_window = int(train_window if train_window is not None
-                                else getattr(C, "TRAIN_WINDOW", 500))
-        self.ic_window = int(ic_window if ic_window is not None
-                             else os.environ.get("IC_WINDOW", "20"))
+                                else C.TRAIN_WINDOW)
+        self.ic_window = int(ic_window if ic_window is not None else C.IC_WINDOW)
 
         # 各 GBM 模型的 booster 列表（多 seed），ic_linear 不持 booster
         self._boosters: dict[str, list[lgb.Booster]] = {
             m: [] for m in self.models if m.startswith("gbm")}
         self._attn_model = None      # attn leg：全量重建时训练，期间复用
         self._updates_since_rebuild = 0
-        self._last_trained_date = None      # 增量续训进度（只在新成熟日上续树）
-        self._last_train_frame: pd.DataFrame | None = None  # 供 ic_linear 取 IC 权重
-        self._last_trained_date = None     # 已续训到的最新成熟标签日（防重复 boost）
+        self._last_trained_date = None      # 已续训到的最新成熟标签日（防重复 boost）
+        self._last_train_frame: pd.DataFrame | None = None  # 供 ic_linear 取训练帧
+        # ic_linear 训练侧缓存（因子集 + IC 权重 + NL/IX 变换列选择）：按
+        # REBUILD_DAYS 节奏刷新（全量重建时置 None），每日续训期间复用，
+        # 避免每日全量重算 IC 权重。_linear_fit_date = 拟合时训练数据截止日。
+        self._linear_state: dict | None = None
+        self._linear_fit_date = None
 
         # 滚动 IC 定权：每个模型一个尾部 IC 队列；预测历史供日后成熟时打分
         self._ic_hist: dict[str, deque] = {
             m: deque(maxlen=self.ic_window) for m in self.models}
         self.weights: dict[str, float] = {m: 1.0 / len(self.models)
                                           for m in self.models}
+        # 是否已有过一次【数据驱动】的定权（EMA 平滑只对之后的更新生效，
+        # 避免首次定权被初始等权稀释——如实盘路径只 refresh 一次）。
+        self._w_initialized = False
         self._pred_hist: dict[object, pd.DataFrame] = {}  # date -> [symbol×model preds]
         self._scored_dates: set = set()
 
@@ -141,8 +150,8 @@ class IncrementalEnsemble:
                force_full: bool = False) -> dict:
         """续训（或周期全量重建）各 GBM。train_frame 必须只含【已成熟标签】行。
 
-        返回 {model: n_trees} 诊断信息。ic_linear 不在此训练（predict 时按尾部
-        TRAIN_WINDOW 帧实时算 IC 权重，开销小）。"""
+        返回 {model: n_trees} 诊断信息。ic_linear 不在此训练：其训练侧状态
+        （IC 权重等）在 predict 时按需拟合并缓存，随全量重建一起刷新。"""
         train = train_frame.dropna(subset=[C.TARGET])
         if train.empty:
             return {}
@@ -152,9 +161,11 @@ class IncrementalEnsemble:
         win = train[train["date"].isin(win_dates)]
         self._last_train_frame = win
 
+        # 显式判空：无 gbm 腿时 self._boosters 为空 dict，all() 空集为 True
+        # 会导致每天都走全量重建分支（空转），所以这里要求非空。
         do_full = (force_full or self._updates_since_rebuild >= self.rebuild_days
-                   or all(len(self._boosters.get(m, [None])) == 0
-                          for m in self._boosters))
+                   or (bool(self._boosters)
+                       and all(len(self._boosters[m]) == 0 for m in self._boosters)))
         info = {}
         # attn leg：仅在全量重建时（重）训练（神经网不做增量），期间复用模型。
         if "attn" in self.models and (do_full or self._attn_model is None):
@@ -170,6 +181,7 @@ class IncrementalEnsemble:
                 info[m] = f"full×{len(self._boosters[m])}"
             self._updates_since_rebuild = 0
             self._last_trained_date = dates[-1]
+            self._linear_state = None        # 训练分布已重置，IC 权重缓存失效
             return info
 
         # 增量：只在【上次续训之后新成熟】的日期上续树（绝不重复 boost 同一批行，
@@ -181,10 +193,24 @@ class IncrementalEnsemble:
         if len(new_dates) == 0:
             self._updates_since_rebuild += 1
             return {m: "no-new" for m in self._boosters}
+        # 续训树数 = INCR_TREES × 新成熟天数（续训量随新数据量伸缩）；
+        # 两次重建之间总树数硬上限 FULL_TREES×2，超限提前触发全量重建，
+        # 防止增量漂移无界累积。
+        n_boost = self.incr_trees * len(new_dates)
+        cur_trees = max((b.num_trees() for bl in self._boosters.values() for b in bl),
+                        default=0)
+        if cur_trees > 0 and cur_trees + n_boost > C.FULL_TREES * 2:
+            for m in self._boosters:
+                self._boosters[m] = self._fit_full(win, m)
+                info[m] = f"full×{len(self._boosters[m])}(tree-cap)"
+            self._updates_since_rebuild = 0
+            self._last_trained_date = dates[-1]
+            self._linear_state = None
+            return info
         incr = train[train["date"].isin(set(new_dates.tolist()))]
         for m in self._boosters:
-            self._boosters[m] = self._fit_incremental(incr, m)
-            info[m] = f"+{self.incr_trees}@{len(new_dates)}d"
+            self._boosters[m] = self._fit_incremental(incr, m, n_boost)
+            info[m] = f"+{n_boost}@{len(new_dates)}d"
         self._updates_since_rebuild += 1
         self._last_trained_date = dates[-1]
         return info
@@ -198,35 +224,45 @@ class IncrementalEnsemble:
             w = frame[C.WEIGHT].to_numpy(dtype=np.float64)
         else:
             w = None
-        return lgb.Dataset(X, label=y, weight=w, free_raw_data=False)
+        # free_raw_data 保持默认 True：construct 后释放原始 X（全市场训练帧
+        # ~2.7GB/腿）。续训经由 lgb.train(init_model=booster) 在新 Dataset 上进行，
+        # 不需要旧 Dataset 的原始数据（已实测验证）。
+        return lgb.Dataset(X, label=y, weight=w)
 
     def _fit_full(self, frame: pd.DataFrame, model: str) -> list[lgb.Booster]:
         """全量重建：在尾部 TRAIN_WINDOW 帧上从零训练 n_seeds 个 booster。"""
-        n_full = int(os.environ.get("FULL_TREES", "400"))
+        n_full = C.FULL_TREES
         nt = _n_threads(len(frame))
+        # _make_dataset 含逐日截面归一化，开销不小：各 seed 共享同一份 Dataset
+        # （仅 seed/bagging_seed 不同），不再每 seed 重复归一化。
+        ds = self._make_dataset(frame, model)
         boosters = []
         for s in range(self.n_seeds):
-            ds = self._make_dataset(frame, model)
             params = dict(_GBM_PARAMS, seed=C.RANDOM_STATE + s,
                           bagging_seed=C.RANDOM_STATE + s, num_threads=nt)
+            # keep_training_booster=False：booster 不持有训练 Dataset 引用，
+            # 否则 3 腿各自的全量 Dataset（binned+raw，数 GB）会被常驻保留。
+            # 续训用 lgb.train(init_model=bst) 不需要旧训练数据（已实测）。
             bst = lgb.train(params, ds, num_boost_round=n_full,
-                            keep_training_booster=True)
+                            keep_training_booster=False)
             boosters.append(bst)
         return boosters
 
-    def _fit_incremental(self, frame: pd.DataFrame, model: str) -> list[lgb.Booster]:
-        """续训：在新成熟行上接着昨日 booster 再长 INCR_TREES 棵树。"""
+    def _fit_incremental(self, frame: pd.DataFrame, model: str,
+                         num_boost_round: int) -> list[lgb.Booster]:
+        """续训：在新成熟行上接着昨日 booster 再长 num_boost_round 棵树
+        （= INCR_TREES × 新成熟天数，由 update 计算）。"""
         prev = self._boosters.get(model) or []
         if frame.empty or not prev:
             return prev or self._fit_full(frame, model)
         nt = _n_threads(len(frame))
+        ds = self._make_dataset(frame, model)   # 各 seed 共享，见 _fit_full
         boosters = []
         for s, base in enumerate(prev):
-            ds = self._make_dataset(frame, model)
             params = dict(_GBM_PARAMS, seed=C.RANDOM_STATE + s,
                           bagging_seed=C.RANDOM_STATE + s, num_threads=nt)
-            bst = lgb.train(params, ds, num_boost_round=self.incr_trees,
-                            init_model=base, keep_training_booster=True)
+            bst = lgb.train(params, ds, num_boost_round=num_boost_round,
+                            init_model=base, keep_training_booster=False)
             boosters.append(bst)
         return boosters
 
@@ -247,11 +283,21 @@ class IncrementalEnsemble:
                          for b in boosters]
                 out[m] = np.mean(preds, axis=0)
             elif m == "ic_linear":
-                if self._last_train_frame is None:
+                # 训练侧状态（因子集 + IC 权重 + NL/IX 变换列选择）按
+                # REBUILD_DAYS 节奏缓存：全量重建时 update() 置 None 触发
+                # 重新拟合，每日续训期间直接复用。正确性依据：权重只依赖
+                # 训练帧（截止日记录在 _linear_fit_date），test 侧变换全部
+                # 逐日自包含，每天只重算当日横截面。
+                # from_state_dict 恢复的集成没有 _last_train_frame（不序列化
+                # 训练帧），但 _linear_state 已随快照恢复，可直接打分。
+                if self._linear_state is None and self._last_train_frame is None:
                     out[m] = np.zeros(len(test_frame))
                 else:
-                    out[m] = _train_predict_linear(
-                        self._last_train_frame, test_frame, self.feat_cols)
+                    if self._linear_state is None:
+                        self._linear_state = _linear_fit(self._last_train_frame,
+                                                         self.feat_cols)
+                        self._linear_fit_date = self._last_train_frame["date"].max()
+                    out[m] = _linear_score(test_frame, self._linear_state)
             elif m == "attn":
                 if self._attn_model is None:
                     out[m] = np.zeros(len(test_frame))
@@ -323,20 +369,36 @@ class IncrementalEnsemble:
         return self.weights
 
     def _recompute_weights(self) -> None:
-        """权重 = 各模型尾部 IC 均值，截断 ≥0 归一；数据不足/全非正 → 等权。"""
+        """权重 = 各模型尾部 IC 均值，截断 ≥0 归一；数据不足/全非正 → 等权。
+
+        数据驱动的定权再按 C.IC_WEIGHT_EMA_HALFLIFE 做 EMA 平滑，消除 IC 过零
+        跳变引起的权重（→换手）尖峰；halflife=0 关闭。首次数据驱动的定权不平滑
+        （否则实盘只 refresh 一次时权重会被初始等权稀释）。
+        """
         means = {}
         for m in self.models:
             h = self._ic_hist[m]
             means[m] = float(np.mean(h)) if len(h) >= 3 else None
         if any(v is None for v in means.values()):
-            self.weights = {m: 1.0 / len(self.models) for m in self.models}
-            return
-        pos = {m: max(v, 0.0) for m, v in means.items()}
-        tot = sum(pos.values())
-        if tot <= 1e-12:
-            self.weights = {m: 1.0 / len(self.models) for m in self.models}
+            target = {m: 1.0 / len(self.models) for m in self.models}
+            data_driven = False
         else:
-            self.weights = {m: pos[m] / tot for m in self.models}
+            pos = {m: max(v, 0.0) for m, v in means.items()}
+            tot = sum(pos.values())
+            if tot <= 1e-12:
+                target = {m: 1.0 / len(self.models) for m in self.models}
+            else:
+                target = {m: pos[m] / tot for m in self.models}
+            data_driven = True
+        hl = float(C.IC_WEIGHT_EMA_HALFLIFE)
+        if hl > 0 and self._w_initialized:
+            a = 1.0 - 0.5 ** (1.0 / hl)
+            self.weights = {m: (1.0 - a) * self.weights.get(m, 0.0) + a * target[m]
+                            for m in self.models}
+        else:
+            self.weights = target
+        if data_driven:
+            self._w_initialized = True
 
     @staticmethod
     def _date_minus(panel: pd.DataFrame, asof_date, n_days: int):
@@ -350,3 +412,77 @@ class IncrementalEnsemble:
         """当前各模型尾部 IC 均值（诊断/展示用）。"""
         return {m: (float(np.mean(self._ic_hist[m])) if self._ic_hist[m] else float("nan"))
                 for m in self.models}
+
+    # ------------------------------------------------------------- serialize
+    def state_dict(self) -> dict:
+        """可 pickle 的完整状态快照（模型工件 + 定权状态 + 超参）。
+
+        供 model_store 落盘 champion/staging。GBM booster 存 model_to_string()
+        文本（LightGBM 最稳的跨进程序列化）；attn 腿经 torch.save 存 bytes。
+        不存 _pred_hist（原始预测逐日累积、体积大，实盘路径本就从 pred_hist
+        parquet 重建 observe），但保留 _ic_hist/_scored_dates/weights 使
+        定权状态恢复后连续。
+        """
+        attn_bytes = None
+        if self._attn_model is not None:
+            import io
+            import torch
+            buf = io.BytesIO()
+            torch.save(self._attn_model, buf)
+            attn_bytes = buf.getvalue()
+        return {
+            "models": tuple(self.models),
+            "n_seeds": self.n_seeds,
+            "incr_trees": self.incr_trees,
+            "rebuild_days": self.rebuild_days,
+            "train_window": self.train_window,
+            "ic_window": self.ic_window,
+            "boosters": {m: [b.model_to_string() for b in bl]
+                         for m, bl in self._boosters.items()},
+            "attn": attn_bytes,
+            "linear_state": self._linear_state,
+            "linear_fit_date": self._linear_fit_date,
+            "updates_since_rebuild": self._updates_since_rebuild,
+            "last_trained_date": self._last_trained_date,
+            "weights": dict(self.weights),
+            "ic_hist": {m: list(h) for m, h in self._ic_hist.items()},
+            "w_initialized": self._w_initialized,
+            "scored_dates": set(self._scored_dates),
+        }
+
+    @classmethod
+    def from_state_dict(cls, state: dict, feat_cols: list[str]
+                        ) -> "IncrementalEnsemble":
+        """从 state_dict() 快照重建集成（权重/IC 队列/booster 全部恢复）。
+
+        恢复后 predict/combine 与快照前逐位一致（同一批 booster）；update 可
+        继续增量续训（_last_trained_date 已恢复，不会重复 boost）。attn 腿在
+        无 torch 环境下跳过（predict 对该腿出 0 分，与 __init__ 降级一致）。
+        """
+        ens = cls(feat_cols, models=state["models"], n_seeds=state["n_seeds"],
+                  incr_trees=state["incr_trees"],
+                  rebuild_days=state["rebuild_days"],
+                  train_window=state["train_window"],
+                  ic_window=state["ic_window"])
+        ens._boosters = {
+            m: [lgb.Booster(model_str=s) for s in bl]
+            for m, bl in state["boosters"].items()}
+        if state.get("attn") is not None:
+            try:
+                import io
+                import torch
+                ens._attn_model = torch.load(io.BytesIO(state["attn"]),
+                                             weights_only=False)
+            except ImportError:
+                print("[ensemble] 警告: 快照含 attn 腿但当前环境无 torch，"
+                      "该腿已跳过（predict 出 0 分）")
+        ens._linear_state = state["linear_state"]
+        ens._linear_fit_date = state["linear_fit_date"]
+        ens._updates_since_rebuild = state["updates_since_rebuild"]
+        ens._last_trained_date = state["last_trained_date"]
+        ens.weights = dict(state["weights"])
+        ens._ic_hist = {m: deque(h, maxlen=ens.ic_window)
+                        for m, h in state["ic_hist"].items()}
+        ens._w_initialized = state["w_initialized"]
+        ens._scored_dates = set(state["scored_dates"])
+        return ens

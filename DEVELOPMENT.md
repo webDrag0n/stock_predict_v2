@@ -111,7 +111,8 @@ uv run pytest tests/ -v
 | 测试 | 作用 |
 |---|---|
 | `test_backtest_synthetic.py` | 微观合成数据验证 backtest_daily 引擎正确性 |
-| `test_backtest_regression.py` | 回归测试：与已知基准结果比对 |
+| `test_backtest_periodic.py` | 周期调仓引擎：成本公式与 trade_costs 一致、年化指标口径 |
+| `test_backtest_regression.py` | 真实数据冒烟+守恒断言（非数值基准比对，缓存缺失时 skip） |
 | `test_nextday_cli_consistency.py` | 次日订单路径与回测路径一致性 |
 | `test_sim2real_fixes.py` | 实盘化修正（复权、成本、T+1 等）验证 |
 
@@ -165,7 +166,8 @@ rm -rf data_cache/dataset_*.parquet
 
 1. 是否用了 `close` 而非 `adj_close` 算目标？
 2. 是否 `EMBARGO_DAYS < FORWARD_WINDOW`？
-3. 是否 `PERIODIC_REBALANCE=0` 导致每日重叠？
+3. 是否引入了"每天赚 pos×N日收益"的重叠口径？（旧的每日重叠引擎
+   `run_backtest` 与 `PERIODIC_REBALANCE` 开关已删除，周期调仓是唯一口径）
 4. 是否在小股票池 (49/300) 上跑？
 5. 是否在测试集上选策略/超参？
 6. 是否把未来信息（如次日 open）泄露到特征里？

@@ -18,6 +18,13 @@ import os
 import sys
 import time
 import traceback
+import warnings
+
+import pandas as _pd
+
+# pandas 碎片化告警（PerformanceWarning）属构建期噪声；入口脚本显式屏蔽
+# （库模块不再在 import 期动全局 warnings 状态）。
+warnings.filterwarnings("ignore", category=_pd.errors.PerformanceWarning)
 
 
 def _load(path: str) -> dict:
@@ -43,15 +50,17 @@ def main() -> int:
     mode = meta["mode"]
     params = meta.get("params", {})
 
-    # 1) 先写 os.environ（config 在 import 时读取）
+    # 1) 先写 os.environ（config 在 import pipeline.registry/steps_* 时读取 env）。
+    #    param_env 是轻量模块，import 它不触发 config，因此映射可先拿到。
     root = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.join(root, "src"))
     sys.path.insert(0, root)
+    from pipeline.param_env import env_overrides
+    for k, v in env_overrides(params).items():
+        os.environ[k] = v
 
     # 延迟到此处 import：registry 触发 pipeline.steps_* → config，读 env
     from pipeline import registry
-    for k, v in registry.env_overrides(params).items():
-        os.environ[k] = v
 
     steps = registry.STEPS[mode]
     steps_dir = os.path.join(sdir, "steps")

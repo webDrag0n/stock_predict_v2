@@ -6,7 +6,7 @@ regime information for the existing stock predictor. Steps:
   2. Fetch/compute lagged ETF option IV features (src.data.option_features).
   3. Evaluate each IV feature as a single-factor predictor of responder_6.
   4. Test the regime hypothesis: compare stock-factor OOS IC on high-IV vs low-IV days.
-  5. Save CSVs + a dashboard plot to outputs/.
+  5. Save CSVs to outputs/ (前端/报表读取 CSV 自行渲染).
 
 Usage:
     python diag_option_iv.py --underlying 510300.SH --lag 1
@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument(
         "--output-dir", type=str, default=C.OUTPUT_DIR,
-        help="Directory for CSV/PNG outputs",
+        help="Directory for CSV outputs",
     )
     return ap.parse_args()
 
@@ -235,64 +235,6 @@ def regime_ic_analysis(
     return pd.DataFrame(rows).sort_values("t_stat", key=abs, ascending=False)
 
 
-def plot_iv_dashboard(
-    iv: pd.DataFrame,
-    eval_table: pd.DataFrame,
-    regime_table: pd.DataFrame,
-    out_path: str,
-) -> str:
-    """Plot IV time series + regime IC comparison."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    plt.rcParams["font.family"] = "DejaVu Sans"
-
-    fig, axes = plt.subplots(3, 1, figsize=(12, 10))
-
-    # Panel 1: ATM IV + VIX-like.
-    ax = axes[0]
-    ax.plot(iv["date"], iv["opt_iv_atm_mean"], label="ATM mean IV", alpha=0.9)
-    if "opt_vix_like" in iv.columns:
-        ax.plot(iv["date"], iv["opt_vix_like"], label="VIX-like", alpha=0.8)
-    ax.set_title("ETF Option Implied Volatility")
-    ax.set_ylabel("IV (annualized)")
-    ax.legend(loc="upper left")
-    ax.grid(True, alpha=0.3)
-
-    # Panel 2: term spread + skew.
-    ax = axes[1]
-    if "opt_iv_term_1m3m" in iv.columns:
-        ax.plot(iv["date"], iv["opt_iv_term_1m3m"], label="Term spread (1m/3m)", alpha=0.8)
-    if "opt_iv_skew_25d" in iv.columns:
-        ax.plot(iv["date"], iv["opt_iv_skew_25d"], label="25Δ skew", alpha=0.8)
-    ax.set_title("Option Term Structure & Skew")
-    ax.set_ylabel("ratio")
-    ax.legend(loc="upper left")
-    ax.grid(True, alpha=0.3)
-
-    # Panel 3: regime IC comparison for top stock factors.
-    ax = axes[2]
-    if not regime_table.empty:
-        top = regime_table.head(8).copy()
-        x = np.arange(len(top))
-        width = 0.25
-        ax.bar(x - width, top["ic_low"], width, label="low IV", alpha=0.8)
-        ax.bar(x, top["ic_mid"], width, label="mid IV", alpha=0.8)
-        ax.bar(x + width, top["ic_high"], width, label="high IV", alpha=0.8)
-        ax.set_xticks(x)
-        ax.set_xticklabels(top["stock_factor"], rotation=45, ha="right")
-        ax.axhline(0, color="black", linewidth=0.5)
-        ax.set_title("Stock Factor RankIC by IV Regime")
-        ax.set_ylabel("mean RankIC")
-        ax.legend(loc="upper left")
-        ax.grid(True, alpha=0.3, axis="y")
-
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
-
-
 def main() -> None:
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -368,13 +310,7 @@ def main() -> None:
     iv.to_csv(iv_path, index=False)
     print(f"\n6) 保存期权特征时间序列 -> {iv_path}")
 
-    # 7. Plot dashboard.
-    print("\n7) 绘制 dashboard...")
-    plot_path = os.path.join(args.output_dir, "diag_option_iv.png")
-    plot_iv_dashboard(iv, eval_table, regime_table, plot_path)
-    print(f"   -> {plot_path}")
-
-    # 8. Summary.
+    # 7. Summary.
     print("\n" + "=" * 70)
     print("Summary")
     print("=" * 70)

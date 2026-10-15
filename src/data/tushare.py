@@ -13,10 +13,22 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
 import pandas as pd
 
 import config as C
 from .base import DataConnector
+
+
+def _announcement_dates(period: pd.Series, period_dt: pd.Series) -> pd.Series:
+    """按报告期区分财报披露滞后（point-in-time 可用日）。
+
+    A 股披露规则（证监会时限）：年报（period 尾号 1231）最迟 4 月 30 日
+    （+120 天），其余定期报告（一季报/半年报/三季报）+62 天近似覆盖。
+    此前统一 +62 天会让年报在 1~3 月就“可见”，造成前视泄露。
+    """
+    lag = np.where(period.astype(str).str.endswith("1231"), 120, 62)
+    return period_dt + pd.to_timedelta(lag, unit="D")
 
 
 class TushareConnector(DataConnector):
@@ -72,7 +84,9 @@ class TushareConnector(DataConnector):
             return self._universe_cache[cache_key]
         cache = os.path.join(self._cache_dir, f"universe_{cache_key}.parquet")
         if os.path.exists(cache):
-            members = pd.read_parquet(cache)["ts_code"].tolist()
+            # 旧缓存可能仍含 B 股（900xxx/200xxx），读入即过滤，无需删缓存重建
+            members = [m for m in pd.read_parquet(cache)["ts_code"].tolist()
+                       if not m.startswith(("900", "200"))]
             self._universe_cache[cache_key] = members
             return members
 
@@ -87,6 +101,9 @@ class TushareConnector(DataConnector):
             fields="ts_code,name,list_date,market")
         sb = sb[sb["market"] == "主板"]                          # main board only
         sb = sb[~sb["name"].str.contains("ST", na=False)]       # exclude ST
+        # 剔除 B 股（沪市 900xxx / 深市 200xxx）：它们也挂"主板"标签，但交易币种
+        # 不同，且 trading 的板幅前缀表会把 "9" 开头误判为北交所 30% 幅度。
+        sb = sb[~sb["ts_code"].str.startswith(("900", "200"))]
         if cutoff:
             sb = sb[sb["list_date"] <= cutoff]                   # exclude recent IPOs
 
@@ -163,7 +180,9 @@ class TushareConnector(DataConnector):
 
     def get_industry_map(self) -> dict[str, str]:
         """Return {ts_code: industry} for all listed stocks. Cached."""
-        cache = os.path.join(self._cache_dir, "industry_map.parquet")
+        # 行业归属会随时间变化，缓存文件名带 YYYYMM 月份键，跨月自动重拉
+        cache = os.path.join(self._cache_dir,
+                             f"industry_map_{pd.Timestamp.now():%Y%m}.parquet")
         if os.path.exists(cache):
             df = pd.read_parquet(cache)
             return dict(zip(df["ts_code"], df["industry"]))
@@ -244,6 +263,21 @@ class TushareConnector(DataConnector):
                 dates.append(str(d))
         return sorted(dates) if dates else None
 
+    @staticmethod
+    def _calendar_covers(dates: list[str], e: str) -> bool:
+        """日历内容确实延伸到请求的 end 附近（容差 10 个自然日，覆盖春节等
+        长假 + end 落在非交易日）。
+
+        历史上派生路径把"只到最后一个 daily 缓存日"的日历按请求区间文件名
+        存盘（文件名声称覆盖到 end，内容实际短 7 周），之后所有运行都命中
+        这个被污染的 exact 缓存而静默用旧数据。因此每一级缓存都要校验内容
+        覆盖度，不能只看文件名。
+        """
+        if not dates:
+            return False
+        return (pd.Timestamp(str(dates[-1]))
+                >= pd.Timestamp(e) - pd.Timedelta(days=10))
+
     def _trade_dates(self, start: str, end: str) -> list[str]:
         """Trading-calendar dates in [start, end] (YYYYMMDD). Cached.
 
@@ -251,26 +285,54 @@ class TushareConnector(DataConnector):
         free tier is limited to 1 call/hour. We first look for an already cached
         calendar that covers the requested range, then derive from existing daily
         bar caches, and only fall back to the API as a last resort.
+        每一级缓存都用 _calendar_covers 校验内容末端，防止 stale 缓存截断数据。
         """
         s, e = start.replace("-", ""), end.replace("-", "")
         cache = os.path.join(self._cache_dir, f"tradecal_{s}_{e}.parquet")
         if os.path.exists(cache):
             df = pd.read_parquet(cache)
             if "cal_date" in df.columns:
-                return sorted(df["cal_date"].astype(str).tolist())
+                dates = sorted(df["cal_date"].astype(str).tolist())
+                if self._calendar_covers(dates, e):
+                    return dates
+                # 内容被截断的污染缓存：弃用并落到 API 重建
+                print(f"  ⚠️ 日历缓存 {os.path.basename(cache)} 内容仅到 "
+                      f"{dates[-1] if dates else '空'}，早于请求的 {e}，弃用重建")
 
         cached = self._find_cached_trade_dates(s, e)
-        if cached is not None:
+        if cached is not None and self._calendar_covers(cached, e):
             pd.DataFrame({"cal_date": cached}).to_parquet(cache, index=False)
             return cached
 
         derived = self._trade_dates_from_daily_cache(s, e)
+        # 防 stale：daily 缓存派生的日历只覆盖到最后一个缓存日，早于请求的
+        # end 时必须落到 trade_cal API，否则静默截断数据。
         if derived is not None:
-            pd.DataFrame({"cal_date": derived}).to_parquet(cache, index=False)
-            return derived
+            if self._calendar_covers(derived, e):
+                pd.DataFrame({"cal_date": derived}).to_parquet(cache, index=False)
+                return derived
+            print(f"  ⚠️ daily 缓存日历仅到 {derived[-1]}，早于请求的 {e}，"
+                  "回退到 trade_cal API 拉取最新交易日历")
 
-        cal = self._pro.trade_cal(exchange="SSE", start_date=s, end_date=e,
-                                  is_open="1", fields="cal_date")
+        try:
+            cal = self._pro.trade_cal(exchange="SSE", start_date=s, end_date=e,
+                                      is_open="1", fields="cal_date")
+        except Exception as api_err:
+            # tushare 免费档 trade_cal 限 1 次/小时；限流时用 akshare 的新浪
+            # 财经交易日历兜底（免费、无限速），避免整个数据链路被一次
+            # 频率限制卡死。
+            print(f"  ⚠️ tushare trade_cal 不可用（{api_err}），"
+                  "改用 akshare 交易日历兜底")
+            import akshare as ak
+            cal_ak = ak.tool_trade_date_hist_sina()
+            col = "trade_date" if "trade_date" in cal_ak.columns else cal_ak.columns[0]
+            days = pd.to_datetime(cal_ak[col]).dt.strftime("%Y%m%d")
+            dates = sorted(d for d in days.tolist() if s <= d <= e)
+            if not dates:
+                raise RuntimeError(
+                    f"akshare 交易日历也无 {s}~{e} 的数据") from api_err
+            pd.DataFrame({"cal_date": dates}).to_parquet(cache, index=False)
+            return dates
         if cal is None or cal.empty or "cal_date" not in cal.columns:
             raise RuntimeError(
                 f"无法获取交易日历 ({s}~{e})。tushare trade_cal 接口受限或返回为空；"
@@ -374,7 +436,10 @@ class TushareConnector(DataConnector):
         n = len(symbols)
         for i, ts_code in enumerate(symbols):
             code = ts_code.split(".")[0]   # 600519.SH -> 600519
-            cache = os.path.join(cache_dir, f"val_{code}.parquet")
+            # 缓存带 YYYYMM 月份键：估值快照持续更新，跨月自动重拉，
+            # 避免旧缓存永不刷新
+            cache = os.path.join(
+                cache_dir, f"val_{code}_{pd.Timestamp.now():%Y%m}.parquet")
             if os.path.exists(cache):
                 df = pd.read_parquet(cache)
             else:
@@ -416,10 +481,9 @@ class TushareConnector(DataConnector):
         forward-fills to daily frequency so it can be merged with the price panel.
 
         Announcement delay (Chinese A-share rules):
-          Q1/Q3 reports: +31 days after period end
-          Semi-annual:   +62 days
-          Annual:        +120 days (usually released by April 30)
-        We use +62 days for all to stay conservative.
+          Q1/Q3 reports + semi-annual: +62 days
+          Annual (period ends 1231):   +120 days (released by April 30)
+        年报用 +120 天，其余 +62 天（见模块级 _announcement_dates）。
 
         Returns long DataFrame: date, symbol, roe, gross_margin,
                                  revenue_yoy, profit_yoy
@@ -441,7 +505,9 @@ class TushareConnector(DataConnector):
         n = len(symbols)
         for i, ts_code in enumerate(symbols):
             code = ts_code.split(".")[0]
-            cache = os.path.join(cache_dir, f"fin_{code}.parquet")
+            # 缓存带 YYYYMM 月份键：财报随披露季更新，跨月自动重拉
+            cache = os.path.join(
+                cache_dir, f"fin_{code}_{pd.Timestamp.now():%Y%m}.parquet")
             if os.path.exists(cache):
                 df = pd.read_parquet(cache)
             else:
@@ -463,13 +529,18 @@ class TushareConnector(DataConnector):
                                               values="value", aggfunc="first")
                                  .reset_index())
                     piv["period_dt"] = pd.to_datetime(piv["period"], format="%Y%m%d")
-                    # announcement delay: 62 days for all quarters
-                    piv["date"] = piv["period_dt"] + pd.Timedelta(days=62)
+                    # announcement delay: 年报 +120 天，其余 +62 天（防泄露）
+                    piv["date"] = _announcement_dates(piv["period"], piv["period_dt"])
                     piv = piv.sort_values("date")
-                    # YoY growth (4 rows back = same quarter last year)
+                    # YoY growth: 按 period 年份对齐去年同期（period - 10000），
+                    # 而不是 shift(4)——财报缺季时 shift(4) 会错位到错误季度，
+                    # 按期间键匹配则缺季得 NaN（诚实缺失而非错值）。
+                    piv["period_int"] = piv["period"].astype(int)
                     for col in ("net_profit", "revenue"):
                         if col in piv.columns:
-                            prior = piv[col].shift(4)
+                            lookup = piv.set_index("period_int")[col]
+                            prior = piv["period_int"].map(
+                                lambda p, lk=lookup: lk.get(p - 10000, np.nan))
                             piv[f"{col}_yoy"] = (piv[col] - prior) / prior.abs().clip(lower=1e-9)
                     piv["symbol"] = ts_code
                     keep = ["date", "symbol", "roe", "gross_margin",

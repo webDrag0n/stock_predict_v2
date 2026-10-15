@@ -5,13 +5,7 @@ replacing high-beta stocks with lower-beta candidates.
 """
 from __future__ import annotations
 
-import os
-import sys
-
 import numpy as np
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 from trading import _apply_beta_constraint
 

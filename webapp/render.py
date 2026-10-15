@@ -22,6 +22,18 @@ def _diverging_colors(y):
             for v in y]
 
 
+def _rgba(color, alpha: float) -> str:
+    """hex 主色转带 alpha 的 rgba 字符串；非 hex（或未指定）退化为中性灰。"""
+    if isinstance(color, str) and color.startswith("#"):
+        h = color.lstrip("#")
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        if len(h) == 6:
+            r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+            return f"rgba({r},{g},{b},{alpha})"
+    return f"rgba(100,116,139,{alpha})"
+
+
 def figure_from_spec(spec: dict) -> go.Figure:
     """按 spec["type"] 分派构图。"""
     t = spec.get("type")
@@ -30,8 +42,21 @@ def figure_from_spec(spec: dict) -> go.Figure:
 
     if t == "line":
         for s in spec["series"]:
+            band = s.get("band")
+            if band:
+                base_color = s.get("color")
+                fig.add_trace(go.Scatter(
+                    x=spec["x"], y=band["upper"], mode="lines",
+                    line=dict(width=0, color=base_color),
+                    hoverinfo="skip", showlegend=False))
+                fig.add_trace(go.Scatter(
+                    x=spec["x"], y=band["lower"], mode="lines",
+                    line=dict(width=0, color=base_color),
+                    fill="tonexty", fillcolor=_rgba(base_color, 0.15),
+                    hoverinfo="skip", showlegend=False))
             fig.add_trace(go.Scatter(
                 x=spec["x"], y=s["y"], mode="lines", name=s.get("name", ""),
+                opacity=s.get("opacity"),
                 line=dict(width=s.get("width", 2),
                           color=s.get("color"),
                           dash=s.get("dash"))))
@@ -39,10 +64,17 @@ def figure_from_spec(spec: dict) -> go.Figure:
         fig.update_xaxes(title_text=spec.get("xaxis", ""))
 
     elif t == "bar":
-        y = spec["y"]
-        colors = (_diverging_colors(y) if spec.get("diverging")
-                  else (spec.get("color") or PALETTE["strat"]))
-        fig.add_trace(go.Bar(x=spec["x"], y=y, marker_color=colors))
+        if spec.get("series"):
+            for s in spec["series"]:
+                fig.add_trace(go.Bar(
+                    x=spec["x"], y=s["y"], name=s.get("name", ""),
+                    marker_color=s.get("color"), opacity=s.get("opacity")))
+            fig.update_layout(barmode="group")
+        else:
+            y = spec["y"]
+            colors = (_diverging_colors(y) if spec.get("diverging")
+                      else (spec.get("color") or PALETTE["strat"]))
+            fig.add_trace(go.Bar(x=spec["x"], y=y, marker_color=colors))
         fig.update_yaxes(title_text=spec.get("yaxis", ""))
         fig.update_xaxes(title_text=spec.get("xaxis", ""))
 
@@ -81,6 +113,7 @@ def figure_from_spec(spec: dict) -> go.Figure:
         for s in spec["series"]:
             fig.add_trace(go.Scatter(
                 x=spec["x"], y=s["y"], mode="lines", name=s.get("name", ""),
+                opacity=s.get("opacity"),
                 line=dict(width=0.5, color=s.get("color")),
                 stackgroup="one", fillcolor=s.get("color")))
         fig.update_yaxes(title_text=spec.get("yaxis", ""))

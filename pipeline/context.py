@@ -25,10 +25,18 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import numpy as np
+import pandas as pd
 
 
 def _jsonable(x: Any) -> Any:
     """把 numpy / pandas 标量与数组转成纯 Python，保证可 json.dump。"""
+    if x is pd.NaT:
+        return None
+    if isinstance(x, pd.Timestamp):
+        return x.isoformat()
+    if isinstance(x, np.datetime64):
+        # NaT 先判空；其余经 Timestamp 统一格式化
+        return None if np.isnat(x) else pd.Timestamp(x).isoformat()
     if isinstance(x, (np.floating,)):
         v = float(x)
         return None if (v != v or v in (float("inf"), float("-inf"))) else v
@@ -118,17 +126,40 @@ def table(title: str, df, max_rows: int = 50) -> dict:
 
 def fig_line(title: str, x, series: list[dict], yaxis: str = "",
              xaxis: str = "", x_is_date: bool = False) -> dict:
-    """折线图。series=[{"name","y","dash"?,"width"?,"color"?}...]。"""
+    """折线图。series=[{"name","y","dash"?,"width"?,"color"?,"opacity"?,"band"?}...]。
+
+    opacity: 0.0-1.0，作用于该条主线。
+    band: {"upper": [...], "lower": [...]}，与 y 等长，在主线周围画置信带
+          （两条边线透明且不进 legend，lower 用 fill="tonexty" 填充到 upper）。
+    """
+    out = []
+    for s in series:
+        d = {**s, "y": _jsonable(s["y"])}
+        if d.get("band") is not None:
+            d["band"] = _jsonable(d["band"])
+        out.append(d)
     return {"type": "line", "title": title, "x": _jsonable(x),
-            "series": [{**s, "y": _jsonable(s["y"])} for s in series],
+            "series": out,
             "yaxis": yaxis, "xaxis": xaxis, "x_is_date": x_is_date}
 
 
-def fig_bar(title: str, x, y, yaxis: str = "", xaxis: str = "",
-            color: str | None = None, diverging: bool = False) -> dict:
-    """柱状图（单序列）。diverging=True 时按正负着色。"""
-    return {"type": "bar", "title": title, "x": _jsonable(x), "y": _jsonable(y),
-            "yaxis": yaxis, "xaxis": xaxis, "color": color, "diverging": diverging}
+def fig_bar(title: str, x, y=None, yaxis: str = "", xaxis: str = "",
+            color: str | None = None, diverging: bool = False,
+            series: list[dict] | None = None) -> dict:
+    """柱状图。
+
+    单序列（旧用法）：传 y=[...]，diverging=True 时按正负着色。
+    多序列分组柱状：传 series=[{"name","y","color"?,"opacity"?}...]，
+    前端按 barmode="group" 渲染；此时忽略 y/color/diverging。
+    """
+    spec = {"type": "bar", "title": title, "x": _jsonable(x),
+            "yaxis": yaxis, "xaxis": xaxis}
+    if series is not None:
+        spec["series"] = [{**s, "y": _jsonable(s["y"])} for s in series]
+    else:
+        spec.update({"y": _jsonable(y), "color": color,
+                     "diverging": diverging})
+    return spec
 
 
 def fig_scatter(title: str, x, y, yaxis: str = "", xaxis: str = "",
@@ -166,7 +197,7 @@ def fig_hist(title: str, values, nbins: int = 60, xaxis: str = "") -> dict:
 
 def fig_area_stacked(title: str, x, series: list[dict], yaxis: str = "",
                      x_is_date: bool = False) -> dict:
-    """堆叠面积图（如成本拆解）。series=[{"name","y","color"?}...]。"""
+    """堆叠面积图（如成本拆解）。series=[{"name","y","color"?,"opacity"?}...]。"""
     return {"type": "area_stacked", "title": title, "x": _jsonable(x),
             "series": [{**s, "y": _jsonable(s["y"])} for s in series],
             "yaxis": yaxis, "x_is_date": x_is_date}

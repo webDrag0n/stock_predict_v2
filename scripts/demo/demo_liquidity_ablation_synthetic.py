@@ -84,6 +84,7 @@ def main():
     base_res = run_daily_replay(panel, feat_cols, initial_cash=initial_cash,
                                 params=base_params, progress=False)
     score_cache = base_res["score_cache"]
+    score_fp = base_res["meta"]["score_fingerprint"]
     print(f"score_cache size: {len(score_cache)} decision days\n")
 
     grids = {
@@ -96,7 +97,7 @@ def main():
     rows = []
     for combo in combos:
         p = dict(base_params)
-        p["score_cache"] = score_cache
+        p["score_cache"] = {"scores": score_cache, "fingerprint": score_fp}
         p["collect_scores"] = False
         p.update(dict(zip(grids.keys(), combo)))
         p["use_bb_timing"] = False

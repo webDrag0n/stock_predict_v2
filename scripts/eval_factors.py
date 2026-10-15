@@ -21,15 +21,13 @@ sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src"))
 
 import config as C
 from data import load_factor_panel, list_factor_columns
-from factor_eval import evaluate_panel, format_panel_report, plot_layered_returns
+from factor_eval import evaluate_panel, format_panel_report
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="单因子有效性评估")
     ap.add_argument("--layers", type=int, default=5, help="分层回测层数")
     ap.add_argument("--csv", default=None, help="导出汇总表到 CSV 路径")
-    ap.add_argument("--plot", action="store_true",
-                    help="为 |IC_t| 最高的前 6 个因子画分层累计净值曲线")
     args = ap.parse_args()
 
     print("加载因子面板（保留因子原名）...")
@@ -45,13 +43,6 @@ def main() -> None:
     out = args.csv or os.path.join(C.OUTPUT_DIR, "factor_eval.csv")
     table.to_csv(out, index=False)
     print(f"\n汇总表已导出 -> {out}")
-
-    if args.plot and not table.empty:
-        top = table.head(6)["factor"].tolist()
-        fig = plot_layered_returns(
-            panel, top, os.path.join(C.OUTPUT_DIR, "factor_layers.png"),
-            n_layers=args.layers)
-        print(f"分层净值曲线已导出 -> {fig}")
 
     # 给出对模型特征选择的建议
     if not table.empty:

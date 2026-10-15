@@ -35,9 +35,25 @@ import pandas as pd
 import config as C
 from walkforward import _cross_sectional_norm
 
+# torch 是可选依赖（pyproject 的 attn extra：uv sync --extra attn）。
+# 缺失时本模块仍可 import（ensemble/walkforward 不会崩），attn leg 由调用方
+# 按 TORCH_AVAILABLE 判定为不可用并优雅降级；直接调用入口函数则报清晰错误。
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    torch = None
+    TORCH_AVAILABLE = False
+
+
+def _require_torch():
+    if not TORCH_AVAILABLE:
+        raise ImportError(
+            "attn leg 需要 torch（可选依赖）。安装：uv sync --extra attn")
+
 
 def _device():
-    import torch
+    _require_torch()
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -96,6 +112,7 @@ def fit_attn(train: pd.DataFrame, feat_cols: list[str],
              params: dict | None = None):
     """训练截面注意力，返回 (model, cfg)。供 IncrementalEnsemble 在全量重建时调用，
     之后 predict_attn 复用同一 model（训练贵、预测廉，必须分离）。"""
+    _require_torch()
     import torch
     p = dict(params or {})
     d_model = int(p.get("d_model", os.environ.get("ATTN_DMODEL", "128")))
@@ -171,6 +188,7 @@ def fit_attn(train: pd.DataFrame, feat_cols: list[str],
 
 def predict_attn(model_cfg, test: pd.DataFrame, feat_cols: list[str]) -> np.ndarray:
     """用已训练 model 对 test 预测（每天一个截面前向）。返回与 test 行对齐的分。"""
+    _require_torch()
     import torch
     model, cfg = model_cfg
     dev = cfg["dev"]

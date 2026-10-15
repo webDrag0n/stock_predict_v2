@@ -1,6 +1,7 @@
 """会话列表页（主页 /）—— 创建会话 + 并发设置 + 会话列表。
 
-· 新建会话：选模式(回测/次日) → 按 registry PARAM_SCHEMA 动态渲染参数表单 → 创建。
+· 新建会话：选模式(回测/次日/滚动Walk-Forward/多Seed稳健性, tab 由 registry 驱动)
+  → 按 registry PARAM_SCHEMA 动态渲染参数表单 → 创建。
 · 并发设置：数字输入写 sessions.MAX_CONCURRENT。
 · 列表：状态徽章 + 进度(当前步/总步)。运行中/排队「查看」禁用（满足运行时不可查看）。
 · dcc.Interval 周期调用 sessions.tick() 推进调度并刷新列表。
@@ -56,11 +57,11 @@ def _param_inputs(mode: str):
 
 
 def _create_card():
+    # 模式 tab 由 registry 驱动：新增模式只改 pipeline/registry.py
     mode_tabs = dbc.Tabs([
-        dbc.Tab(html.Div(_param_inputs("backtest"), style={"paddingTop": "12px"}),
-                label="回测流水线", tab_id="backtest"),
-        dbc.Tab(html.Div(_param_inputs("nextday"), style={"paddingTop": "12px"}),
-                label="次日交易流水线", tab_id="nextday"),
+        dbc.Tab(html.Div(_param_inputs(m), style={"paddingTop": "12px"}),
+                label=registry.MODE_LABELS.get(m, m), tab_id=m)
+        for m in registry.STEPS
     ], id="sess-mode-tabs", active_tab="backtest")
     return html.Div([
         html.Div("新建会话 · 模块化流水线", className="control-label",
@@ -134,7 +135,9 @@ def _list():
                            title=("运行中不可查看" if not viewable else ""),
                            style={"marginRight": "6px"}),
                 dbc.Button("删除", id={"type": "sess-del", "sid": m["id"]},
-                           color="danger", size="sm", outline=True),
+                           color="danger", size="sm", outline=True,
+                           disabled=(st == "running"),
+                           title=("运行中不可删除，请先等待结束" if st == "running" else "")),
             ], md=2),
         ], style={"padding": "8px 0", "borderBottom": "1px solid #f0f0f0",
                   "alignItems": "center"}))

@@ -30,13 +30,41 @@ from __future__ import annotations
 
 import os
 import time
+import warnings
 
 import numpy as np
 import pandas as pd
+from scipy.stats import spearmanr
 
 import config as C
+import risk
 from ensemble import IncrementalEnsemble
 from trading import PortfolioState, decide_orders, simulate_fills
+
+
+# 指纹逻辑已上移到 model_store（champion/staging 机制共用同一配方指纹，
+# 单一来源）；这里保留原函数名以兼容既有调用与注释。
+from model_store import fingerprint_of as _score_cache_fingerprint
+
+
+def _unwrap_score_cache(score_cache, fingerprint: str):
+    """接受两种形态：{date: {sym: score}}（旧）或
+    {"scores": {...}, "fingerprint": "..."}（带指纹）。返回纯分数 dict。"""
+    if isinstance(score_cache, dict) and "scores" in score_cache:
+        cached_fp = score_cache.get("fingerprint")
+        if cached_fp is None:
+            warnings.warn("score_cache 包装内无指纹，无法校验时效性", stacklevel=3)
+        elif cached_fp != fingerprint:
+            raise ValueError(
+                f"score_cache 指纹不匹配：缓存 {cached_fp} ≠ 当前配置 {fingerprint}。"
+                "特征/模型/前瞻窗已变化，缓存分已失效，请重新训练收集。")
+        return score_cache["scores"]
+    warnings.warn(
+        "score_cache 未带指纹（旧格式），无法校验是否与当前信号配置一致——"
+        "若特征/模型/FORWARD_WINDOW 已变，结果基于陈旧分数。新格式："
+        '{"scores": ..., "fingerprint": meta["score_fingerprint"]}。',
+        stacklevel=3)
+    return score_cache
 
 
 # 撮合 / 估值所需的次日行情列
@@ -78,32 +106,29 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
     # 布林RSI阈值）完全解耦。score_cache（{date -> {symbol: score}}）一旦提供，
     # 本引擎跳过全部模型工作，直接复用缓存分做决策+撮合 —— 一次训练、多次重放。
     #   score_cache=None  且 collect_scores=True : 正常训练，并在返回 dict 里附带
-    #                      "score_cache" 供后续重放复用。
+    #                      "score_cache" 供后续重放复用（指纹见 meta["score_fingerprint"]）。
     #   score_cache=<dict>: 跳过模型，按缓存分重放（缓存缺某日则该日空仓）。
+    #                      带指纹的包装 {"scores":..., "fingerprint":...} 会被校验，
+    #                      指纹不匹配即报错；无指纹的旧格式仅警告放行。
     score_cache = p.get("score_cache")
     collect_scores = bool(p.get("collect_scores", False))
     use_cache = score_cache is not None
     collected: dict = {} if collect_scores else None
+    # score_cache 指纹：产生/复用缓存分时校验信号配置一致性（防陈旧缓存静默复用）
+    score_fp = _score_cache_fingerprint(feat_cols, p)
+    if use_cache:
+        score_cache = _unwrap_score_cache(score_cache, score_fp)
     # 进度回调：run_session / pipeline 注入。签名 cb(phase, current, total, **extras)。
     # 进度回调是"尽力而为"——失败绝不能影响主回测。
     progress_cb = p.pop("progress_cb", None)
 
-    # 风险控制层参数（默认开波动目标化）。target_vol=年化目标波动；高于它则去杠杆。
-    # dd_brake：回撤超 dd_threshold 时再乘 dd_scale 进一步降暴露。
-    use_vol_target = bool(p.get("use_vol_target", getattr(C, "USE_VOL_TARGET", True)))
-    target_vol = float(p.get("target_vol", getattr(C, "TARGET_VOL", 0.15)))
-    vol_window = int(p.get("vol_window", getattr(C, "VOL_WINDOW", 20)))
-    use_dd_brake = bool(p.get("use_dd_brake", getattr(C, "USE_DD_BRAKE", True)))
-    dd_threshold = float(p.get("dd_threshold", getattr(C, "DD_THRESHOLD", 0.20)))
-    dd_scale = float(p.get("dd_scale", getattr(C, "DD_SCALE", 0.5)))
+    # 风险控制层：五层叠乘链（vol→dd→IC→regime→IV）的唯一实现已抽到 src/risk.py，
+    # 这里只保留各层"预计算开关/窗口"的读取，参数默认值由 risk.resolve_risk_params
+    # 统一从 config 取（消除 config=0.0 vs 本地 getattr 兜底 0.20 的双默认）。
     # IC信号失效降仓：当近期OOS rank-IC滑入负区则减少暴露。
     # 防泄露：只用【已成熟】预测日的IC (d_prev + FW ≤ d)。
-    # scale_ic = linear interp: IC≥ic_full_scale→1.0, IC≤ic_zero_scale→ic_min_scale
     use_ic_scale = bool(p.get("use_ic_scale", getattr(C, "USE_IC_SCALE", True)))
     ic_scale_window = int(p.get("ic_scale_window", getattr(C, "IC_SCALE_WINDOW", 20)))
-    ic_full_scale = float(p.get("ic_full_scale", getattr(C, "IC_FULL_SCALE", 0.02)))
-    ic_zero_scale = float(p.get("ic_zero_scale", getattr(C, "IC_ZERO_SCALE", -0.01)))
-    ic_min_scale = float(p.get("ic_min_scale", getattr(C, "IC_MIN_SCALE", 0.20)))
     # 动态 topk 集中度：根据近期 OOS rank-IC 调整持仓只数。IC 高时集中吃头部 edge，
     # IC 低时分散降低噪音与换手。与 IC 降仓共用同一个成熟 IC 队列，无泄露。
     use_dynamic_topk = bool(p.get("use_dynamic_topk", getattr(C, "USE_DYNAMIC_TOPK", False)))
@@ -119,13 +144,11 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
     use_regime = bool(p.get("use_regime", getattr(C, "USE_REGIME_FILTER", True)))
     regime_window = int(p.get("regime_window", getattr(C, "REGIME_WINDOW", 20)))
     regime_floor_ret = float(p.get("regime_floor_ret", getattr(C, "REGIME_FLOOR_RET", 0.0)))
-    regime_min = float(p.get("regime_min", getattr(C, "REGIME_MIN", 0.0)))
     # IV-based gross leverage scaling: high implied vol → de-risk.
     use_iv_scale = bool(p.get("use_iv_scale", getattr(C, "USE_IV_SCALE", False)))
     iv_scale_window = int(p.get("iv_scale_window", getattr(C, "IV_SCALE_WINDOW", 60)))
     iv_feature = p.get("iv_feature_for_scale", getattr(C, "IV_FEATURE_FOR_SCALE", "opt_vix_like"))
     iv_min_scale = float(p.get("iv_min_scale", getattr(C, "IV_MIN_SCALE", 0.5)))
-    iv_mid_scale = float(p.get("iv_mid_scale", getattr(C, "IV_MID_SCALE", 1.0)))
 
     panel = panel.sort_values(["date", "symbol"]).reset_index(drop=True)
 
@@ -211,7 +234,7 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
     ens = None
     if not use_cache:
         ens = IncrementalEnsemble(feat_cols,
-                                  models=tuple(p["ensemble_models"]) if p.get("ensemble_models") else None,
+                                  models=p.get("ensemble_models") or None,
                                   n_seeds=p.get("n_seeds"),
                                   incr_trees=p.get("incr_trees"),
                                   rebuild_days=p.get("rebuild_days"),
@@ -224,6 +247,9 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
     daily_rows: list[dict] = []
     trade_frames: list[pd.DataFrame] = []
     weight_rows: list[dict] = []
+    # 可疑除权调整计数（_price_map 写入）：pre_close 链条出现超大幅调整说明
+    # 数据源 pre_close 脏，val_factor 会永久漂移——记录下来供事后审计。
+    _suspicious_val_adjusts: list[tuple] = []
     # IC 信号失效降仓：维护一个 (pred_date -> {sym: score}) 的预测历史，
     # 和一个已成熟 IC 的滑动队列。pred_date 的 IC 在 pred_date + FW 日后才能计算。
     from collections import deque
@@ -254,6 +280,8 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
             if not np.isfinite(score).any():
                 score = np.zeros(len(today), dtype=np.float64)
             else:
+                # 缓存缺当日某股分数时以当日【最低分】填充：视同排名垫底——
+                # 不会被买入但也不从横截面剔除，避免 NaN 传染排序/分位计算。
                 score = np.nan_to_num(score, nan=np.nanmin(score))
             w = None
         else:
@@ -283,16 +311,11 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
             _pred_hist_ic[d] = {sym_today[i]: float(score[i]) for i in range(len(sym_today))}
 
         # --- 3) 决策（收盘后）---
-        # 风险控制层（仅用【已实现】历史，无未来信息）：
-        #   A. 波动目标化：按 trailing 实现波动缩放 gross（高波动去杠杆）
-        #   B. 回撤刹车：超阈值后再乘 dd_scale
-        #   C. IC 信号失效降仓：近期 OOS rank-IC 衰入负区时降暴露（最直接针对
-        #      "近窗所有 leg 失效仍持仓挨亏"的问题，IC 只用已成熟预测，防泄露）
-        risk_scale = 1.0
-        ic_scale = 1.0
+        # 风险控制层（仅用【已实现】历史，无未来信息）：先更新 IC 队列（本引擎
+        # 特有的面板切片逻辑），叠乘链本身调用 src/risk.py 的唯一实现，
+        # 与实盘 live_state.compute_risk_scale 数学逐项一致。
         if use_ic_scale:
             # 把新成熟的预测日打 IC（date + FW ≤ d = 标签已成熟）
-            from scipy.stats import spearmanr
             di = np.searchsorted(all_dates, d)
             for d_prev in list(_pred_hist_ic):
                 if d_prev in _scored_ic:
@@ -306,7 +329,8 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
                 if sub is None:
                     _scored_ic.add(d_prev); continue
                 pm = _pred_hist_ic[d_prev]
-                syms = [s for s in pm if s in sub["symbol"].to_numpy()]
+                sub_syms = set(sub["symbol"].to_numpy())   # set 成员判断，避免 O(n²)
+                syms = [s for s in pm if s in sub_syms]
                 if len(syms) < 30:
                     _scored_ic.add(d_prev); continue
                 sy = sub.set_index("symbol")
@@ -320,33 +344,11 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
                     _ic_queue.append(float(ic_val))
                 _scored_ic.add(d_prev)
                 del _pred_hist_ic[d_prev]   # 释放内存
-            # IC 缩放：线性插值 [ic_zero_scale, ic_full_scale] → [ic_min_scale, 1.0]
-            roll_ic = None
-            if len(_ic_queue) >= max(3, ic_scale_window // 4):
-                roll_ic = float(np.mean(_ic_queue))
-                t = ((roll_ic - ic_zero_scale) /
-                     (ic_full_scale - ic_zero_scale + 1e-9))
-                t = max(0.0, min(1.0, t))
-                ic_scale = ic_min_scale + t * (1.0 - ic_min_scale)
-        if (use_vol_target or use_dd_brake) and len(daily_rows) >= 6:
-            tvs = np.array([r["total_value"] for r in daily_rows], dtype=np.float64)
-            rets = tvs[1:] / tvs[:-1] - 1.0
-            if use_vol_target and len(rets) >= 5:
-                rv = float(np.std(rets[-vol_window:])) + 1e-12
-                target_daily = target_vol / np.sqrt(252.0)
-                risk_scale = min(1.0, target_daily / rv)
-            if use_dd_brake:
-                dd = tvs[-1] / tvs.max() - 1.0
-                if dd < -dd_threshold:
-                    risk_scale *= dd_scale
-        risk_scale *= ic_scale   # 三层叠加：vol × dd × IC
-        # 第四层 regime 择时：大盘下行 regime 时整体降到 regime_min（默认 0=空仓）。
-        # 用决策日 d 的【已实现】趋势标志（仅 ≤ d 行情），次日执行，防泄露。
-        if use_regime and not _regime_risk_on.get(d, True):
-            risk_scale *= regime_min
-        # 第五层 IV regime 降杠杆：高隐含波动率时降低 gross exposure。
-        if use_iv_scale:
-            risk_scale *= _iv_scale.get(d, 1.0)
+        # 五层叠乘链（唯一实现）：vol min 截断 → dd × → IC × → regime × → IV ×
+        risk_scale, ic_scale, roll_ic = risk.compute_risk_scale(
+            (r["total_value"] for r in daily_rows), _ic_queue, params=p,
+            risk_on=_regime_risk_on.get(d, True),
+            iv_scale=_iv_scale.get(d, 1.0))
         day_p = dict(p)
         day_p["gross_leverage"] = float(p.get("gross_leverage",
                                               getattr(C, "GROSS_LEVERAGE", 1.0))) * risk_scale
@@ -390,8 +392,11 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
                         "total_cost": 0.0}
 
         # --- 5) 收盘估值：用【次日】close 给收盘后的持仓估值（持仓是次日成交后的）---
+        # 除权检测只在用次日行情估值时做（pre_close(次日) 对 last_price(决策日原始收盘)）；
+        # 退化为 today 估值时 last_price 已被 decide_orders 刷新为同日收盘，会误判，故不传 state。
         val_bars = next_bars if next_bars is not None else today
-        price_map = _price_map(val_bars)
+        price_map = _price_map(val_bars, state=state if next_bars is not None else None,
+                               suspicious=_suspicious_val_adjusts)
         stock_val = state.market_value(price_map)
         total_val = state.cash + stock_val
 
@@ -405,6 +410,19 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
                     f"期望 {expected:.2f} 实际 {state.cash:.2f} "
                     f"(买{fill_res['buy_notional']:.2f} 卖{fill_res['sell_notional']:.2f} "
                     f"成本{fill_res['total_cost']:.2f})")
+            # 估值侧守恒：total_value 必须等于现金 + 按同一口径独立重算的持仓市值
+            # （停牌股用 last_price 兜底、除权股乘 val_factor，与 market_value 一致）。
+            indep_mv = 0.0
+            for s_, sh_ in state.holdings.items():
+                if sh_ <= 0:
+                    continue
+                px_ = price_map.get(s_, state.last_price.get(s_, 0.0))
+                indep_mv += sh_ * px_ * state.val_factor.get(s_, 1.0)
+            if abs(state.cash + indep_mv - total_val) > max(1.0, abs(total_val) * 1e-6):
+                raise AssertionError(
+                    f"估值守恒被破坏 @ {pd.Timestamp(d).date()}: "
+                    f"现金{state.cash:.2f} + 独立重算市值{indep_mv:.2f} "
+                    f"≠ total_value {total_val:.2f}")
 
         turnover = (fill_res["buy_notional"] + fill_res["sell_notional"])
         daily_rows.append({
@@ -466,6 +484,12 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
               if trade_frames else pd.DataFrame())
     weights = pd.DataFrame(weight_rows)
 
+    if _suspicious_val_adjusts:
+        warnings.warn(
+            f"{len(_suspicious_val_adjusts)} 次除权调整幅度超 [1/3, 3] 护栏，已跳过"
+            f"（pre_close 数据疑似脏，例：{_suspicious_val_adjusts[:3]}）",
+            stacklevel=2)
+
     # 期末以最后持仓的最后可得价格估值已在 daily 最后一行；补充总收益
     meta = {
         "initial_cash": initial_cash,
@@ -475,6 +499,8 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
         "models": (list(ens.models) if ens is not None else ["<cached>"]),
         "final_weights": (dict(ens.weights) if ens is not None else {}),
         "used_cache": use_cache,
+        "score_fingerprint": score_fp,
+        "n_suspicious_val_adjusts": len(_suspicious_val_adjusts),
     }
     out = {"daily": daily, "trades": trades, "weights": weights,
            "state": state, "meta": meta}
@@ -483,14 +509,46 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
     return out
 
 
-def _price_map(bars: pd.DataFrame) -> dict[str, float]:
-    """symbol -> close（估值用）。"""
+def _price_map(bars: pd.DataFrame, state: PortfolioState | None = None,
+               suspicious: list | None = None) -> dict[str, float]:
+    """symbol -> 估值用原始 close；传入 state 时顺手维护每股累计除权估值因子。
+
+    除权日检测：bar 的 pre_close 与该股最近一次可得原始收盘（state.last_price，
+    通常是上一估值日的原始 close）对不上 → 其间发生了除权除息，于是
+    val_factor *= last_price / pre_close。此后 market_value 的估值价 =
+    原始价 × val_factor，持仓日收益口径由 close/prev_close − 1 变为
+    close/pre_close − 1，消除除权日的假性盈亏。
+    注意：成交价不受影响——simulate_fills 始终用原始 OHLC 撮合（正确）。
+    现金分红/送股本身不入账（known limitation，见 CLAUDE.md 常见陷阱）。
+    护栏：单次调整幅度超出 [1/3, 3]（10送10 也才 2.0）判定为 pre_close 脏数据，
+    不应用该次调整并记入 suspicious（避免 val_factor 被坏数据永久污染）。
+    """
     if "close" not in bars.columns:
         return {}
     sym = bars["symbol"].to_numpy()
     close = bars["close"].to_numpy(dtype=np.float64)
-    return {sym[i]: close[i] for i in range(len(sym))
-            if close[i] == close[i] and close[i] > 0}
+    pc = (bars["pre_close"].to_numpy(dtype=np.float64)
+          if "pre_close" in bars.columns else None)
+    out: dict[str, float] = {}
+    for i in range(len(sym)):
+        px = close[i]
+        if not (px == px and px > 0):
+            continue
+        s = sym[i]
+        if state is not None and pc is not None:
+            prev_raw = state.last_price.get(s)
+            pc_i = pc[i]
+            # 0.1% 容差防浮点/舍入噪声误判为除权
+            if (prev_raw is not None and prev_raw > 0
+                    and pc_i == pc_i and pc_i > 0
+                    and abs(pc_i - prev_raw) > 0.001 * prev_raw):
+                ratio = prev_raw / pc_i
+                if 1.0 / 3.0 <= ratio <= 3.0:
+                    state.val_factor[s] = state.val_factor.get(s, 1.0) * ratio
+                elif suspicious is not None:
+                    suspicious.append((str(s), float(prev_raw), float(pc_i)))
+        out[s] = float(px)
+    return out
 
 
 def compute_trade_stats(trades: pd.DataFrame) -> dict:

@@ -1,0 +1,986 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A股量化交易系统架构解析 · 回测引擎设计原理</title>
+<style>
+:root{
+  --bg:#0d1117; --bg2:#161b22; --bg3:#1c2330; --line:#2d3748;
+  --fg:#e6edf3; --dim:#9aa7b8; --dim2:#6b7889;
+  --accent:#4cc2ff; --accent2:#7ee787; --warn:#ffa657; --danger:#ff7b72;
+  --purple:#d2a8ff; --pink:#ff9ecf; --gold:#f2cc60;
+  --mono:"SF Mono",Consolas,"Courier New",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;scroll-padding-top:20px}
+body{background:var(--bg);color:var(--fg);font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;line-height:1.75;font-size:15px}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* ---------- layout ---------- */
+.layout{display:flex;max-width:1500px;margin:0 auto}
+nav#toc{position:sticky;top:0;height:100vh;overflow-y:auto;width:250px;flex:none;
+  padding:28px 16px;border-right:1px solid var(--line);background:var(--bg2)}
+nav#toc h2{font-size:13px;color:var(--dim);letter-spacing:2px;margin-bottom:14px}
+nav#toc a{display:block;color:var(--dim);font-size:13.5px;padding:6px 10px;border-radius:6px;
+  border-left:2px solid transparent;transition:all .15s}
+nav#toc a:hover{color:var(--fg);background:var(--bg3);text-decoration:none}
+nav#toc a.active{color:var(--accent);border-left-color:var(--accent);background:var(--bg3)}
+main{flex:1;min-width:0;padding:40px 48px 120px}
+section{margin-bottom:90px}
+@media(max-width:980px){nav#toc{display:none}main{padding:24px}}
+
+/* ---------- typography ---------- */
+h1{font-size:32px;line-height:1.3;margin-bottom:8px}
+h2{font-size:24px;margin-bottom:6px;padding-top:8px;display:flex;align-items:center;gap:10px}
+h2 .num{font-family:var(--mono);font-size:14px;color:var(--accent);background:rgba(76,194,255,.1);
+  border:1px solid rgba(76,194,255,.3);border-radius:6px;padding:2px 9px}
+h3{font-size:17px;margin:28px 0 10px;color:var(--accent)}
+h4{font-size:15px;margin:18px 0 6px;color:var(--purple)}
+.sub{color:var(--dim);font-size:14px;margin-bottom:24px}
+p{margin:10px 0}
+strong{color:#fff}
+code{font-family:var(--mono);font-size:12.5px;background:var(--bg3);border:1px solid var(--line);
+  border-radius:4px;padding:1px 6px;color:var(--accent2)}
+pre{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:16px 18px;
+  overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.7;margin:14px 0}
+pre .cm{color:var(--dim2)}
+pre .kw{color:var(--pink)}
+ul,ol{margin:10px 0 10px 24px}
+li{margin:5px 0}
+table{border-collapse:collapse;width:100%;margin:16px 0;font-size:13.5px}
+th,td{border:1px solid var(--line);padding:8px 12px;text-align:left;vertical-align:top}
+th{background:var(--bg3);color:var(--accent);font-weight:600}
+tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+
+/* ---------- components ---------- */
+.hero{background:linear-gradient(135deg,#0d2137 0%,#131c2e 55%,#1a1330 100%);
+  border:1px solid var(--line);border-radius:16px;padding:44px 44px 36px;margin-bottom:60px;
+  position:relative;overflow:hidden}
+.hero::after{content:"";position:absolute;right:-80px;top:-80px;width:320px;height:320px;
+  background:radial-gradient(circle,rgba(76,194,255,.12),transparent 70%);border-radius:50%}
+.hero .badges{margin-top:18px;display:flex;flex-wrap:wrap;gap:8px}
+.badge{font-family:var(--mono);font-size:11.5px;padding:3px 10px;border-radius:20px;
+  border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--dim)}
+.badge.g{color:var(--accent2);border-color:rgba(126,231,135,.4)}
+.badge.b{color:var(--accent);border-color:rgba(76,194,255,.4)}
+.badge.o{color:var(--warn);border-color:rgba(255,166,87,.4)}
+.badge.p{color:var(--purple);border-color:rgba(210,168,255,.4)}
+
+.card{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+@media(max-width:1100px){.grid3,.grid4{grid-template-columns:1fr 1fr}}
+@media(max-width:760px){.grid2,.grid3,.grid4{grid-template-columns:1fr}}
+
+.callout{border-left:3px solid var(--accent);background:rgba(76,194,255,.06);
+  padding:14px 18px;border-radius:0 10px 10px 0;margin:16px 0}
+.callout.warn{border-color:var(--warn);background:rgba(255,166,87,.07)}
+.callout.good{border-color:var(--accent2);background:rgba(126,231,135,.06)}
+.callout.bad{border-color:var(--danger);background:rgba(255,123,114,.06)}
+.callout .t{font-weight:700;margin-bottom:4px}
+.callout.warn .t{color:var(--warn)}.callout.good .t{color:var(--accent2)}
+.callout.bad .t{color:var(--danger)}.callout .t{color:var(--accent)}
+
+figure{margin:20px 0;background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:22px}
+figcaption{text-align:center;color:var(--dim);font-size:13px;margin-top:12px}
+svg{display:block;margin:0 auto;max-width:100%}
+.svg-label{font-size:12px;fill:var(--fg)}
+.svg-dim{font-size:11px;fill:var(--dim)}
+.svg-mono{font-family:var(--mono);font-size:11px}
+
+/* pipeline boxes in SVG */
+.pbox{fill:var(--bg3);stroke:var(--line);stroke-width:1.2;rx:8}
+.pbox-hl{stroke:var(--accent);stroke-width:1.6}
+.arrow{stroke:var(--dim);stroke-width:1.4;fill:none;marker-end:url(#arrowhead)}
+
+/* accordion */
+details.acc{background:var(--bg2);border:1px solid var(--line);border-radius:10px;margin:10px 0;overflow:hidden}
+details.acc summary{cursor:pointer;padding:13px 18px;font-weight:600;list-style:none;
+  display:flex;align-items:center;gap:10px;user-select:none}
+details.acc summary::before{content:"▸";color:var(--accent);transition:transform .2s}
+details.acc[open] summary::before{transform:rotate(90deg)}
+details.acc summary:hover{background:var(--bg3)}
+details.acc .body{padding:4px 18px 16px;border-top:1px solid var(--line)}
+
+/* tabs */
+.tabs{margin:16px 0}
+.tab-btns{display:flex;gap:4px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.tab-btns button{background:none;border:none;color:var(--dim);padding:9px 16px;cursor:pointer;
+  font-size:13.5px;border-bottom:2px solid transparent;font-family:inherit}
+.tab-btns button.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab-pane{display:none;padding:18px 4px}
+.tab-pane.active{display:block}
+
+/* interactive widgets */
+.widget{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:22px;margin:20px 0}
+.widget .wtitle{font-weight:700;color:var(--accent);margin-bottom:4px;display:flex;align-items:center;gap:8px}
+.widget .wsub{color:var(--dim);font-size:12.5px;margin-bottom:16px}
+.slider-row{display:grid;grid-template-columns:170px 1fr 110px;gap:14px;align-items:center;margin:10px 0}
+.slider-row label{font-size:13px;color:var(--dim)}
+.slider-row output{font-family:var(--mono);font-size:12.5px;color:var(--accent2);text-align:right}
+input[type=range]{width:100%;accent-color:var(--accent);height:4px}
+.result-box{background:var(--bg3);border:1px solid var(--line);border-radius:10px;padding:14px 18px;
+  margin-top:16px;font-family:var(--mono);font-size:13px}
+.result-box .rrow{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px dashed rgba(255,255,255,.06)}
+.result-box .rrow:last-child{border-bottom:none}
+.result-box .rv{color:var(--accent2)}
+.result-box .rmain{font-size:16px;color:#fff;font-weight:700}
+.bar-wrap{height:8px;background:var(--bg);border-radius:4px;overflow:hidden;margin-top:6px}
+.bar-fill{height:100%;border-radius:4px;transition:width .2s}
+
+.btn{background:var(--bg3);border:1px solid var(--line);color:var(--fg);border-radius:8px;
+  padding:7px 16px;cursor:pointer;font-size:13px;font-family:inherit;transition:all .15s}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn.on{background:rgba(76,194,255,.12);border-color:var(--accent);color:var(--accent)}
+
+.kpi{font-family:var(--mono);font-size:22px;font-weight:700;color:var(--accent2)}
+.kpi-label{font-size:12px;color:var(--dim);margin-top:2px}
+canvas.chart{width:100%;height:260px;background:var(--bg);border-radius:8px}
+.legend{display:flex;gap:18px;justify-content:center;font-size:12.5px;color:var(--dim);margin-top:8px;flex-wrap:wrap}
+.legend span::before{content:"—";margin-right:5px;font-weight:700}
+footer{color:var(--dim2);font-size:12.5px;text-align:center;padding:30px;border-top:1px solid var(--line);margin-top:40px}
+.tt{position:relative;border-bottom:1px dotted var(--dim);cursor:help}
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav id="toc">
+  <h2>目录</h2>
+  <a href="#s0">总览：系统全景</a>
+  <a href="#s1">① 数据层</a>
+  <a href="#s2">② 因子与标签</a>
+  <a href="#s3">③ 模型层：增量集成</a>
+  <a href="#s4">④ 决策层：订单生成</a>
+  <a href="#s5">⑤ 风控：五层叠乘链</a>
+  <a href="#s6">⑥ 撮合引擎：成交模拟</a>
+  <a href="#s7">⑦ 成本模型</a>
+  <a href="#s8">⑧ 双回测引擎对比</a>
+  <a href="#s9">⑨ 回测 = 实盘同分布</a>
+  <a href="#s10">⑩ 防泄露体系</a>
+  <a href="#s11">⑪ 测试与质量保障</a>
+  <a href="#s12">⑫ 已知局限与路线</a>
+</nav>
+
+<main>
+
+<!-- ============================ HERO ============================ -->
+<div class="hero" id="s0">
+  <h1>A股量化交易系统架构解析</h1>
+  <p class="sub" style="font-size:15px;margin-bottom:0">
+    全市场横截面排序 · 增量机器学习集成 · 事件级逐笔回测 · 回测=实盘同分布<br>
+    <span style="font-size:13px">本文档基于源码逐行梳理（stock_predict_v2），覆盖数据 → 因子 → 模型 → 决策 → 风控 → 撮合 → 评估全链路</span>
+  </p>
+  <div class="badges">
+    <span class="badge b">全市场 ~5300 只</span>
+    <span class="badge g">78 项测试全绿</span>
+    <span class="badge p">2 个回测引擎</span>
+    <span class="badge o">5 层风控叠乘</span>
+    <span class="badge b">T+1 / 涨跌停 / 整手</span>
+    <span class="badge g">EMBARGO ≥ 前瞻窗</span>
+    <span class="badge p">回测/实盘同一决策代码</span>
+  </div>
+</div>
+
+<!-- ============================ 0. 全景 ============================ -->
+<section>
+<h2><span class="num">00</span>系统全景：七层流水线</h2>
+<p class="sub">一条主线：数据 → 因子 → 模型 → 决策 → 风控 → 撮合 → 评估；一条暗线：回测与实盘共用同一份决策/风控代码。</p>
+
+<figure>
+<svg viewBox="0 0 1080 470" width="100%">
+  <defs>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#9aa7b8"/>
+    </marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#4cc2ff" stop-opacity=".25"/>
+      <stop offset="100%" stop-color="#d2a8ff" stop-opacity=".25"/>
+    </linearGradient>
+  </defs>
+
+  <text x="540" y="26" text-anchor="middle" class="svg-label" font-size="14" font-weight="700">每日运行主循环（回测 = 把它在历史上一天天重放）</text>
+
+  <!-- main loop boxes -->
+  <g id="layerBoxes"></g>
+
+  <!-- shared code ribbon -->
+  <rect x="60" y="330" width="960" height="52" rx="10" fill="url(#glow)" stroke="#4cc2ff" stroke-width="1.2" stroke-dasharray="6 4"/>
+  <text x="540" y="352" text-anchor="middle" class="svg-label" font-size="13" font-weight="700">共享决策内核 trading.py · 共享风控 risk.py —— 回测与实盘唯一实现</text>
+  <text x="540" y="370" text-anchor="middle" class="svg-dim">decide_orders() / compute_risk_scale() / trade_costs()：改一处，两端同时生效</text>
+
+  <!-- bottom two tracks -->
+  <rect x="60" y="404" width="465" height="48" rx="10" fill="#161b22" stroke="#7ee787" stroke-width="1.2"/>
+  <text x="292" y="424" text-anchor="middle" class="svg-label" font-size="12.5" fill="#7ee787" font-weight="700">回测轨道 backtest_daily.py</text>
+  <text x="292" y="441" text-anchor="middle" class="svg-dim">历史逐日重放 · 次日真实 OHLC 撮合 · 双守恒断言</text>
+
+  <rect x="555" y="404" width="465" height="48" rx="10" fill="#161b22" stroke="#ffa657" stroke-width="1.2"/>
+  <text x="787" y="424" text-anchor="middle" class="svg-label" font-size="12.5" fill="#ffa657" font-weight="700">实盘轨道 predict_tomorrow.py</text>
+  <text x="787" y="441" text-anchor="middle" class="svg-dim">每晚生成次日订单 CSV · 风控状态持久化 · T+1 语义对齐</text>
+
+  <line x1="292" y1="382" x2="292" y2="404" class="arrow"/>
+  <line x1="787" y1="382" x2="787" y2="404" class="arrow"/>
+</svg>
+<figcaption>图 0-1 · 系统全景。中间发光带是全系统最重要的设计决策：<strong>决策与风控只写一份</strong>。</figcaption>
+</figure>
+
+<div class="grid4">
+  <div class="card"><div class="kpi">~5700</div><div class="kpi-label">全市场股票（质量过滤后 ~5300 只入池）</div></div>
+  <div class="card"><div class="kpi">~150</div><div class="kpi-label">命名因子（技术/正交/Alpha158/GTJA191/基本面/宏观/期权IV）</div></div>
+  <div class="card"><div class="kpi">20 日</div><div class="kpi-label">前瞻标签窗口 FORWARD_WINDOW（EMBARGO 同为 20）</div></div>
+  <div class="card"><div class="kpi">10 日</div><div class="kpi-label">调仓周期 REBALANCE_EVERY（≈ 半前瞻窗，抑制过交易）</div></div>
+</div>
+
+<div class="callout">
+  <div class="t">设计哲学一句话</div>
+  模型的已验证 edge 只有<strong>横截面排序</strong>（"哪只股票相对更强"），所以 ML 只负责选池；
+  何时买、买多少、能否成交，全部交给规则层与撮合层按 A 股真实规则处理。
+  每一层职责单一、可独立测试、可独立关闭。
+</div>
+</section>
+
+<script>
+// ---- build the 7-layer pipeline SVG ----
+(function(){
+  const layers = [
+    {t:"① 数据层", s:"tushare 全市场按日拉取\n质量过滤 · 缓存签名", c:"#4cc2ff"},
+    {t:"② 因子层", s:"~150 命名因子\npoint-in-time 合并", c:"#7ee787"},
+    {t:"③ 模型层", s:"增量集成 GBM+线性\n滚动 IC 定权", c:"#d2a8ff"},
+    {t:"④ 决策层", s:"topk 选池 + 择时\n精确到股数的订单", c:"#ffa657"},
+    {t:"⑤ 风控层", s:"vol/dd/IC/regime/IV\n五层叠乘缩放", c:"#ff7b72"},
+    {t:"⑥ 撮合层", s:"次日OHLC+涨跌停\nT+1 · 整手 · 参与率", c:"#f2cc60"},
+    {t:"⑦ 评估层", s:"净值/守恒校验\nIC · Sharpe · 归因", c:"#ff9ecf"},
+  ];
+  const g = document.getElementById('layerBoxes');
+  const w=138, h=92, x0=14, gap=(1080-28-7*w)/6, y=52;
+  const ns="http://www.w3.org/2000/svg";
+  layers.forEach((L,i)=>{
+    const x=x0+i*(w+gap);
+    const r=document.createElementNS(ns,"rect");
+    r.setAttribute("x",x);r.setAttribute("y",y);r.setAttribute("width",w);r.setAttribute("height",h);
+    r.setAttribute("rx",9);r.setAttribute("fill","#1c2330");r.setAttribute("stroke",L.c);r.setAttribute("stroke-width","1.4");
+    g.appendChild(r);
+    const t1=document.createElementNS(ns,"text");
+    t1.setAttribute("x",x+w/2);t1.setAttribute("y",y+26);t1.setAttribute("text-anchor","middle");
+    t1.setAttribute("class","svg-label");t1.setAttribute("font-weight","700");t1.setAttribute("fill",L.c);
+    t1.textContent=L.t;g.appendChild(t1);
+    L.s.split("\n").forEach((line,k)=>{
+      const t=document.createElementNS(ns,"text");
+      t.setAttribute("x",x+w/2);t.setAttribute("y",y+50+k*17);t.setAttribute("text-anchor","middle");
+      t.setAttribute("class","svg-dim");t.textContent=line;g.appendChild(t);
+    });
+    if(i<6){
+      const ln=document.createElementNS(ns,"line");
+      ln.setAttribute("x1",x+w+2);ln.setAttribute("y1",y+h/2);
+      ln.setAttribute("x2",x+w+gap-2);ln.setAttribute("y2",y+h/2);
+      ln.setAttribute("class","arrow");g.appendChild(ln);
+    }
+  });
+})();
+</script>
+<!-- ============================ 1. 数据层 ============================ -->
+<section id="s1">
+<h2><span class="num">01</span>数据层：全市场、逐行无泄露、缓存可失效</h2>
+<p class="sub">模块：<code>src/data/</code>（tushare 连接器 + 因子工程 + 质量过滤）。入口：<code>load_data()</code> / <code>load_factor_panel()</code></p>
+
+<h3>1.1 股票池构建：为什么是"全市场"而不是精选池</h3>
+<p>系统的研究结论（写入 <code>config.py</code> 注释）：<strong>横截面宽度是本系统最强的杠杆</strong>。49/300 只的精选池会破坏截面相关性结构、OOS alpha 不稳；只有全市场（~5300 只）产生了统计显著的真 alpha。因此默认 <code>UNIVERSE_MODE=all</code>，按交易日逐日拉取全市场行情（1 次 API 调用/天），中途被指数剔除或后来退市的股票仍在历史里——<strong>从数据源层面规避存活者偏差</strong>。</p>
+
+<h3>1.2 可交易性质量过滤（全部逐行、无未来信息）</h3>
+<figure>
+<svg viewBox="0 0 1080 150" width="100%">
+  <rect x="20" y="35" width="180" height="70" rx="9" class="pbox"/>
+  <text x="110" y="65" text-anchor="middle" class="svg-label" font-weight="700">全市场</text>
+  <text x="110" y="85" text-anchor="middle" class="svg-dim">~5700 只/日</text>
+  <line x1="200" y1="70" x2="250" y2="70" class="arrow"/>
+
+  <rect x="250" y="35" width="180" height="70" rx="9" class="pbox"/>
+  <text x="340" y="58" text-anchor="middle" class="svg-label" font-weight="700" font-size="12">价格地板</text>
+  <text x="340" y="76" text-anchor="middle" class="svg-dim">close ≥ 2.0 元</text>
+  <text x="340" y="92" text-anchor="middle" class="svg-dim">剔除仙股/准退市</text>
+  <line x1="430" y1="70" x2="480" y2="70" class="arrow"/>
+
+  <rect x="480" y="35" width="190" height="70" rx="9" class="pbox"/>
+  <text x="575" y="58" text-anchor="middle" class="svg-label" font-weight="700" font-size="12">流动性地板</text>
+  <text x="575" y="76" text-anchor="middle" class="svg-dim">20日成交额中位数</text>
+  <text x="575" y="92" text-anchor="middle" class="svg-dim">≥ 2000 万元</text>
+  <line x1="670" y1="70" x2="720" y2="70" class="arrow"/>
+
+  <rect x="720" y="35" width="150" height="70" rx="9" class="pbox"/>
+  <text x="795" y="58" text-anchor="middle" class="svg-label" font-weight="700" font-size="12">零成交剔除</text>
+  <text x="795" y="76" text-anchor="middle" class="svg-dim">volume &gt; 0</text>
+  <text x="795" y="92" text-anchor="middle" class="svg-dim">（停牌行）</text>
+  <line x1="870" y1="70" x2="920" y2="70" class="arrow"/>
+
+  <rect x="920" y="35" width="140" height="70" rx="9" class="pbox" stroke="#7ee787" stroke-width="1.6"/>
+  <text x="990" y="65" text-anchor="middle" class="svg-label" font-weight="700" fill="#7ee787">可交易池</text>
+  <text x="990" y="85" text-anchor="middle" class="svg-dim">~5300 只/日</text>
+</svg>
+<figcaption>图 1-1 · <code>_filter_tradable_universe()</code>：每只股票只在"当天通过过滤"的日期进入样本——某只股某天不达标就只缺那一天，而不是整只剔除。</figcaption>
+</figure>
+
+<h3>1.3 Point-in-time 合并：外部数据永远不能"早知道"</h3>
+<p>三类外部数据按各自的<b>可见时刻</b>合并到日频面板，全部用 <code>merge_asof(backward)</code>：</p>
+<table>
+<tr><th>数据</th><th>可见性规则</th><th>实现</th></tr>
+<tr><td>估值快照（PE/PB/PS/市值）</td><td>收盘后才发布 → <strong>快照日期 +1 天</strong>才可见</td><td><code>merge_fundamentals()</code></td></tr>
+<tr><td>季度财务因子（ROE/毛利/增速）</td><td>按<strong>公告日</strong>对齐，公告前用上一期</td><td><code>merge_financial_factors()</code> + 测试锁定滞后（年报+120天）</td></tr>
+<tr><td>期权 IV / 全球宏观</td><td>整体 <strong>lag 1 个交易日</strong>，缺失最多前向填充 3 天</td><td><code>merge_option_iv_features()</code> / <code>merge_global_macro_features()</code></td></tr>
+</table>
+
+<h3>1.4 缓存签名：任何特征变更自动失效</h3>
+<div class="callout good">
+<div class="t">防"陈旧缓存污染"机制</div>
+加工后数据集按签名缓存：<code>md5(数据源 | 股票池 | 日期区间 | FORWARD_WINDOW | 各因子开关 | <strong>因子源码内容哈希</strong> | ...)</code>。
+因子代码（<code>src/data/factors/*.py</code>）改一行，签名就变，旧缓存自动作废。
+同时落盘 <code>*.features.json</code> sidecar 记录"因子名 ↔ feature_NN 列号"映射，防止列含义静默错位。
+</div>
+</section>
+
+<!-- ============================ 2. 因子与标签 ============================ -->
+<section id="s2">
+<h2><span class="num">02</span>因子与标签：学什么、怎么定义对错</h2>
+<p class="sub">模块：<code>src/data/factors/</code> + <code>prepare_target_and_weight()</code></p>
+
+<h3>2.1 因子家族</h3>
+<div class="grid3">
+<div class="card"><h4>技术因子（基础族）</h4>动量/反转、波动率、布林带位置、RSI、量价相关等，永远开启。</div>
+<div class="card"><h4>正交异象因子</h4>Amihud 非流动性、MAX 彩票效应、特质波动、残差动量、收益偏度、52 周高点距离——补上基础族缺失的 alpha 维度。</div>
+<div class="card"><h4>Alpha158 / GTJA191</h4>Qlib 与国泰君安的公式化因子库精选子集（K线形状、趋势质量、分布位置、极值、量价持续性……）。</div>
+<div class="card"><h4>价值/财务因子</h4>ep/bp/sp/dv_ttm 及截面排名、行业内排名；ROE/毛利/营收利润增速（point-in-time）。</div>
+<div class="card"><h4>行业特征</h4>行业内相对估值排名（P0a 中和）、行业动量超额（P2 板块轮动）。</div>
+<div class="card"><h4>宏观/期权 IV</h4>VIX、美债、美元、北向资金、ETF 期权 IV——日期级 regime 特征，经宏观×个股交互项获得截面方差。</div>
+</div>
+
+<h3>2.2 标签 responder_6：模型到底在学什么</h3>
+<pre><span class="cm"># 前瞻 N=20 日收益，用【复权价】计算（除权日不产生假收益）</span>
+fwd_ret = adj_close.shift(-20) / adj_close - 1        <span class="cm"># clip 到 ±50%</span>
+responder_6 = fwd_ret - 当日同行业平均 fwd_ret         <span class="cm"># 行业中性超额</span></pre>
+<ul>
+<li><strong>为什么用复权价</strong>：原始 close 在除权日跳变，会把"除权缺口"当成负收益注入标签（这是历史上把回测灌水的 bug）。</li>
+<li><strong>为什么做截面超额</strong>：与 long_topk 的相对排名策略对齐——模型学的是"谁比谁强"，不是大盘涨跌（那是 beta，不是 alpha）。</li>
+<li><strong>样本权重</strong>：逆波动 × 时间近因（0.5→1.0 线性加权，按日期全局百分位秩）。</li>
+</ul>
+
+<h3>2.3 防泄露的核心几何：前瞻窗 × Embargo</h3>
+<figure>
+<svg viewBox="0 0 1080 240" width="100%">
+  <!-- time axis -->
+  <line x1="40" y1="120" x2="1040" y2="120" stroke="#2d3748" stroke-width="2"/>
+  <!-- ticks -->
+  <g id="tl"></g>
+  <!-- train region -->
+  <rect x="60" y="95" width="430" height="50" rx="6" fill="rgba(126,231,135,.10)" stroke="#7ee787"/>
+  <text x="275" y="88" text-anchor="middle" class="svg-label" fill="#7ee787" font-size="12.5" font-weight="700">训练段（标签已全部成熟）</text>
+  <!-- embargo -->
+  <rect x="490" y="95" width="130" height="50" fill="rgba(255,123,114,.12)" stroke="#ff7b72" stroke-dasharray="5 4"/>
+  <text x="555" y="88" text-anchor="middle" class="svg-label" fill="#ff7b72" font-size="12.5" font-weight="700">EMBARGO 20 日</text>
+  <!-- oos -->
+  <rect x="620" y="95" width="200" height="50" rx="6" fill="rgba(76,194,255,.10)" stroke="#4cc2ff"/>
+  <text x="720" y="88" text-anchor="middle" class="svg-label" fill="#4cc2ff" font-size="12.5" font-weight="700">OOS 评估段</text>
+  <!-- label window arrow -->
+  <path d="M 455 150 L 555 150" stroke="#ffa657" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <rect x="440" y="160" width="245" height="58" rx="8" fill="#1c2330" stroke="#ffa657"/>
+  <text x="562" y="180" text-anchor="middle" class="svg-label" font-size="12">训练段最后一天的标签 =</text>
+  <text x="562" y="197" text-anchor="middle" class="svg-label" font-size="12">adj_close(t+20)/adj_close(t) − 1</text>
+  <text x="562" y="212" text-anchor="middle" class="svg-dim" font-size="11">它"伸手"进 embargo 区——embargo 不足 20 天就是前视泄露</text>
+</svg>
+<figcaption>图 2-1 · 训练段尾部 20 天的标签引用未来价格，因此训练/OOS 之间必须留 ≥ FORWARD_WINDOW 的 embargo 隔离带。<code>config.py</code> 在 import 期硬断言 <code>EMBARGO_DAYS ≥ FORWARD_WINDOW</code>，不满足直接拒绝启动。</figcaption>
+</figure>
+
+<div class="callout warn">
+<div class="t">交互直觉：为什么不能"偷"这几天？</div>
+拖动滑块看 embargo 不足时，训练标签如何伸进评估窗口——这会让模型在"考试"前见过答案。
+<div class="slider-row" style="margin-top:12px">
+  <label>EMBARGO 天数</label>
+  <input type="range" id="embSlider" min="0" max="25" value="20" step="1">
+  <output id="embOut">20 天</output>
+</div>
+<div class="result-box">
+  <div class="rrow"><span>训练段最后标签的"手臂"长度（FORWARD_WINDOW）</span><span class="rv">20 天</span></div>
+  <div class="rrow"><span>泄露状态</span><span class="rv" id="embStatus" style="color:#7ee787">✓ 安全：embargo ≥ 前瞻窗</span></div>
+</div>
+</div>
+</section>
+<!-- ============================ 3. 模型层 ============================ -->
+<section id="s3">
+<h2><span class="num">03</span>模型层：增量集成 + 滚动 IC 定权</h2>
+<p class="sub">模块：<code>src/ensemble.py</code> · <code>IncrementalEnsemble</code></p>
+
+<p>全市场 ~5700 只 × ~600 个交易日的面板，<strong>每天全量重训要几个小时</strong>——不可行。解法是增量学习：</p>
+
+<figure>
+<svg viewBox="0 0 1080 210" width="100%">
+  <text x="40" y="24" class="svg-label" font-weight="700" font-size="13">时间 →</text>
+  <!-- incremental blocks -->
+  <g id="incrBlocks"></g>
+  <rect x="820" y="45" width="230" height="60" rx="8" fill="rgba(255,123,114,.10)" stroke="#ff7b72" stroke-width="1.4"/>
+  <text x="935" y="70" text-anchor="middle" class="svg-label" fill="#ff7b72" font-size="12.5" font-weight="700">每 60 天：全量重建</text>
+  <text x="935" y="88" text-anchor="middle" class="svg-dim">REBUILD_DAYS，重置漂移累积</text>
+
+  <rect x="40" y="130" width="1000" height="62" rx="8" fill="#1c2330" stroke="#2d3748"/>
+  <text x="60" y="155" class="svg-label" font-size="12.5" font-weight="700">多腿集成（默认 2 腿）：</text>
+  <text x="60" y="176" class="svg-dim" font-size="12">gbm_l2（LightGBM 回归）+ ic_linear（因子 IC 加权线性混合，2026-06 诊断反超 GBM）+ 可选 attn（截面注意力，GPU，默认关）</text>
+  <text x="640" y="176" class="svg-dim" font-size="12" fill="#d2a8ff">腿权重 = 各自近期【已成熟 OOS】rank-IC（截断 ≥0 后归一化，EMA 半衰期 5 天平滑）</text>
+</svg>
+<figcaption>图 3-1 · 增量续训（每次只对【新成熟】的标签行补 60 棵树）+ 周期性全量重建。IC 变负的腿会被自动静音。</figcaption>
+</figure>
+<script>
+(function(){
+  const g=document.getElementById('incrBlocks');const ns="http://www.w3.org/2000/svg";
+  for(let i=0;i<9;i++){
+    const r=document.createElementNS(ns,"rect");
+    r.setAttribute("x",40+i*85);r.setAttribute("y",45);r.setAttribute("width",70);r.setAttribute("height",60);
+    r.setAttribute("rx",8);r.setAttribute("fill","rgba(210,168,255,.08)");r.setAttribute("stroke","#d2a8ff");
+    g.appendChild(r);
+    const t=document.createElementNS(ns,"text");
+    t.setAttribute("x",40+i*85+35);t.setAttribute("y",70);t.setAttribute("text-anchor","middle");
+    t.setAttribute("class","svg-dim");t.textContent="续训 +60树";g.appendChild(t);
+    const t2=document.createElementNS(ns,"text");
+    t2.setAttribute("x",40+i*85+35);t2.setAttribute("y",90);t2.setAttribute("text-anchor","middle");
+    t2.setAttribute("class","svg-dim");t2.setAttribute("font-size","10");
+    t2.textContent="仅新成熟行";g.appendChild(t2);
+  }
+})();
+</script>
+
+<div class="callout">
+<div class="t">关键约束：定权 IC 也必须"成熟"</div>
+腿权重由"过去 N 个已成熟预测日的 rank-IC"决定。预测日 d 的 IC 要等 d+20 天（标签成熟）才能算。
+模型层与风控层共用这条成熟性纪律——<strong>任何依赖 responder_6 的统计量，都要晚 20 天才能使用</strong>。
+</div>
+
+<details class="acc">
+<summary>为什么默认腿是 gbm_l2 + ic_linear？（实验结论摘要）</summary>
+<div class="body">
+<ul>
+<li><code>ret_weighted</code> 腿的独立 rank-IC 为负（-0.015，10 个 OOS 窗口只有 4 个为正），其高回测收益被归因为牛市 beta 而非选股能力——已从默认集成中移除。</li>
+<li><code>ic_linear</code>（+0.085，9/10 窗口为正）与 <code>fusion</code>（+0.100，10/10）承载了真实信号。</li>
+<li>3 个 seed 的内部 bagging 相关性 ~0.98，rank-combine 与 mean 统计无差异 → 默认 mean，保留价格空间诊断能力。</li>
+</ul>
+</div>
+</details>
+</section>
+
+<!-- ============================ 4. 决策层 ============================ -->
+<section id="s4">
+<h2><span class="num">04</span>决策层：从分数到精确订单</h2>
+<p class="sub">模块：<code>src/trading.py</code> · <code>decide_orders()</code> —— 回测与实盘<strong>共用同一个函数</strong></p>
+
+<figure>
+<svg viewBox="0 0 1080 300" width="100%">
+  <rect x="20" y="30" width="200" height="90" rx="9" class="pbox pbox-hl"/>
+  <text x="120" y="58" text-anchor="middle" class="svg-label" font-weight="700" font-size="12.5">当日横截面分数</text>
+  <text x="120" y="78" text-anchor="middle" class="svg-dim">ensemble 融合排序分</text>
+  <text x="120" y="95" text-anchor="middle" class="svg-dim">（t 收盘后可知）</text>
+  <line x1="220" y1="75" x2="270" y2="75" class="arrow"/>
+
+  <rect x="270" y="30" width="210" height="90" rx="9" class="pbox"/>
+  <text x="375" y="55" text-anchor="middle" class="svg-label" font-weight="700" font-size="12.5">ML 选池</text>
+  <text x="375" y="74" text-anchor="middle" class="svg-dim">rank_pct ≤ TOPK(15%) → 候选池</text>
+  <text x="375" y="90" text-anchor="middle" class="svg-dim">rank_pct ≤ HOLD(15%) → 持有带</text>
+  <text x="375" y="106" text-anchor="middle" class="svg-dim">缓冲带抑制日内换手抖动</text>
+  <line x1="480" y1="75" x2="530" y2="75" class="arrow"/>
+
+  <rect x="530" y="30" width="240" height="90" rx="9" class="pbox"/>
+  <text x="650" y="55" text-anchor="middle" class="svg-label" font-weight="700" font-size="12.5">约束与择时</text>
+  <text x="650" y="74" text-anchor="middle" class="svg-dim">持仓数 ≤ 30 · 单票 ≤ 10%</text>
+  <text x="650" y="90" text-anchor="middle" class="svg-dim">可选：布林/RSI 择时（默认关）</text>
+  <text x="650" y="106" text-anchor="middle" class="svg-dim">可选：beta 约束 / 动态 topk</text>
+  <line x1="770" y1="75" x2="820" y2="75" class="arrow"/>
+
+  <rect x="820" y="30" width="240" height="90" rx="9" class="pbox" stroke="#ffa657" stroke-width="1.6"/>
+  <text x="940" y="55" text-anchor="middle" class="svg-label" font-weight="700" font-size="12.5" fill="#ffa657">逐笔订单（意图）</text>
+  <text x="940" y="74" text-anchor="middle" class="svg-dim">代码 · 方向 · 股数(整手) · 挂单价</text>
+  <text x="940" y="90" text-anchor="middle" class="svg-dim">涨停买单/跌停卖单标记 blocked</text>
+  <text x="940" y="106" text-anchor="middle" class="svg-dim">碎单 &lt; 3万元 过滤（不清仓单）</text>
+
+  <!-- sell first note -->
+  <rect x="270" y="170" width="540" height="46" rx="8" fill="rgba(255,166,87,.07)" stroke="#ffa657" stroke-dasharray="5 4"/>
+  <text x="540" y="189" text-anchor="middle" class="svg-label" font-size="12">订单排序：卖单在前（腾现金）→ 买单在后；组内按排名</text>
+  <text x="540" y="206" text-anchor="middle" class="svg-dim" font-size="11.5">跌出当日横截面的持仓：按 last_price 发清退单，次日仍停牌则自然不成交、次日再发</text>
+
+  <rect x="20" y="240" width="1040" height="44" rx="8" fill="#1c2330" stroke="#2d3748"/>
+  <text x="540" y="258" text-anchor="middle" class="svg-label" font-size="12">降频闸门 REBALANCE_EVERY=10：只在每第 10 个决策日重新决策，其余 9 天持有不动</text>
+  <text x="540" y="275" text-anchor="middle" class="svg-dim" font-size="11.5">实测：日频调仓 20 日周期信号 → 换手成本 ¥121M（-25.9%）；10 日调仓 → ¥23M（-4.3%），同一批分数省出 +21pp</text>
+</svg>
+<figcaption>图 4-1 · decide_orders 流水线：ML 决定"买什么"，规则层决定"何时/多少"，意图是否成交由撮合层决定。</figcaption>
+</figure>
+
+<div class="grid2">
+<div class="card">
+<h4>仓位规模公式</h4>
+<pre>每股目标金额 = min(
+  总估值 × gross_leverage × risk_scale / 持仓数上限,
+  总估值 × 单票上限 10%
+)
+股数 = floor(目标金额 / 价格 / 100) × 100</pre>
+</div>
+<div class="card">
+<h4>两种挂价模式</h4>
+<ul>
+<li><code>next_open</code>（默认）：次日开盘市价成交</li>
+<li><code>limit_bb</code>：买挂布林下轨/卖挂上轨，次日价区触及才成交——换更低换手</li>
+</ul>
+</div>
+</div>
+</section>
+
+<!-- ============================ 5. 风控 ============================ -->
+<section id="s5">
+<h2><span class="num">05</span>风控层：五层叠乘链</h2>
+<p class="sub">模块：<code>src/risk.py</code> · <code>compute_risk_scale()</code> —— 回测/实盘<strong>唯一实现</strong>，由 <code>test_risk_parity.py</code> 逐项锁定一致</p>
+
+<p>当日有效杠杆 = 基准杠杆 × <strong>风险标度 risk_scale</strong>。risk_scale 由五层按固定顺序叠乘得出，全部只用【已实现/已成熟】历史：</p>
+
+<table>
+<tr><th>#</th><th>层</th><th>触发条件</th><th>动作</th><th>默认</th></tr>
+<tr><td>A</td><td>波动率目标</td><td>20日实现波动 &gt; 目标 15%/年</td><td>risk_scale = min(1, 目标/实现)</td><td>开</td></tr>
+<tr><td>B</td><td>回撤刹车</td><td>回撤超 20%</td><td>再 × 0.5</td><td>开</td></tr>
+<tr><td>C</td><td>IC 失效降仓</td><td>近期已成熟 OOS rank-IC 滑入负区</td><td>线性插值到 [0, 1]（IC≤-0.01 → 空仓）</td><td>开</td></tr>
+<tr><td>D</td><td>Regime 择时</td><td>大盘 20 日累计收益 ≤ 0</td><td>× regime_min（默认 0 = 空仓避险）</td><td><strong>关</strong>（实测 V 型反弹中追涨杀跌，净亏）</td></tr>
+<tr><td>E</td><td>IV 降仓</td><td>期权 IV 进入 60 日高分位</td><td>× 最低 0.5</td><td>开</td></tr>
+</table>
+
+<div class="widget">
+<div class="wtitle">🎛️ 交互：五层叠乘计算器</div>
+<div class="wsub">拖动滑块，看各层如何叠乘出当日有效敞口（与 src/risk.py 公式一致）</div>
+<div class="slider-row"><label>A. 实现波动率（年化）</label><input type="range" id="rVol" min="5" max="60" value="30"><output id="rVolO">30%</output></div>
+<div class="slider-row"><label>B. 当前回撤</label><input type="range" id="rDD" min="0" max="50" value="10"><output id="rDDO">-10%</output></div>
+<div class="slider-row"><label>C. 近期滚动 IC</label><input type="range" id="rIC" min="-20" max="40" value="10"><output id="rICO">+0.010</output></div>
+<div class="slider-row"><label>D. 大盘下行 regime</label><input type="range" id="rReg" min="0" max="1" value="0"><output id="rRegO">否</output></div>
+<div class="slider-row"><label>E. IV 分位（高分位降仓）</label><input type="range" id="rIV" min="0" max="100" value="40"><output id="rIVO">40%</output></div>
+<div class="result-box">
+  <div class="rrow"><span>A. vol target（目标 15%）</span><span class="rv" id="oA">×1.00</span></div>
+  <div class="rrow"><span>B. 回撤刹车（阈值 -20%）</span><span class="rv" id="oB">×1.00</span></div>
+  <div class="rrow"><span>C. IC 降仓（-0.01→+0.02 线性）</span><span class="rv" id="oC">×1.00</span></div>
+  <div class="rrow"><span>D. regime（默认关，演示用）</span><span class="rv" id="oD">×1.00</span></div>
+  <div class="rrow"><span>E. IV 缩放</span><span class="rv" id="oE">×1.00</span></div>
+  <div class="rrow"><span class="rmain">有效敞口 risk_scale</span><span class="rmain" id="oTotal">100%</span></div>
+  <div class="bar-wrap"><div class="bar-fill" id="oBar" style="width:100%;background:#7ee787"></div></div>
+</div>
+</div>
+
+<div class="callout warn">
+<div class="t">层间哲学：渐进 vs 果断</div>
+IC 降仓是<strong>渐进的、滞后的</strong>（信号失效型风险）；regime 是<strong>果断的、二元的</strong>（市场下行型风险）。
+文档诚实地注明：regime 层防不了"市场上行但选股失效"——各管各的，不假装全能。
+</div>
+</section>
+<!-- ============================ 6. 撮合引擎 ============================ -->
+<section id="s6">
+<h2><span class="num">06</span>撮合引擎：用次日真实行情判定每一笔</h2>
+<p class="sub">模块：<code>src/trading.py</code> · <code>simulate_fills()</code> —— 决策在 t 收盘后，成交用 t+1 的 OHLC，天然滞后一日</p>
+
+<figure>
+<svg viewBox="0 0 1080 340" width="100%">
+  <text x="30" y="24" class="svg-label" font-weight="700" font-size="13">单笔订单的判定瀑布（任一关卡不过 → 拒绝并记录原因）</text>
+  <g id="waterfall"></g>
+</svg>
+<figcaption>图 6-1 · 成交判定瀑布。每个拒绝原因都会记入 trades 表的 status 列（"停牌/无次日行情"、"一字涨停无法买入"、"T+1锁仓"、"现金不足"、"流动性不足(参与率上限)"……），可逐笔审计。</figcaption>
+</figure>
+<script>
+(function(){
+  const steps=[
+    {t:"决策层拦截?",s:"blocked=True（涨跌停）直接跳过",c:"#ff7b72"},
+    {t:"次日有行情?",s:"停牌/缺数据 → 不成交",c:"#4cc2ff"},
+    {t:"一字板?",s:"一字涨停不可买 · 一字跌停不可卖",c:"#f2cc60"},
+    {t:"T+1 锁?",s:"当日新买股数不能同日卖（老仓可卖）",c:"#d2a8ff"},
+    {t:"价格触及?",s:"limit_bb 模式需价区触及挂单价",c:"#ff9ecf"},
+    {t:"参与率上限?",s:"成交 ≤ 10% × 次日成交额，超出缩量",c:"#ffa657"},
+    {t:"现金够吗?",s:"含成本循环缩手到整手，不足一手放弃",c:"#7ee787"},
+    {t:"✓ 成交",s:"更新现金/持仓/成本基础/锁定明细",c:"#7ee787"},
+  ];
+  const g=document.getElementById('waterfall');const ns="http://www.w3.org/2000/svg";
+  steps.forEach((S,i)=>{
+    const col=i%4,row=Math.floor(i/4);
+    const x=30+col*262,y=45+row*140;
+    const r=document.createElementNS(ns,"rect");
+    r.setAttribute("x",x);r.setAttribute("y",y);r.setAttribute("width",230);r.setAttribute("height",104);
+    r.setAttribute("rx",10);r.setAttribute("fill","#1c2330");r.setAttribute("stroke",S.c);r.setAttribute("stroke-width","1.4");
+    g.appendChild(r);
+    const num=document.createElementNS(ns,"text");
+    num.setAttribute("x",x+14);num.setAttribute("y",y+26);num.setAttribute("class","svg-mono");
+    num.setAttribute("fill",S.c);num.textContent=(i+1);g.appendChild(num);
+    const t=document.createElementNS(ns,"text");
+    t.setAttribute("x",x+34);t.setAttribute("y",y+26);t.setAttribute("class","svg-label");
+    t.setAttribute("font-weight","700");t.setAttribute("font-size","12.5");t.textContent=S.t;g.appendChild(t);
+    // wrap s into up to 2 lines
+    const words=S.s;let lines=[words];
+    if(words.length>15){const mid=Math.ceil(words.length/2);lines=[words.slice(0,mid),words.slice(mid)];}
+    lines.forEach((ln,k)=>{
+      const tt=document.createElementNS(ns,"text");
+      tt.setAttribute("x",x+14);tt.setAttribute("y",y+52+k*18);tt.setAttribute("class","svg-dim");
+      tt.setAttribute("font-size","11");tt.textContent=ln;g.appendChild(tt);
+    });
+    if(col<3&&i<steps.length-1){
+      const a=document.createElementNS(ns,"line");
+      a.setAttribute("x1",x+230);a.setAttribute("y1",y+52);a.setAttribute("x2",x+262);a.setAttribute("y2",y+52);
+      a.setAttribute("class","arrow");g.appendChild(a);
+    }
+  });
+})();
+</script>
+
+<h3>6.1 A 股微观结构，逐项落地</h3>
+<div class="grid2">
+<div class="card"><h4>涨跌停（按板块分档）</h4>主板 10% / 创业板 30xxxx 20% / 科创板 68xxxx 20% / 北交所 30% / ST 5%。一字板用 high≈low（0.1% 容差）判定，反向单不可成交。</div>
+<div class="card"><h4>T+1（新增股数粒度）</h4><code>t1_locked[代码] = (锁定日, 当日新买股数)</code>。同日卖出单最多只能卖"老仓"部分——加仓不会把老仓锁死（修复前会）。</div>
+<div class="card"><h4>整手与现金约束</h4>100 股一手；买入含成本循环缩手，绝不出现负现金；保守的每股成本估算先行过滤。</div>
+<div class="card"><h4>停牌与除权</h4>停牌日持仓用 last_price 兜底估值（净值不假跌）；除权日用 pre_close 链条维护 val_factor，消除假性盈亏；单次调整幅度超 [1/3, 3] 判定脏数据跳过并计数。</div>
+</div>
+
+<div class="callout good">
+<div class="t">每日双守恒断言（strict_check）</div>
+每个成交日校验：<strong>现金变动 == −买入额 + 卖出额 − 成本</strong>，以及 <strong>total_value == cash + 独立重算的持仓市值</strong>（含停牌兜底与除权因子口径）。
+任何一处偏差 &gt; max(1元, 1e-6 相对) 立即抛错——记账错误不可能静默累积。
+</div>
+</section>
+
+<!-- ============================ 7. 成本模型 ============================ -->
+<section id="s7">
+<h2><span class="num">07</span>成本模型：三项成本，一个实现</h2>
+<p class="sub"><code>trading.trade_costs()</code> —— 每日重放引擎、周期调仓引擎、实盘事前估算<strong>三处共用</strong>（2026-09 重构前是两份平行实现，存在漂移风险）</p>
+
+<pre><span class="cm"># 佣金（双边，每笔最低 5 元）——A股券商普遍规则，纯比例会系统性低估小单成本</span>
+佣金 = max(成交额 × 0.0002, 5元)
+<span class="cm"># 印花税（仅卖出）</span>
+印花税 = 成交额 × 0.001
+<span class="cm"># 平方根市场冲击（小盘股的真实成本， flat 佣金掩盖不了它）</span>
+冲击 = 成交额 × 0.1 × √(成交额 / 次日成交额ADV)</pre>
+
+<div class="widget">
+<div class="wtitle">🎛️ 交互：单笔订单成本计算器</div>
+<div class="wsub">感受最低佣金与冲击成本的相对量级——这正是"为什么小单/小盘股回测容易虚高"的直觉</div>
+<div class="slider-row"><label>成交额</label><input type="range" id="cNotional" min="3" max="7" step="0.05" value="5"><output id="cNotionalO">¥100,000</output></div>
+<div class="slider-row"><label>该股次日成交额 ADV</label><input type="range" id="cAdv" min="6" max="9" step="0.05" value="7.5"><output id="cAdvO">¥31.6M</output></div>
+<div class="slider-row"><label>方向（1=卖出 收印花税）</label><input type="range" id="cSide" min="0" max="1" value="0"><output id="cSideO">买入</output></div>
+<div class="result-box">
+  <div class="rrow"><span>参与率（成交额/ADV）</span><span class="rv" id="oPart">—</span></div>
+  <div class="rrow"><span>佣金（含最低 5 元）</span><span class="rv" id="oComm">—</span></div>
+  <div class="rrow"><span>印花税</span><span class="rv" id="oStamp">—</span></div>
+  <div class="rrow"><span>冲击成本</span><span class="rv" id="oImpact">—</span></div>
+  <div class="rrow"><span class="rmain">单边总成本率</span><span class="rmain" id="oRate">—</span></div>
+</div>
+<p style="font-size:12.5px;color:var(--dim);margin-top:10px">试试：成交额 ¥20,000（最低佣金主导，成本率 0.025%+）→ ¥5,000,000 且 ADV ¥30M（参与率 16.7% 超上限 10%，实际会被缩量；冲击成本成为主项）。</p>
+</div>
+</section>
+
+<!-- ============================ 8. 双引擎 ============================ -->
+<section id="s8">
+<h2><span class="num">08</span>双回测引擎：为什么是两个，各自回答什么问题</h2>
+
+<table>
+<tr><th></th><th>每日重放引擎 <code>run_daily_replay</code></th><th>周期调仓引擎 <code>run_backtest_periodic</code></th></tr>
+<tr><td>抽象层级</td><td>事件级逐笔（现金、股数、逐笔成交）</td><td>权重级向量化（目标权重 + 真实日收益）</td></tr>
+<tr><td>回答的问题</td><td>"这套策略<strong>实盘跑</strong>会怎样？"</td><td>"这批预测分数的<strong>信号质量</strong>如何？"</td></tr>
+<tr><td>微观结构</td><td>完整：涨跌停/T+1/整手/停牌/除权/参与率/现金约束</td><td>简化：仅成本（同公式）+ 换手</td></tr>
+<tr><td>模型更新</td><td>每日增量续训 + 滚动 IC 定权（生产口径）</td><td>外部传入静态预测序列（walkforward 产出）</td></tr>
+<tr><td>成本</td><td>trade_costs 逐笔</td><td>trade_costs 向量化（同一代码）</td></tr>
+<tr><td>用途</td><td>pipeline 主回测、参数扫描（score_cache 复用）、webapp</td><td>walkforward 滚动 OOS 指标、因子/目标评估</td></tr>
+</table>
+
+<div class="callout bad">
+<div class="t">被删除的第三个引擎（教训）</div>
+旧 <code>run_backtest</code>（每日重叠调仓）已被删除且<strong>无回落开关</strong>：对 N 日前瞻目标，它每天在每条 entry 上重复计 N 日收益
+（同一笔收益被 N 个重叠 entry 日计 N 次），且把 N 日步长当 1 日步按 252 年化——Sharpe/PnL 双重虚高。
+项目规则：<strong>不要再引入"每天赚 pos×N日收益"的写法</strong>；没有逐日收益列时显式报错而非回落旧引擎。
+</div>
+
+<div class="callout">
+<div class="t">score_cache：一次训练、多次重放</div>
+参数扫描时模型分数与"决策/撮合参数"解耦：先正常训练并收集 <code>score_cache</code>（{决策日 → {股票: 分数}}），
+后续每个参数组合只做决策+撮合重放，速度提升几个数量级。
+缓存带<strong>指纹</strong>（特征列+ensemble 配置+前瞻窗的哈希）：指纹不匹配直接拒绝复用，防止陈旧分数静默污染实验。
+</div>
+</section>
+<!-- ============================ 9. 回测=实盘 ============================ -->
+<section id="s9">
+<h2><span class="num">09</span>回测 = 实盘同分布：消除"回测一套、实盘另一套"</h2>
+<p class="sub">模块：<code>src/live.py</code> · <code>src/live_state.py</code> · <code>predict_tomorrow.py</code></p>
+
+<figure>
+<svg viewBox="0 0 1080 260" width="100%">
+  <!-- shared core -->
+  <rect x="340" y="20" width="400" height="70" rx="10" fill="#1c2330" stroke="#4cc2ff" stroke-width="1.8"/>
+  <text x="540" y="48" text-anchor="middle" class="svg-label" font-weight="700">共享内核（唯一实现）</text>
+  <text x="540" y="70" text-anchor="middle" class="svg-dim">decide_orders · compute_risk_scale · trade_costs · IncrementalEnsemble</text>
+
+  <line x1="440" y1="90" x2="240" y2="130" class="arrow"/>
+  <line x1="640" y1="90" x2="840" y2="130" class="arrow"/>
+
+  <rect x="60" y="130" width="400" height="110" rx="10" fill="#161b22" stroke="#7ee787" stroke-width="1.4"/>
+  <text x="260" y="156" text-anchor="middle" class="svg-label" font-weight="700" fill="#7ee787">回测：run_daily_replay</text>
+  <text x="260" y="178" text-anchor="middle" class="svg-dim">历史逐日重放共享内核的决策</text>
+  <text x="260" y="196" text-anchor="middle" class="svg-dim">撮合：simulate_fills（次日真实 OHLC）</text>
+  <text x="260" y="214" text-anchor="middle" class="svg-dim">产出：净值曲线 + 逐笔 trades + 守恒断言</text>
+
+  <rect x="620" y="130" width="400" height="110" rx="10" fill="#161b22" stroke="#ffa657" stroke-width="1.4"/>
+  <text x="820" y="156" text-anchor="middle" class="svg-label" font-weight="700" fill="#ffa657">实盘：predict_tomorrow --commit</text>
+  <text x="820" y="178" text-anchor="middle" class="svg-dim">今晚对最新截面跑同一个 decide_orders</text>
+  <text x="820" y="196" text-anchor="middle" class="svg-dim">产出：orders_YYYYMMDD.csv + 风控状态 JSON</text>
+  <text x="820" y="214" text-anchor="middle" class="svg-dim">成交假设：非 blocked 单全部成交（blocked 语义对齐）</text>
+</svg>
+<figcaption>图 9-1 · 双轨道共享内核。<code>test_risk_parity.py</code> 逐项锁定回测/实盘的风控数学一致；<code>test_nextday_cli_consistency.py</code> 锁定次日订单与 pipeline 路径一致。</figcaption>
+</figure>
+
+<div class="callout warn">
+<div class="t">已知分叉点都有防线</div>
+<code>USE_DYNAMIC_TOPK</code> 只在回测侧实现——实盘遇到它会<strong>显式报错</strong>而不是静默忽略。
+回测内部的 IC 打分队列与实盘 live_state 是两份平行实现（历史原因），靠 parity 测试兜底。
+</div>
+</section>
+
+<!-- ============================ 10. 防泄露 ============================ -->
+<section id="s10">
+<h2><span class="num">10</span>防泄露体系：四层纵深防御</h2>
+
+<div class="grid2">
+<div class="card">
+<h4>第 1 层 · 数据可见性</h4>
+估值快照 +1 天；财报按公告日（年报 +120 天滞后有测试锁定）；IV/宏观 lag 1；因子 IC 特征整体 shift(fw+1)。
+</div>
+<div class="card">
+<h4>第 2 层 · 标签成熟性</h4>
+模型只见 d−(fw+embargo) 的成熟标签；IC 定权/IC 降仓只用已成熟预测日；import 期断言 EMBARGO ≥ FORWARD_WINDOW。
+</div>
+<div class="card">
+<h4>第 3 层 · 决策/执行时序</h4>
+决策在 t 收盘后；成交在 t+1；估值用 t+1 收盘。决策→执行天然滞后一日，无未来信息。
+</div>
+<div class="card">
+<h4>第 4 层 · 对抗性测试</h4>
+<code>test_data_leakage.py</code>：<strong>篡改未来标签，模型分数必须逐位不变</strong>；responder_fw_* 前缀永不进特征列；引擎层 embargo 断言。
+</div>
+</div>
+
+<details class="acc">
+<summary>最容易被忽视的两处泄露（本项目真实踩过）</summary>
+<div class="body">
+<ul>
+<li><strong>因子 IC 元特征</strong>：把"因子当日 IC"当特征时，IC 用了前瞻 20 日收益——rolling 之前必须整体 shift(fw+1)，否则测试窗内的特征含有尚未成熟的 IC（前视）。</li>
+<li><strong>除权日标签</strong>：用原始价算前瞻收益，除权缺口会被当成暴跌标签。标签必须用复权价（adj_close），而成交价/估值用原始价 + val_factor——<strong>两个口径刻意分离</strong>。</li>
+</ul>
+</div>
+</details>
+</section>
+
+<!-- ============================ 11. 测试 ============================ -->
+<section id="s11">
+<h2><span class="num">11</span>测试与质量保障</h2>
+<p class="sub">78 项测试全绿 · 回测正确性不靠"看上去合理"，靠逐条手算断言锁定</p>
+
+<div class="widget">
+<div class="wtitle">📈 交互演示：成本对净值曲线的真实影响</div>
+<div class="wsub">合成日收益序列（均值 +0.08%/日，波动 1.2%/日，基准杠杆 100%）——切换成本开关，看"纸面 alpha"如何被磨掉</div>
+<div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+  <button class="btn on" id="btnGross">毛收益（无成本）</button>
+  <button class="btn" id="btnFlat">+ 佣金/印花税</button>
+  <button class="btn" id="btnImpact">+ 冲击成本</button>
+  <button class="btn" id="btnMinComm">+ 最低佣金(小单)</button>
+</div>
+<canvas class="chart" id="eqChart" width="1000" height="260"></canvas>
+<div class="legend">
+  <span style="color:#7ee787">毛收益</span>
+  <span style="color:#4cc2ff">+佣金印花税</span>
+  <span style="color:#ffa657">+冲击</span>
+  <span style="color:#ff7b72">+最低佣金</span>
+</div>
+<div class="result-box" id="eqStats"></div>
+</div>
+
+<div class="grid3">
+<div class="card"><h4>成本模型</h4>test_cost_model.py：佣金/印花税/冲击逐一手算锁定；最低佣金下限；参与率限量；标量/向量一致。</div>
+<div class="card"><h4>撮合现实性</h4>test_fills_realism.py：停牌估值兜底、除权无假盈亏、blocked 不成交、清退单、现金不足不留负、一字板容差。</div>
+<div class="card"><h4>守恒与回归</h4>test_backtest_synthetic / regression / periodic：现金+估值双守恒、成本只在调仓日发生、年化口径自洽。</div>
+<div class="card"><h4>防泄露</h4>test_data_leakage.py：披露滞后、embargo 硬失败、标签永不进特征、篡改未来分数不变。</div>
+<div class="card"><h4>回测=实盘</h4>test_risk_parity / test_nextday_cli_consistency / test_sim2real_fixes：风控逐项一致、订单路径一致、T+1/板块幅度。</div>
+<div class="card"><h4>策略行为</h4>test_dynamic_topk / test_beta_constraint / test_trade_calendar 等：动态集中度、beta 替换、交易日历防静默截断。</div>
+</div>
+</section>
+
+<!-- ============================ 12. 局限 ============================ -->
+<section id="s12">
+<h2><span class="num">12</span>已知局限与改进路线</h2>
+
+<table>
+<tr><th>局限</th><th>影响</th><th>状态</th></tr>
+<tr><td>现金分红/送股不入账（估值只按 pre_close 链调整）</td><td>长期回测轻微低估收益；标签(复权价口径)与PnL(原始价口径)间有系统性缝隙</td><td>文档化 known limitation；待全量公司行动数据</td></tr>
+<tr><td>无基准（沪深300）超额曲线</td><td>报告缺相对收益视角</td><td>待接入指数行情数据</td></tr>
+<tr><td>回测/实盘两份 IC 队列实现</td><td>漂移风险（目前靠 parity 测试兜底）</td><td>低优先级重构项</td></tr>
+<tr><td>动态 topk 仅回测实现</td><td>该开关不能上实盘（会显式报错）</td><td>待验证后补齐实盘路径</td></tr>
+<tr><td>无独立滑点项</td><td>由冲击模型承担；无盘口挂单深度模拟</td><td>日频粒度下的务实取舍</td></tr>
+<tr><td>TOPK 等参数在测试集上调过参</td><td>mild snooping，报告值是略乐观上界</td><td>已在 config 注释中声明</td></tr>
+</table>
+
+<div class="callout good">
+<div class="t">这套系统最值得借鉴的三件事</div>
+① 决策/风控/成本<strong>只写一份</strong>，回测与实盘天然同分布；
+② 所有依赖前瞻标签的统计量都遵守"<strong>成熟性纪律</strong>"，并有对抗性测试兜底；
+③ 记账有<strong>每日双守恒断言</strong>——回测数字错不错，引擎自己知道。
+</div>
+
+<footer>
+基于 stock_predict_v2 源码生成 · 核心模块：src/trading.py · src/backtest_daily.py · src/backtest.py · src/risk.py · src/ensemble.py · src/data/<br>
+交互部件的公式与代码实现一一对应；拖动滑块即可验证。
+</footer>
+</section>
+
+</main>
+</div>
+
+<script>
+/* ============ scrollspy ============ */
+(function(){
+  const links=[...document.querySelectorAll('#toc a')];
+  const secs=links.map(a=>document.querySelector(a.getAttribute('href')));
+  const spy=()=>{
+    let idx=0;
+    secs.forEach((s,i)=>{if(s&&s.getBoundingClientRect().top<120)idx=i;});
+    links.forEach((a,i)=>a.classList.toggle('active',i===idx));
+  };
+  document.addEventListener('scroll',spy,{passive:true});window.addEventListener('scroll',spy,{passive:true});spy();
+})();
+
+/* ============ embargo slider ============ */
+(function(){
+  const sl=document.getElementById('embSlider'),out=document.getElementById('embOut'),st=document.getElementById('embStatus');
+  const upd=()=>{
+    const v=+sl.value;out.textContent=v+' 天';
+    if(v>=20){st.textContent='✓ 安全：embargo ≥ 前瞻窗';st.style.color='#7ee787';}
+    else{st.textContent=`✗ 泄露！训练段最后 ${20-v} 天的标签伸进了 OOS 窗口`;st.style.color='#ff7b72';}
+  };
+  sl.addEventListener('input',upd);upd();
+})();
+
+/* ============ risk chain calculator ============ */
+(function(){
+  const $=id=>document.getElementById(id);
+  const upd=()=>{
+    const vol=+$('rVol').value, dd=+$('rDD').value, ic=+$('rIC').value/1000,
+          reg=+$('rReg').value===1, ivq=+$('rIV').value;
+    $('rVolO').textContent=vol+'%';
+    $('rDDO').textContent='-'+dd+'%';
+    $('rICO').textContent=(ic>=0?'+':'')+ic.toFixed(3);
+    $('rRegO').textContent=reg?'是':'否';
+    $('rIVO').textContent=ivq+'%';
+    // A: vol target 15%
+    const targetDaily=0.15/Math.sqrt(252), rv=vol/100/Math.sqrt(252);
+    const A=Math.min(1,targetDaily/rv);
+    // B: dd brake
+    const B=dd>20?0.5:1.0;
+    // C: IC scale, -0.01..0.02 -> 0..1
+    let t=(ic-(-0.01))/(0.02-(-0.01));t=Math.max(0,Math.min(1,t));
+    const C=t; // ic_min_scale=0
+    // D: regime (演示: regime_min=0)
+    const D=reg?0.0:1.0;
+    // E: IV: >=66分位→0.5, <=33→1.0, 中间线性
+    let E=1.0;
+    if(ivq>=66)E=0.5;else if(ivq>33)E=1.0+((ivq-33)/33)*(0.5-1.0);
+    const total=A*B*C*D*E;
+    $('oA').textContent='×'+A.toFixed(2);
+    $('oB').textContent='×'+B.toFixed(2);
+    $('oC').textContent='×'+C.toFixed(2);
+    $('oD').textContent='×'+D.toFixed(2);
+    $('oE').textContent='×'+E.toFixed(2);
+    $('oTotal').textContent=(total*100).toFixed(0)+'%';
+    const bar=$('oBar');bar.style.width=(total*100)+'%';
+    bar.style.background=total>0.7?'#7ee787':total>0.3?'#ffa657':'#ff7b72';
+  };
+  ['rVol','rDD','rIC','rReg','rIV'].forEach(id=>$(id).addEventListener('input',upd));upd();
+})();
+
+/* ============ cost calculator ============ */
+(function(){
+  const $=id=>document.getElementById(id);
+  const fmt=n=>'¥'+n.toLocaleString('zh-CN',{maximumFractionDigits:2});
+  const upd=()=>{
+    const notional=Math.pow(10,+$('cNotional').value);
+    const adv=Math.pow(10,+$('cAdv').value);
+    const sell=+$('cSide').value===1;
+    $('cNotionalO').textContent=fmt(notional);
+    $('cAdvO').textContent=adv>=1e6?'¥'+(adv/1e6).toFixed(1)+'M':fmt(adv);
+    $('cSideO').textContent=sell?'卖出':'买入';
+    const comm=Math.max(notional*0.0002,5.0);
+    const stamp=sell?notional*0.001:0;
+    const impact=0.1*Math.sqrt(notional/adv)*notional;
+    const part=notional/adv;
+    $('oPart').textContent=(part*100).toFixed(2)+'%'+(part>0.10?' ⚠ 超 10% 上限，将缩量':'');
+    $('oPart').style.color=part>0.10?'#ff7b72':'#7ee787';
+    $('oComm').textContent=fmt(comm)+(notional*0.0002<5?'（最低佣金生效）':'');
+    $('oStamp').textContent=fmt(stamp);
+    $('oImpact').textContent=fmt(impact);
+    const rate=(comm+stamp+impact)/notional;
+    $('oRate').textContent=(rate*100).toFixed(3)+'%  ('+fmt(comm+stamp+impact)+')';
+  };
+  ['cNotional','cAdv','cSide'].forEach(id=>$(id).addEventListener('input',upd));upd();
+})();
+
+/* ============ equity curve demo ============ */
+(function(){
+  const $=id=>document.getElementById(id);
+  // deterministic pseudo-random series
+  let seed=42;const rnd=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296;};
+  const N=250,rets=[];
+  for(let i=0;i<N;i++){const u1=rnd()||1e-9,u2=rnd();
+    rets.push(0.0008+0.012*Math.sqrt(-2*Math.log(u1))*Math.cos(2*Math.PI*u2));}
+  const turnoverDaily=2*0.15/10; // topk 15% pool, 10日调仓 → 日均双边换手 ~3%
+  const notional=100000, adv=3e7;
+  const curves={gross:[],flat:[],impact:[],minc:[]};
+  let g=1,f=1,im=1,mc=1;
+  for(const r of rets){
+    const trade=turnoverDaily; // fraction of book traded per day (one side each way /2)
+    const commFrac=trade*0.0002, stampFrac=trade/2*0.001;
+    const impFrac=trade*0.1*Math.sqrt(notional/adv);
+    // min commission: if per-order notional small (30k), min5元 dominates → effective rate 5/30000
+    const smallOrderRate=Math.max(30000*0.0002,5)/30000;
+    const mincFrac=trade*smallOrderRate+stampFrac;
+    g*=1+r; f*=1+r-(commFrac+stampFrac); im*=1+r-(commFrac+stampFrac+impFrac); mc*=1+r-mincFrac;
+    curves.gross.push(g);curves.flat.push(f);curves.impact.push(im);curves.minc.push(mc);
+  }
+  const state={gross:true,flat:false,impact:false,minc:false};
+  const colors={gross:'#7ee787',flat:'#4cc2ff',impact:'#ffa657',minc:'#ff7b72'};
+  const names={gross:'毛收益',flat:'+佣金印花税',impact:'+冲击',minc:'+最低佣金'};
+  const btns={gross:'btnGross',flat:'btnFlat',impact:'btnImpact',minc:'btnMinComm'};
+  function draw(){
+    const cv=$('eqChart'),ctx=cv.getContext('2d');
+    const W=cv.width=cv.clientWidth*2,H=cv.height=520;
+    ctx.clearRect(0,0,W,H);
+    let all=[];for(const k in state)if(state[k])all=all.concat(curves[k]);
+    if(!all.length)return;
+    const mn=Math.min(...all),mx=Math.max(...all),pad=(mx-mn)*0.08||0.01;
+    const y=v=>H-20-(v-mn+pad)/(mx-mn+2*pad)*(H-50);
+    // grid
+    ctx.strokeStyle='rgba(255,255,255,.06)';ctx.lineWidth=1;
+    for(let i=0;i<=4;i++){const yy=20+i*(H-60)/4;ctx.beginPath();ctx.moveTo(40,yy);ctx.lineTo(W-10,yy);ctx.stroke();}
+    // zero-cost=1 line
+    ctx.strokeStyle='rgba(255,255,255,.2)';ctx.setLineDash([5,4]);
+    ctx.beginPath();ctx.moveTo(40,y(1));ctx.lineTo(W-10,y(1));ctx.stroke();ctx.setLineDash([]);
+    for(const k in state){
+      if(!state[k])continue;
+      ctx.strokeStyle=colors[k];ctx.lineWidth=2.4;ctx.beginPath();
+      curves[k].forEach((v,i)=>{const x=40+i/(N-1)*(W-60);i?ctx.lineTo(x,y(v)):ctx.moveTo(x,y(v));});
+      ctx.stroke();
+    }
+    // stats
+    let html='';
+    for(const k in state)if(state[k]){
+      const tot=(curves[k][N-1]-1)*100;
+      html+=`<div class="rrow"><span>${names[k]}</span><span class="rv" style="color:${colors[k]}">${tot>=0?'+':''}${tot.toFixed(1)}%（250 交易日）</span></div>`;
+    }
+    if(state.gross&&state.minc){
+      const drag=((curves.gross[N-1]-curves.minc[N-1])*100).toFixed(1);
+      html+=`<div class="rrow"><span class="rmain">成本侵蚀</span><span class="rmain" style="color:#ff7b72">-${drag} pp</span></div>`;
+    }
+    $('eqStats').innerHTML=html;
+  }
+  for(const k in btns)$(btns[k]).addEventListener('click',()=>{
+    state[k]=!state[k];$(btns[k]).classList.toggle('on',state[k]);draw();});
+  window.addEventListener('resize',draw);draw();
+})();
+</script>
+</body>
+</html>

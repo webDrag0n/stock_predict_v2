@@ -279,14 +279,9 @@ TRAIN_WINDOW = int(os.environ.get("TRAIN_WINDOW", "500"))
 TEST_WINDOW = int(os.environ.get("TEST_WINDOW", "60"))
 WF_STEP = int(os.environ.get("WF_STEP", str(TEST_WINDOW)))
 
-# Periodic-rebalance backtest (default on). With an N-day forward target, earning
-# pos*responder_6 every date double-counts each N-day return across N overlapping
-# entry days and mis-annualizes (ann=252 as if 1-day steps) → hugely inflated
-# Sharpe/PnL. When True, the walk-forward uses run_backtest_periodic: adopt the
-# strategy's weights only every REBALANCE_DAYS dates, hold fixed in between, and
-# earn the ACTUAL daily return of held names — each return counted once, ann=252
-# correct. Set "0" to revert to the legacy (inflated) daily-overlap engine.
-PERIODIC_REBALANCE = os.environ.get("PERIODIC_REBALANCE", "1") == "1"
+# 周期调仓回测：每 REBALANCE_DAYS 个交易日采用一次策略权重，中间持有，每天赚
+# 持有标的的真实日收益（return_1d/pct_chg），每个收益只计一次、ann=252 口径正确。
+# 旧的每日重叠引擎（run_backtest，Sharpe/PnL 双重虚高）已删除，无回落开关。
 REBALANCE_DAYS = int(os.environ.get("REBALANCE_DAYS", str(FORWARD_WINDOW)))
 
 # Industry neutralization (P0a): when True, the target responder_6 is the
@@ -337,6 +332,13 @@ DYNAMIC_TOPK_HIGH = float(os.environ.get("DYNAMIC_TOPK_HIGH", "0.25"))
 # --- A-share transaction costs ---------------------------------------------
 COMMISSION_RATE = 0.0002   # brokerage commission, charged on BOTH buy and sell
 STAMP_DUTY_RATE = 0.0010   # stamp duty, charged on the SELL side only
+# 最低佣金（元/笔）：A股券商普遍 max(5元, 费率×成交额)。纯比例佣金会系统性低估
+# 小额订单的成本（5万元订单的真实佣金是 5 元而非 1 元）。设为 0 可退回纯比例。
+MIN_COMMISSION = float(os.environ.get("MIN_COMMISSION", "5.0"))  # 元/笔
+# 参与率上限：单笔成交股数 ≤ MAX_PARTICIPATION × 次日成交额(ADV)。冲击成本模型
+# 只"计价"不"限量"，没有这个上限回测可以按开盘价吃下超过全天成交量的订单，
+# 资金规模稍大就会系统性偏乐观。0 = 不限量（退回旧行为）。
+MAX_PARTICIPATION = float(os.environ.get("MAX_PARTICIPATION", "0.10"))
 
 # Liquidity-aware market-impact cost (square-root model), on top of commission +
 # stamp. For a trade of notional N in a stock with average daily dollar volume
@@ -370,14 +372,17 @@ RANDOM_STATE = 42
 #   SEED_COMBINE=rank only when merging independent full runs (e.g. multiseed).
 SEED_COMBINE = os.environ.get("SEED_COMBINE", "mean")  # "mean" | "rank"
 
+# walkforward 滚动窗口内每个模型 bagging 的 seed 数（增量集成用 ENSEMBLE_N_SEEDS）。
+N_SEEDS = int(os.environ.get("N_SEEDS", "3"))
+
 # --- Incremental ensemble (daily trading engine) ---------------------------
 # The daily replay backtest and live next-day path train via IncrementalEnsemble
 # (src/ensemble.py): GBM boosters are CONTINUED-trained (LightGBM init_model)
 # each update instead of refit from scratch — whole-market ~5700 stocks × ~600
 # days makes full daily retrain infeasible (hours). Every REBUILD_DAYS a full
 # rebuild on the trailing TRAIN_WINDOW resets drift accumulation.
-#   ENSEMBLE_MODELS : comma list of model legs. Default 3-leg blend whose errors
-#                     de-correlate: gbm_l2, gbm_ret_weighted, ic_linear.
+#   ENSEMBLE_MODELS : comma list of model legs. Default 2-leg blend whose errors
+#                     de-correlate: gbm_l2, ic_linear.
 #   INCR_TREES      : trees appended per incremental update (on newly-matured rows)
 #   FULL_TREES      : trees grown on a full rebuild
 #   REBUILD_DAYS    : trading days between full rebuilds
@@ -388,16 +393,61 @@ SEED_COMBINE = os.environ.get("SEED_COMBINE", "mean")  # "mean" | "rank"
 # 2026-06-30: added 'attn' (cross-sectional attention, src/model_attn.py) as a leg.
 # It beat the GBM legs decisively in walk-forward (OOS IC 0.112 vs 0.098, and +54pp
 # net value in the production replay), and IC-weighting will lean on it when it leads.
-# Default ensemble for backtest/live: a 3-leg blend whose errors de-correlate.
+# 2026-08-28: dropped gbm_ret_weighted from the default blend. The Tier-1
+# walk-forward grid (2024-01~2026-08, 10 non-overlapping OOS windows) showed its
+# standalone rank-IC is negative (-0.015, only 4/10 windows positive, and -0.07 ~
+# -0.12 in the latest windows); its high backtest PnL is bull-market beta, not
+# selection. ic_linear (+0.085, 9/10) and fusion (+0.100, 10/10) carry the real
+# signal, and production attribution showed rolling IC -0.116 for this leg.
+# Default ensemble for backtest/live: a 2-leg blend whose errors de-correlate.
 # The attention leg is GPU-trained on each full rebuild (REBUILD_DAYS); on a
 # whole-market ~5700-stock panel it is both slow and memory-heavy, so it is now
-# opt-in.  Re-enable it with ENSEMBLE_MODELS=attn,gbm_l2,gbm_ret_weighted,ic_linear.
+# opt-in.  Re-enable it with ENSEMBLE_MODELS=attn,gbm_l2,ic_linear.
 ENSEMBLE_MODELS = os.environ.get("ENSEMBLE_MODELS",
-                                 "gbm_l2,gbm_ret_weighted,ic_linear")
+                                 "gbm_l2,ic_linear")
+# 增量集成的 seed 数：每日续训成本敏感，默认 1（N_SEEDS env 同时覆盖此处与
+# walkforward 的 bagging seed 数——两条路径历史上都读这个 env，故保留同名）。
+ENSEMBLE_N_SEEDS = int(os.environ.get("N_SEEDS", "1"))
+# 每次增量更新、每个【新成熟交易日】续训的树数（续训量随新数据量伸缩）；
+# 两次全量重建之间总树数硬上限 = FULL_TREES * 2，超限提前触发全量重建。
 INCR_TREES = int(os.environ.get("INCR_TREES", "60"))
 FULL_TREES = int(os.environ.get("FULL_TREES", "400"))
 REBUILD_DAYS = int(os.environ.get("REBUILD_DAYS", "60"))
 IC_WINDOW = int(os.environ.get("IC_WINDOW", "20"))
+# 滚动 IC 定权的 EMA 平滑半衰期（交易日）：平滑 IC 过零跳变引起的权重/换手尖峰。
+# 0 = 不平滑（直接用尾部 IC 均值定权）。首次由数据驱动的定权不平滑（避免
+# 实盘单次定权被初始等权稀释）。
+IC_WEIGHT_EMA_HALFLIFE = float(os.environ.get("IC_WEIGHT_EMA_HALFLIFE", "5"))
+
+# --- Model gate（champion/staging 晋升机制，src/model_store + src/model_gate）--
+# 每晚训练完候选后比较配方指纹：与 champion 相同 → 原位刷新工件（零开销）；
+# 不同 → 候选落盘 models/staging/，双方各跑一遍最近 PROMOTE_EVAL_DAYS 个交易日的
+# 完整每日重放，Sharpe 更高且回撤不劣于 champion − PROMOTE_DD_TOLERANCE 才晋升，
+# 否则 champion 不变、候选留档 + evaluation.json。USE_MODEL_GATE=0 退回旧行为
+# （每晚重训直接用，等同 --no-gate）。
+USE_MODEL_GATE = os.environ.get("USE_MODEL_GATE", "1") == "1"
+PROMOTE_EVAL_DAYS = int(os.environ.get("PROMOTE_EVAL_DAYS", "120"))
+PROMOTE_SHARPE_MARGIN = float(os.environ.get("PROMOTE_SHARPE_MARGIN", "0"))
+PROMOTE_DD_TOLERANCE = float(os.environ.get("PROMOTE_DD_TOLERANCE", "0.02"))
+ARCHIVE_KEEP = int(os.environ.get("ARCHIVE_KEEP", "5"))
+
+# --- Adaptive retrain + live tracking（src/retrain_trigger + src/live_tracking）
+# 默认不再每晚重训：用跟踪指标 OR 判定是否触发（任一满足即重训）：
+#   1. 活体 IC 退化：成熟样本 ≥ RETRAIN_IC_MIN_SAMPLES 且尾部 RETRAIN_IC_WINDOW
+#      日 OOS rank-IC 均值 < RETRAIN_IC_MIN；
+#   2. 收益落后（需 account.csv 真实净值）：尾部 RETRAIN_UNDERPERF_DAYS 实盘收益
+#      < 等权基准 − RETRAIN_UNDERPERF_MARGIN；
+#   3. 模型超龄：train_end_date 距今 > MAX_MODEL_AGE_DAYS 个交易日（硬上限）。
+# 触发 → 训练候选走 model_gate 门控；未触发 → 冻结 champion 工件直接预测。
+# USE_ADAPTIVE_RETRAIN=0 退回每晚重训（旧行为）。跟踪快照/报告落 TRACKING_DIR。
+USE_ADAPTIVE_RETRAIN = os.environ.get("USE_ADAPTIVE_RETRAIN", "1") == "1"
+RETRAIN_IC_WINDOW = int(os.environ.get("RETRAIN_IC_WINDOW", "20"))
+RETRAIN_IC_MIN = float(os.environ.get("RETRAIN_IC_MIN", "0"))
+RETRAIN_IC_MIN_SAMPLES = int(os.environ.get("RETRAIN_IC_MIN_SAMPLES", "10"))
+RETRAIN_UNDERPERF_DAYS = int(os.environ.get("RETRAIN_UNDERPERF_DAYS", "20"))
+RETRAIN_UNDERPERF_MARGIN = float(os.environ.get("RETRAIN_UNDERPERF_MARGIN", "0.03"))
+MAX_MODEL_AGE_DAYS = int(os.environ.get("MAX_MODEL_AGE_DAYS", "60"))
+TRACKING_DIR = os.path.join(OUTPUT_DIR, "tracking")
 
 # --- Daily trading engine (decision + fill simulation) ---------------------
 # The shared daily engine (src/trading.py) is used identically by the replay
@@ -575,3 +625,27 @@ IV_SCALE_WINDOW = int(os.environ.get("IV_SCALE_WINDOW", "60"))      # trailing t
 IV_FEATURE_FOR_SCALE = os.environ.get("IV_FEATURE_FOR_SCALE", "opt_vix_like")
 IV_MIN_SCALE = float(os.environ.get("IV_MIN_SCALE", "0.5"))         # leverage multiplier in high-IV regime
 IV_MID_SCALE = float(os.environ.get("IV_MID_SCALE", "1.0"))         # leverage multiplier in mid-IV regime
+
+
+# --- Config validation (import-time) -----------------------------------------
+def _validate() -> None:
+    """防泄露硬校验：配置不满足底线就 import 即失败，不静默放行。
+
+    - EMBARGO_DAYS >= FORWARD_WINDOW：训练段最后 FORWARD_WINDOW 天的标签
+      （close.shift(-FORWARD_WINDOW)）会伸入 OOS 窗口的价格，embargo 不足
+      即前视泄露。
+    - multi_* 目标下每个 horizon 各训一个模型，最长 horizon 的标签需要
+      max(MULTI_HORIZON_WINDOWS) 的 embargo；不足时显式报错（不静默放大，
+      因为 IC 定权/特征成熟逻辑也依赖统一 fw 口径）。
+    """
+    assert EMBARGO_DAYS >= FORWARD_WINDOW, (
+        f"EMBARGO_DAYS={EMBARGO_DAYS} < FORWARD_WINDOW={FORWARD_WINDOW}："
+        "训练段尾部标签会偷看 OOS 窗口价格（前视泄露）")
+    if MODEL_OBJECTIVE.startswith("multi_") and MULTI_HORIZON_WINDOWS:
+        longest = max(MULTI_HORIZON_WINDOWS)
+        assert EMBARGO_DAYS >= longest, (
+            f"multi 目标要求 EMBARGO_DAYS={EMBARGO_DAYS} >= "
+            f"max(MULTI_HORIZON_WINDOWS)={longest}，否则长 horizon 标签泄露")
+
+
+_validate()

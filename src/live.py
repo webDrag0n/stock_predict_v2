@@ -2,19 +2,12 @@
 
 设计原则
 --------
-1. 训练/实盘同分布：实盘**直接复用** walkforward._train_predict（见
-   train_and_predict_latest），因此 MODEL_OBJECTIVE(ret_weighted)、按日截面
-   z-score+MAD-winsorize、多 seed、正则化超参与已验证回测**逐项一致**。训练集
-   换成"截至最新有标签日的全部历史"，预测对象换成"最新无标签日"。
+1. 训练/实盘同分布：实盘用 IncrementalEnsemble（ensemble_predict_latest），
+   与每日重放回测（backtest_daily.run_daily_replay）逐项同口径——同样的多模型
+   腿、截面归一化、滚动 IC 定权与五层风控（src/risk.py）。
 2. 信号只用于排序：long_topk 只看预测排名，不把 prediction 当涨幅，与回测一致。
-3. 换手缓冲：建仓阈值 topk，平仓阈值放宽到 topk+buffer，中间地带继续持有不新买，
-   显著压低换手与交易成本（FW=5 的成本痛点）。
-4. 无未来信息：只用 date<=今天 的特征；最新一天的特征是当日收盘后才完整的，
+3. 无未来信息：只用 date<=今天 的特征；最新一天的特征是当日收盘后才完整的，
    因此信号当晚算出、次日执行。
-
-train_full_model + predict_latest 是旧路径（朴素 l2、原始特征 nan→0、单 seed），
-在 ret_weighted/全市场结论之前写的，已被 train_and_predict_latest 取代。保留仅
-为向后兼容/单测，生产勿用。
 
 纯函数为主，便于单测；CLI 编排在 predict_tomorrow.py。
 """
@@ -22,12 +15,8 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import lightgbm as lgb
 
 import config as C
-
-# A股最小交易单位：1 手 = 100 股
-LOT = 100
 
 
 def live_panel_start_date(train_window: int | None = None,
@@ -46,47 +35,12 @@ def live_panel_start_date(train_window: int | None = None,
     return (datetime.now() - timedelta(days=calendar_days)).strftime("%Y-%m-%d")
 
 
-def train_full_model(panel: pd.DataFrame, feat_cols: list[str]) -> lgb.LGBMRegressor:
-    """用 panel 中所有【有标签】行训练一个 LGB（参数同 walkforward）。"""
-    train = panel.dropna(subset=[C.TARGET])
-    Xtr = train[feat_cols].to_numpy(np.float32, copy=True)
-    np.nan_to_num(Xtr, copy=False, nan=0.0)
-    ytr = train[C.TARGET].to_numpy()
-    wtr = train[C.WEIGHT].to_numpy() if C.WEIGHT in train else None
-
-    model = lgb.LGBMRegressor(
-        n_estimators=400, learning_rate=0.05, num_leaves=63,
-        subsample=0.8, colsample_bytree=0.7, min_child_samples=20,
-        reg_lambda=0.1, objective="l2",
-        random_state=C.RANDOM_STATE, n_jobs=-1, verbose=-1)
-    model.fit(Xtr, ytr, sample_weight=wtr)
-    return model
-
-
-def predict_latest(model: lgb.LGBMRegressor, panel: pd.DataFrame,
-                   feat_cols: list[str]) -> pd.DataFrame:
-    """对 panel 中最新交易日的全 universe 行做预测。
-
-    返回 today 子表（含 close、prediction、rank_pct），按 prediction 降序。
-    rank_pct=0 是预测最高（最看好）的股票。
-    """
-    latest = panel["date"].max()
-    today = panel[panel["date"] == latest].copy()
-    X = today[feat_cols].to_numpy(np.float32, copy=True)
-    np.nan_to_num(X, copy=False, nan=0.0)
-    today["prediction"] = np.asarray(model.predict(X), dtype=np.float64).ravel()
-    # rank_pct: 0=最看好, 1=最不看好（百分位）
-    today["rank_pct"] = today["prediction"].rank(ascending=False, pct=True)
-    return today.sort_values("prediction", ascending=False).reset_index(drop=True)
-
-
 def train_and_predict_latest(panel: pd.DataFrame,
                              feat_cols: list[str]) -> pd.DataFrame:
     """实盘训练+预测，**直接复用** walkforward._train_predict，与已验证回测同分布。
 
-    取代 train_full_model + predict_latest 的旧路径（朴素 l2、原始特征 nan→0、
-    单 seed、超参不一致）——那套是 ret_weighted/全市场结论之前写的，已漂移。
-    这里把 _train_predict 当作唯一真相源：训练集=全部有标签行，预测对象=最新
+    注意：当前无生产调用方（生产路径是 ensemble_predict_latest，与每日重放
+    回测同口径），保留供对照/调试。训练集=全部有标签行，预测对象=最新
     无标签日，于是 MODEL_OBJECTIVE(ret_weighted)、按日截面 z-score+MAD-winsorize、
     多 seed、正则化超参全部与回测一致。无未来信息：最新日的特征当晚已完整。
 
@@ -113,6 +67,80 @@ def train_and_predict_latest(panel: pd.DataFrame,
 # ---------------------------------------------------------------------------
 # 新路径：多模型增量集成 + 共享 decide_orders（与每日重放回测同分布）
 # ---------------------------------------------------------------------------
+def _emit_fn(progress_cb):
+    def _emit(phase, current, total, **extras):
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(phase=phase, current=current, total=total, **extras)
+        except Exception:
+            pass
+    return _emit
+
+
+def predict_latest_with_ens(ens, panel: pd.DataFrame,
+                            pred_hist: pd.DataFrame | None = None,
+                            progress_cb=None) -> tuple[pd.DataFrame, dict]:
+    """训练无关的预测尾段：observe pred_hist → 滚动 IC 定权 → 预测最新日。
+
+    供两条路径共用：ensemble_predict_latest（全量重训后）与
+    champion_predict_latest（冻结 champion 工件加载后）。ens 必须已具备预测
+    能力（已训练或已从 state_dict 恢复）。
+
+    滚动 IC 定权用【持久化的真 OOS 预测历史】补 observe 后 refresh_weights：
+    只给 d + FORWARD_WINDOW ≤ latest 的成熟日打分，无泄露。
+    """
+    _emit = _emit_fn(progress_cb)
+    latest = panel["date"].max()
+    today = panel[panel["date"] == latest].copy()
+    if today.empty:
+        raise ValueError("无最新日横截面")
+
+    _emit("滚动 IC 定权", 2, 3,
+          n_hist_days=(int(pred_hist["date"].nunique())
+                       if pred_hist is not None and len(pred_hist) else 0))
+    if pred_hist is not None and len(pred_hist):
+        for d in sorted(pred_hist["date"].unique()):
+            sub = pred_hist[pred_hist["date"] == d]
+            preds_d = {c[len("pred_"):]: sub[c].to_numpy(dtype=np.float64)
+                       for c in sub.columns
+                       if c.startswith("pred_") and c[len("pred_"):] in ens.models}
+            if not preds_d:
+                continue
+            ens.observe(np.datetime64(d), sub[["symbol"]].reset_index(drop=True),
+                        preds_d)
+        ens.refresh_weights(panel, asof_date=latest)
+        # 已成熟且成功打分的天数（各腿最小值）；不足窗口时 ensemble 内部
+        # _recompute_weights 已保证退化为等权，这里打印说明避免误以为已定权。
+        n_scored = min((len(ens._ic_hist[m]) for m in ens.models), default=0)
+        if n_scored < ens.ic_window:
+            print(f"[提示] 实盘 OOS IC 定权历史不足：已成熟打分 {n_scored} 天 "
+                  f"（窗口 {ens.ic_window} 天，<3 天时完全等权）；"
+                  f"每日运行 predict_tomorrow 后会逐日积累。")
+    else:
+        print("[提示] 无持久化 OOS 预测历史（pred_hist 为空），本次模型权重为等权；"
+              "每日运行 predict_tomorrow 后会逐日积累。")
+        ens.refresh_weights(panel, asof_date=latest)   # 无历史 → 等权
+
+    _emit("预测最新日", 3, 3, n_today_rows=len(today))
+    preds = ens.predict(today)
+    score = ens.combine(preds, today["date"].to_numpy())
+    today = today.copy()
+    for m, pr in preds.items():
+        today[f"pred_{m}"] = pr
+    today["score"] = score
+    today["prediction"] = score          # decide_orders/排序统一用 score
+    today["rank_pct"] = pd.Series(score, index=today.index).rank(
+        ascending=False, pct=True)
+    today = today.sort_values("score", ascending=False).reset_index(drop=True)
+    info = {"weights": dict(ens.weights), "ic_means": ens.ic_means(),
+            "models": list(ens.models), "latest_date": latest,
+            # 集成本体：模型门控（model_gate）需要把候选落盘/对比。
+            # 仅内存引用，不随 info 落盘。
+            "ensemble": ens}
+    return today, info
+
+
 def ensemble_predict_latest(panel: pd.DataFrame, feat_cols: list[str],
                             params: dict | None = None) -> tuple[pd.DataFrame, dict]:
     """用 IncrementalEnsemble 训练全部成熟历史、预测最新（无标签）日。
@@ -120,14 +148,16 @@ def ensemble_predict_latest(panel: pd.DataFrame, feat_cols: list[str],
     与 backtest_daily.run_daily_replay 的训练/定权口径**逐项一致**：同样的多模型
     （gbm_l2 / gbm_ret_weighted / ic_linear）、同样的截面归一化、同样的滚动 IC 定权。
     实盘只跑一次：全量重建（force_full）一次性把尾部 TRAIN_WINDOW 训到位，再对最新
-    无标签日预测；滚动 IC 权重用全部已成熟历史预测日打分（无泄露）。
+    无标签日预测（预测尾段与冻结路径共用 predict_latest_with_ens）。
 
     返回 (today, info)：
       today: 最新日横截面，附 ensemble 各模型分 + 融合 score + prediction + rank_pct，
              并保留 close/bb_*/rsi_14 等 decide_orders 需要的 meta 列。
-      info : {"weights":..., "ic_means":..., "models":..., "latest_date":...}
+      info : {"weights":..., "ic_means":..., "models":..., "latest_date":...,
+              "ensemble": 训练好的集成本体}
     """
-    import sys, os
+    import os
+    import sys
     _src = os.path.dirname(os.path.abspath(__file__))
     if _src not in sys.path:
         sys.path.insert(0, _src)
@@ -137,14 +167,7 @@ def ensemble_predict_latest(panel: pd.DataFrame, feat_cols: list[str],
     fw = int(getattr(C, "FORWARD_WINDOW", 20))
     embargo = int(getattr(C, "EMBARGO_DAYS", fw))
     progress_cb = p.pop("progress_cb", None)
-
-    def _emit(phase, current, total, **extras):
-        if progress_cb is None:
-            return
-        try:
-            progress_cb(phase=phase, current=current, total=total, **extras)
-        except Exception:
-            pass
+    _emit = _emit_fn(progress_cb)
 
     latest = panel["date"].max()
     today = panel[panel["date"] == latest].copy()
@@ -154,7 +177,7 @@ def ensemble_predict_latest(panel: pd.DataFrame, feat_cols: list[str],
 
     ens = IncrementalEnsemble(
         feat_cols,
-        models=tuple(p["ensemble_models"]) if p.get("ensemble_models") else None,
+        models=p.get("ensemble_models") or None,
         n_seeds=p.get("n_seeds"), incr_trees=p.get("incr_trees"),
         rebuild_days=p.get("rebuild_days"), train_window=p.get("train_window"),
         ic_window=p.get("ic_window"))
@@ -170,44 +193,47 @@ def ensemble_predict_latest(panel: pd.DataFrame, feat_cols: list[str],
           models=",".join(ens.models))
     ens.update(matured, asof_date=latest, force_full=True)
 
-    # 滚动 IC 定权：把所有已成熟历史预测日的预测补记后打分。为效率，仅在尾部
-    # IC_WINDOW + fw 天的横截面上各跑一次预测并 observe，再 refresh。
-    ic_win = ens.ic_window
-    score_dates = all_dates[all_dates <= mat_cut][-(ic_win + 1):]
-    _emit("滚动 IC 定权", 2, 3, n_score_days=len(score_dates))
-    for d in score_dates:
-        dframe = panel[panel["date"] == d]
-        if dframe.empty:
-            continue
-        dpreds = ens.predict(dframe)
-        ens.observe(d, dframe, dpreds)
-    ens.refresh_weights(panel, asof_date=latest)
+    return predict_latest_with_ens(ens, panel, pred_hist=p.get("pred_hist"),
+                                   progress_cb=progress_cb)
 
-    _emit("预测最新日", 3, 3, n_today_rows=len(today))
-    preds = ens.predict(today)
-    score = ens.combine(preds, today["date"].to_numpy())
-    today = today.copy()
-    for m, pr in preds.items():
-        today[f"pred_{m}"] = pr
-    today["score"] = score
-    today["prediction"] = score          # decide_orders/排序统一用 score
-    today["rank_pct"] = pd.Series(score, index=today.index).rank(
-        ascending=False, pct=True)
-    today = today.sort_values("score", ascending=False).reset_index(drop=True)
-    info = {"weights": dict(ens.weights), "ic_means": ens.ic_means(),
-            "models": list(ens.models), "latest_date": latest}
+
+def champion_predict_latest(panel: pd.DataFrame,
+                            pred_hist: pd.DataFrame | None = None,
+                            progress_cb=None) -> tuple[pd.DataFrame, dict]:
+    """冻结路径：加载 champion 工件直接预测（不训练），定权状态刷新后回存。
+
+    用于自适应重训的"未触发"分支与门控 rejected 分支——champion 冻结工件即
+    生产模型。refresh_weights 用 pred_hist 把新成熟日打分入 _ic_hist（定权
+    照常保鲜），随后 refresh_champion 回存工件：weights/ic_hist 更新，
+    train_end_date 与 promotion 记录不变（模型本身未重训）。
+    """
+    import model_store
+    _emit = _emit_fn(progress_cb)
+    loaded = model_store.load_champion()
+    if loaded is None:
+        raise ValueError("无 champion 工件可加载（models/champion/ 不存在或已损坏）")
+    ens, manifest = loaded
+    _emit("加载 champion 工件", 1, 3, model_id=manifest.get("model_id"),
+          train_end_date=manifest.get("train_end_date"))
+    today, info = predict_latest_with_ens(ens, panel, pred_hist=pred_hist,
+                                          progress_cb=progress_cb)
+    snap = manifest.get("config_snapshot") or {}
+    model_store.refresh_champion(ens, snap.get("feat_cols") or [], snap)
+    info["champion_id"] = manifest.get("model_id")
+    info["action"] = "frozen"
     return today, info
 
 
 def make_orders_from_state(today: pd.DataFrame, score: np.ndarray,
                            current: dict[str, int], capital: float,
                            params: dict | None = None,
-                           price_col: str = "adj_close",
+                           price_col: str = "close",
                            risk_state_path: str | None = None,
-                           panel: pd.DataFrame | None = None) -> pd.DataFrame:
+                           panel: pd.DataFrame | None = None,
+                           cash: float | None = None) -> pd.DataFrame:
     """用共享 decide_orders 生成"明日可执行"逐笔订单（与回测同一决策代码）。
 
-    把当前持仓 + 现金组成 PortfolioState（现金 = capital − 持仓市值估算），交给
+    把当前持仓 + 现金组成 PortfolioState，交给
     trading.decide_orders：ML 选池 + 布林/RSI 择时 → 精确到 (代码,方向,股数,挂单价)
     的订单，附触发原因。返回 trading.decide_orders 的订单表（实盘可直接照单执行）。
 
@@ -215,39 +241,68 @@ def make_orders_from_state(today: pd.DataFrame, score: np.ndarray,
         today: 最新日横截面，需含 symbol、price_col、bb_*、rsi_14 等。
         score: 与 today 对齐的融合排序分。
         current: 当前持仓 {代码: 股数}。
-        capital: 组合总资金（不是现金）。
+        capital: 组合总资金兜底（未提供 cash 时用，反推现金 = capital − 持仓市值）。
         params: 决策参数（topk、max_positions、max_weight、order_price_mode 等）。
-        price_col: 用于估值与目标金额计算的价列，默认 "adj_close"。
+        price_col: 用于估值与目标金额计算的价列，默认 "close"（金钱计算必须用
+                   真实市价；adj_close 绝对水平随加载窗口漂移，只用于因子）。
         risk_state_path: 风控状态 JSON 路径；若提供则读取历史波动/回撤/IC，
                          计算 risk_scale 并更新状态文件。
-        panel: 完整历史面板（多日期），用于 regime/IV 计算；缺省用 today 退化为单日线。
+        panel: 完整历史面板（多日期），用于 regime/IV/成熟 IC 计算；
+               缺省用 today 退化为单日线。
+        cash: 账户真实现金（account.csv）。提供后总估值 = cash + Σ(持仓×最新
+              原始 close)，如实入账驱动 vol/dd 两层；未提供时打印醒目警告并
+              跳过 vol/dd 层的状态更新（不再静默喂固定 capital 假数据）。
     """
     from trading import PortfolioState, decide_orders
-    from live_state import (load_risk_state, save_risk_state,
-                            compute_risk_scale, update_risk_state)
+    from live_state import (load_risk_state, save_risk_state, compute_risk_scale,
+                            update_risk_state, pred_hist_path_for, load_pred_hist)
 
     p = dict(params or {})
-    # 估当前持仓市值，反推现金（与回测的 total_value 口径一致）
+    # dynamic_topk 只在回测（backtest_daily）实现；live 显式拒绝而非静默忽略，
+    # 避免"回测开了、实盘没开"的隐性口径分叉。
+    if bool(p.get("use_dynamic_topk", False)) or getattr(C, "USE_DYNAMIC_TOPK", False):
+        raise ValueError(
+            "USE_DYNAMIC_TOPK=1 目前仅回测支持；实盘(live/predict_tomorrow)未实现，"
+            "请关闭后重跑（避免静默忽略造成回测≠实盘）。")
+
+    # 估当前持仓市值（用真实市价列），反推/采用现金（与回测的 total_value 口径一致）
     sym = today["symbol"].to_numpy()
     px_col = price_col if price_col in today.columns else "close"
     close = today[px_col].to_numpy(dtype=float)
     price_map = {sym[i]: close[i] for i in range(len(sym))
                  if close[i] == close[i] and close[i] > 0}
     held_mv = sum(price_map.get(s, 0.0) * sh for s, sh in current.items())
-    cash = max(float(capital) - held_mv, 0.0)
+    if cash is not None:
+        cash = float(cash)
+        total_value = cash + held_mv      # 真实现金 + 真实市值 = 真实总估值
+        total_value_known = True
+    else:
+        print("=" * 60)
+        print("[警告] 未提供账户现金（account.csv 缺失或无 cash 列）！")
+        print("       本次用 --capital 兜底反推现金，并【跳过 vol/回撤两层风控")
+        print("       的状态更新】（不喂假净值）。请在 account.csv 中维护 cash 列。")
+        print("=" * 60)
+        cash = max(float(capital) - held_mv, 0.0)
+        total_value = float(capital)
+        total_value_known = False
     state = PortfolioState(cash=cash, holdings=dict(current))
 
-    # 风控缩放：复用回测一致的五层风控
+    # 风控缩放：复用回测一致的五层风控（唯一实现在 src/risk.py）
     if risk_state_path is not None:
         rstate = load_risk_state(risk_state_path)
         latest = today["date"].max()
         risk_panel = panel if panel is not None else today
+        # 持久化预测历史：供 IC 降仓层把新成熟 OOS 预测日打分入队
+        pred_hist = load_pred_hist(pred_hist_path_for(risk_state_path))
         risk_scale, rstate = compute_risk_scale(
-            risk_panel, latest, state=rstate, params=p)
+            risk_panel, latest, state=rstate, params=p, pred_hist=pred_hist)
         p["gross_leverage"] = float(p.get("gross_leverage",
                                           getattr(C, "GROSS_LEVERAGE", 1.0))) * risk_scale
-        # 用 capital 作为今日总估值（保守），更新状态供次日使用
-        rstate = update_risk_state(rstate, latest, float(capital))
+        if total_value_known:
+            # 真实总估值入账，驱动 vol/dd 两层
+            rstate = update_risk_state(rstate, latest, total_value)
+        else:
+            rstate.last_update = str(pd.Timestamp(latest).date())
         save_risk_state(risk_state_path, rstate)
 
     return decide_orders(state, today, np.asarray(score, dtype=float),
@@ -255,130 +310,3 @@ def make_orders_from_state(today: pd.DataFrame, score: np.ndarray,
                          price_col=px_col)
 
 
-
-def target_weights(today: pd.DataFrame) -> np.ndarray:
-    """目标权重（和=GROSS_LEVERAGE）。
-
-    复刻 strategy._long_topk 的"选 top-K%、组内按排名比例加权"逻辑，但因实盘
-    永远只有【一个交易日】，直接向量化计算，规避 groupby.apply 在单组下返回
-    二维结果的 pandas 行为（见 pandas3 gotchas）。结果与回测口径一致。
-    """
-    pred = today["prediction"].to_numpy()
-    rank_pct = pd.Series(pred).rank(pct=True, method="first").to_numpy()
-    selected = rank_pct > (1.0 - C.TOPK_RATIO)
-    w = np.where(selected, rank_pct, 0.0)
-    total = w.sum()
-    if total <= 1e-12:
-        return np.zeros_like(w, dtype=np.float64)
-    return (C.GROSS_LEVERAGE * w / total).astype(np.float64)
-
-
-def weights_to_shares(weights: np.ndarray, close: np.ndarray,
-                      capital: float) -> np.ndarray:
-    """目标权重 → 目标股数，向下取整到整手（100股）。"""
-    with np.errstate(divide="ignore", invalid="ignore"):
-        raw = capital * weights / close
-    raw = np.where(np.isfinite(raw), raw, 0.0)
-    return (np.floor(raw / LOT) * LOT).astype(np.int64)
-
-
-def apply_turnover_buffer(today: pd.DataFrame, target_shares: np.ndarray,
-                          current: dict[str, int], topk: float,
-                          buffer: float) -> np.ndarray:
-    """换手缓冲：减少不必要的买卖。返回调整后的目标股数。
-
-    规则（按预测排名 rank_pct，0=最看好）：
-      - 已持有的票：只要还在 topk+buffer 缓冲区内 → 维持当前股数（不卖、不加仓）；
-        跌出缓冲区 → 目标置 0（卖出）。
-      - 未持有的票：进入 topk → 按 target_shares 买入；
-        在缓冲带(topk~topk+buffer) → 不建仓（保持 0）。
-    这样只有"新进 topk"和"跌出缓冲区"才产生交易，中间地带零换手。
-    """
-    out = target_shares.copy()
-    sym = today["symbol"].to_numpy()
-    rank_pct = today["rank_pct"].to_numpy()
-    keep_band = topk + buffer
-    for i in range(len(today)):
-        held = current.get(sym[i], 0)
-        in_topk = rank_pct[i] <= topk
-        in_buffer = rank_pct[i] <= keep_band
-        if held > 0:
-            # 已持有：缓冲区内维持现状，跌出则清仓
-            out[i] = held if in_buffer else 0
-        else:
-            # 未持有：仅 topk 内建仓，缓冲带不动
-            out[i] = out[i] if in_topk else 0
-    return out
-
-
-def make_orders(today: pd.DataFrame, target_shares: np.ndarray,
-                current: dict[str, int], min_notional: float = 0.0) -> pd.DataFrame:
-    """目标股数 − 当前持仓 = 差额订单，附涨跌停过滤与碎单过滤。
-
-    涨跌停约束（已有 limit_flag 特征，T日涨停=不能买入、跌停=不能卖出）：
-      - delta>0(买) 且 当日涨停 → 拦截（方向标记为 '涨停拦截'）
-      - delta<0(卖) 且 当日跌停 → 拦截（'跌停拦截'）
-    min_notional：差额金额低于此阈值的碎单过滤为'持有'，进一步压成本。
-    """
-    sym = today["symbol"].to_numpy()
-    name = today["name"].to_numpy() if "name" in today.columns else sym
-    close = today["close"].to_numpy()
-    limit = (today["limit_flag"].to_numpy() if "limit_flag" in today.columns
-             else np.zeros(len(today)))
-    pct_chg = (today["pct_chg"].to_numpy() if "pct_chg" in today.columns
-               else np.zeros(len(today)))
-    rank_pct = today["rank_pct"].to_numpy()
-
-    rows = []
-    for i in range(len(today)):
-        cur = current.get(sym[i], 0)
-        tgt = int(target_shares[i])
-        delta = tgt - cur
-        notional = abs(delta) * close[i]
-        action, blocked = "持有", ""
-        if delta != 0 and notional >= min_notional:
-            # 涨跌停方向限制：limit_flag=1 表示当日触及±9.9%
-            up_limit = limit[i] and pct_chg[i] > 0
-            down_limit = limit[i] and pct_chg[i] < 0
-            if delta > 0 and up_limit:
-                action, blocked = "买(涨停拦截)", "涨停不可买"
-            elif delta < 0 and down_limit:
-                action, blocked = "卖(跌停拦截)", "跌停不可卖"
-            else:
-                action = "买入" if delta > 0 else "卖出"
-        elif delta != 0:
-            action = "持有(碎单过滤)"
-            delta = 0
-        # 只保留有持仓变动或当前/目标非零的行
-        if tgt == 0 and cur == 0:
-            continue
-        rows.append({
-            "代码": sym[i], "名称": name[i], "方向": action,
-            "目标股数": tgt, "当前股数": cur, "差额股数": delta,
-            "现价": round(float(close[i]), 2),
-            "预计金额": round(abs(delta) * float(close[i]), 2),
-            "预测排名%": round(float(rank_pct[i]) * 100, 1),
-            "备注": blocked,
-        })
-    orders = pd.DataFrame(rows)
-    if len(orders):
-        # 卖在前、买在后（先腾出资金），组内按预测排名
-        order_key = {"卖出": 0, "卖(跌停拦截)": 0, "买入": 1, "买(涨停拦截)": 1,
-                     "持有": 2, "持有(碎单过滤)": 2}
-        orders["_k"] = orders["方向"].map(lambda a: order_key.get(a, 3))
-        orders = orders.sort_values(["_k", "预测排名%"]).drop(columns="_k").reset_index(drop=True)
-    return orders
-
-
-def estimate_cost(orders: pd.DataFrame) -> dict:
-    """估算订单的交易成本（佣金双边 + 印花税卖出单边）。"""
-    if not len(orders):
-        return {"buy_notional": 0.0, "sell_notional": 0.0, "commission": 0.0,
-                "stamp_duty": 0.0, "total": 0.0}
-    buys = orders[orders["方向"] == "买入"]["预计金额"].sum()
-    sells = orders[orders["方向"] == "卖出"]["预计金额"].sum()
-    commission = (buys + sells) * C.COMMISSION_RATE
-    stamp = sells * C.STAMP_DUTY_RATE
-    return {"buy_notional": float(buys), "sell_notional": float(sells),
-            "commission": float(commission), "stamp_duty": float(stamp),
-            "total": float(commission + stamp)}

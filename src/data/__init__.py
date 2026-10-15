@@ -10,6 +10,7 @@ source, implement the interface and add it to `_CONNECTORS` below.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import warnings
 from datetime import datetime, timedelta
@@ -18,13 +19,15 @@ import numpy as np
 import pandas as pd
 
 import config as C
-from .base import DataConnector
+from .base import (DataConnector, SupportsFundamentals, SupportsFinancialFactors,
+                   SupportsIndustryMap, SupportsWholeMarketFetch)
 from .tushare import TushareConnector
 from .option_features import get_option_iv_features
 from .macro_features import merge_global_macro_features
 from .factors import compute_all_factors, get_factor_library_hash
 
-warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
+# 注：不在 import 期全局屏蔽 PerformanceWarning——由入口脚本
+# （run_session.py / predict_tomorrow.py / scripts/run_walkforward.py）显式设置。
 
 # Registry of available connectors. Add new sources here.
 _CONNECTORS: dict[str, type[DataConnector]] = {
@@ -109,8 +112,10 @@ def _drop_intermediate_cols(df: pd.DataFrame, keep_trade_cols: bool = False) -> 
 def merge_fundamentals(df: pd.DataFrame, fund: pd.DataFrame) -> pd.DataFrame:
     """Point-in-time merge of monthly valuation snapshots onto the daily panel.
 
-    Uses merge_asof (backward) per symbol so each trading day only sees the most
-    recent snapshot AT OR BEFORE it — no look-ahead. Then derives the standard
+    Uses merge_asof (backward) per symbol. Valuation snapshots are published
+    after the close, so snapshot dates are shifted +1 day before the merge:
+    each trading day only sees snapshots STRICTLY BEFORE it — no look-ahead.
+    Then derives the standard
     value/size factors that A-share research relies on:
         ep = 1/pe_ttm (earnings yield), bp = 1/pb (book-to-price),
         sp = 1/ps_ttm (sales-to-price), dv_ttm (dividend yield),
@@ -123,6 +128,10 @@ def merge_fundamentals(df: pd.DataFrame, fund: pd.DataFrame) -> pd.DataFrame:
     fund = fund.sort_values("date").reset_index(drop=True)
     df["date"] = pd.to_datetime(df["date"]).astype("datetime64[us]")
     fund["date"] = pd.to_datetime(fund["date"]).astype("datetime64[us]")
+    # 防泄露：估值快照（akshare 东财个股估值）是收盘后才发布的数据，
+    # 同日 merge_asof 会让当日决策看到当天收盘估值 —— 统一后移 1 天，
+    # 使快照只在次日起可见。
+    fund["date"] = fund["date"] + pd.Timedelta(days=1)
 
     merged = pd.merge_asof(
         df, fund, on="date", by="symbol", direction="backward")
@@ -151,9 +160,12 @@ def add_factor_regime_features(df: pd.DataFrame, factors: list[str] = None,
     For each date t, computes mean RankIC of factor vs target over the trailing
     `window` dates and assigns it as a scalar feature to all stocks on date t.
     This tells the model whether the factor is currently working — a regime signal.
-    Fully backward-looking (no look-ahead): uses only past dates' (factor, target)
-    pairs. With EMBARGO_DAYS ≥ FORWARD_WINDOW, target values in the training window
-    end before the test window starts.
+
+    防泄露机制：日 IC 用的是 responder_6（t → t+FORWARD_WINDOW 的远期收益），
+    第 d 天的 IC 要到 d+FORWARD_WINDOW 天才“成熟”可知。因此 IC 序列在 rolling
+    之前先整体 shift(FORWARD_WINDOW + 1)：第 t 天用到的最新 IC 来自 t-fw-1
+    之前，其标签在 t-1 已完全成熟。不加这个 shift，测试窗内的特征会包含
+    尚未成熟的 IC（前视）。
     """
     from scipy import stats
     factors = factors or [f for f in ["bp", "ep", "value_composite"] if f in df.columns]
@@ -171,7 +183,9 @@ def add_factor_regime_features(df: pd.DataFrame, factors: list[str] = None,
                 if g[f].notna().sum() >= 20 else np.nan),
             include_groups=False)
         day_ic = day_ic.reindex(dates_sorted)  # ensure chronological order
-        rolling = day_ic.rolling(window, min_periods=window // 3).mean()
+        # 只使用已成熟的 IC：整体后移 fw+1 天再 rolling（见 docstring）
+        matured_ic = day_ic.shift(C.FORWARD_WINDOW + 1)
+        rolling = matured_ic.rolling(window, min_periods=window // 3).mean()
         ic_map = rolling.to_dict()
         df[f"ic_{window}d_{fac[:5]}"] = df["date"].map(ic_map)
     return df
@@ -398,7 +412,10 @@ def prepare_target_and_weight(df: pd.DataFrame, forward_window: int = 5,
 
     # Weight: inverse volatility (more certain = higher) + recency boost.
     base_weight = 1.0 / (df["volatility_20"].fillna(0.02) + 0.01)
-    date_weight = df.groupby("symbol").cumcount() / len(df)
+    # 近因权重：旧实现 groupby("symbol").cumcount()/len(df) 的分母是全面板行数
+    # （含全部股票），商恒≈0，时间衰减实际失效。改为按 date 的全局百分位秩
+    # （最早→0，最新→1），恢复 0.5→1.0 的时间衰减意图。
+    date_weight = df["date"].rank(pct=True)
     df["weight"] = base_weight * (0.5 + 0.5 * date_weight)
     df["weight"] = df["weight"].clip(0.1, 10.0)
     return df
@@ -445,8 +462,13 @@ def _residualize_target(df: pd.DataFrame, target_col: str,
 # --------------------------------------------------------------------------
 # Jane Street format transform
 # --------------------------------------------------------------------------
-def transform_to_jane_street_format(df: pd.DataFrame) -> pd.DataFrame:
-    """Map to (date_id, time_id, symbol_id, feature_00..78, responder_6, weight)."""
+def transform_to_jane_street_format(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Map to (date_id, time_id, symbol_id, feature_NN..., responder_6, weight).
+
+    返回 (df, feature_map)：feature_map = {因子名: 列号}（含 dummy 填充列），
+    由调用方随缓存落盘 sidecar JSON——feature_NN 与因子名的对应关系随缓存
+    签名变化，没有映射就无法事后对齐历史缓存的列含义（静默错位风险）。
+    """
     unique_dates = sorted(df["date"].unique())
     unique_symbols = sorted(df["symbol"].unique())
     date_map = {d: i for i, d in enumerate(unique_dates)}
@@ -485,13 +507,36 @@ def transform_to_jane_street_format(df: pd.DataFrame) -> pd.DataFrame:
             feature_cols.append(f"dummy_{i}")
 
     feature_rename = {old: f"feature_{i:02d}" for i, old in enumerate(feature_cols)}
+    feature_map = {old: i for i, old in enumerate(feature_cols)}  # 因子名 → 列号
     df = df.rename(columns=feature_rename)
 
     output_cols = ([C.DATE_COL, C.TIME_COL, C.SYMBOL_COL] + C.FEATURE_NAMES +
                    [C.TARGET, C.WEIGHT])
     df = df[output_cols]
     df = df.dropna(subset=[C.TARGET]).reset_index(drop=True)
-    return df
+    return df, feature_map
+
+
+def _factor_source_hash() -> str:
+    """原生因子源码的内容哈希，并入 processed 缓存签名。
+
+    因子代码（src/data/factors/*.py、option_features.py、macro_features.py）
+    一改，产出的数据集内容就变，但旧签名不含代码版本，会静默命中陈旧缓存
+    （缓存污染）。把源码内容哈希进签名后，任何因子代码改动都自动使缓存失效。
+    """
+    import glob
+    base = os.path.dirname(os.path.abspath(__file__))
+    paths = sorted(glob.glob(os.path.join(base, "factors", "*.py")))
+    paths += [os.path.join(base, "option_features.py"),
+              os.path.join(base, "macro_features.py")]
+    h = hashlib.md5()
+    for p in paths:
+        if not os.path.exists(p):
+            continue
+        h.update(os.path.basename(p).encode())
+        with open(p, "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()[:12]
 
 
 # --------------------------------------------------------------------------
@@ -535,15 +580,17 @@ def load_data(
         f"{source}|{index_code}|{sorted(symbols)}|{start_date}|{end_date}|"
         f"{C.FORWARD_WINDOW}|{C.MARKET_NEUTRAL_TARGET}|"
         f"{C.N_FEATURES}|"
-        f"{C.USE_TECHNICAL_FEATURES}|{C.USE_ORTHOGONAL_FEATURES}|"
+        f"{C.USE_TECHNICAL_FEATURES}|{C.USE_ORTHOGONAL_FACTORS}|"
         f"{C.USE_ALPHA158_FACTORS}|{C.USE_GTJA191_FACTORS}|{C.GTJA191_ALPHA_SUBSET}|"
         f"{C.USE_FUNDAMENTALS}|{C.USE_FINANCIAL_FACTORS}|{C.INDUSTRY_NEUTRAL}|"
-        f"{C.USE_OPTION_FEATURES}|{C.USE_GLOBAL_MACRO}|"
+        f"{C.USE_OPTION_FEATURES}|{C.OPTION_UNDERLYING}|{C.OPTION_SOURCE}|"
+        f"{C.OPTION_MAX_FILL_DAYS}|"
+        f"{C.USE_GLOBAL_MACRO}|{C.MACRO_MAX_FILL_DAYS}|{C.FUND_SAMPLE_DAYS}|"
         f"{C.USE_MACRO_INTERACTIONS}|{C.RESIDUAL_TARGET}|"
-        f"{C.NL_TOPK}|{C.FI_TOPK}|{C.FI_MAX_PAIRS}|{C.MIN_FACTOR_STABILITY}|"
         f"{C.REGIME_IC_FEATURES}|"
         f"{C.USE_FORMULA_FACTORS}|{C.FORMULA_FACTOR_SUBSET}|"
         f"{get_factor_library_hash(C.FACTOR_LIBRARY_DIR)}|"
+        f"{_factor_source_hash()}|"
         f"{C.MULTI_HORIZON_WINDOWS}".encode()).hexdigest()[:12]
     os.makedirs(C.CACHE_DIR, exist_ok=True)
     processed_cache = os.path.join(C.CACHE_DIR, f"dataset_{source}_{sig}.parquet")
@@ -565,13 +612,13 @@ def load_data(
         raw["symbol"] = raw["symbol"].astype("category")
     raw = reduce_mem_usage(raw, float16_as32=True)
     df = compute_all_factors(raw)
-    if C.USE_FUNDAMENTALS and hasattr(connector, "fetch_fundamentals"):
+    if C.USE_FUNDAMENTALS and isinstance(connector, SupportsFundamentals):
         fund = connector.fetch_fundamentals(start_date, end_date, C.FUND_SAMPLE_DAYS)
         df = merge_fundamentals(df, fund)
-    if C.USE_FINANCIAL_FACTORS and hasattr(connector, "fetch_financial_factors"):
+    if C.USE_FINANCIAL_FACTORS and isinstance(connector, SupportsFinancialFactors):
         fin = connector.fetch_financial_factors(symbols)
         df = merge_financial_factors(df, fin)
-    if C.INDUSTRY_NEUTRAL and hasattr(connector, "get_industry_map"):
+    if C.INDUSTRY_NEUTRAL and isinstance(connector, SupportsIndustryMap):
         df = add_industry_features(df, connector.get_industry_map())
     # Raw/intermediate columns are no longer needed; drop them before option IV
     # and target computation to keep memory flat on whole-market panels.
@@ -582,9 +629,13 @@ def load_data(
                                    market_neutral_target=C.MARKET_NEUTRAL_TARGET)
     if C.REGIME_IC_FEATURES:
         df = add_factor_regime_features(df)
-    df = transform_to_jane_street_format(df)
+    df, feature_map = transform_to_jane_street_format(df)
     df = reduce_mem_usage(df, float16_as32=False)
     df.to_parquet(processed_cache, index=False)
+    # sidecar：因子名 → feature_NN 列号映射随缓存落盘，防静默错位
+    sidecar = processed_cache.replace(".parquet", ".features.json")
+    with open(sidecar, "w", encoding="utf-8") as f:
+        json.dump(feature_map, f, ensure_ascii=False, indent=1)
 
     if verbose:
         print(f"最终数据集: {len(df):,} 行, {df[C.DATE_COL].nunique()} 个交易日, "
@@ -648,7 +699,7 @@ def load_factor_panel(
     else:
         symbols = connector.get_universe(index_code, start_date, end_date)
 
-    if whole_market and hasattr(connector, "fetch_ohlcv_whole_market"):
+    if whole_market and isinstance(connector, SupportsWholeMarketFetch):
         if verbose:
             print(f"因子面板: {source} | 全市场(按日拉取) | {start_date} ~ {end_date}")
         raw = connector.fetch_ohlcv_whole_market(start_date, end_date)
@@ -672,13 +723,13 @@ def load_factor_panel(
         raw["symbol"] = raw["symbol"].astype("category")
     raw = reduce_mem_usage(raw, float16_as32=True)
     df = compute_all_factors(raw)
-    if use_fund and hasattr(connector, "fetch_fundamentals"):
+    if use_fund and isinstance(connector, SupportsFundamentals):
         fund = connector.fetch_fundamentals(start_date, end_date, C.FUND_SAMPLE_DAYS)
         df = merge_fundamentals(df, fund)
-    if use_fin and hasattr(connector, "fetch_financial_factors"):
+    if use_fin and isinstance(connector, SupportsFinancialFactors):
         fin = connector.fetch_financial_factors(symbols)
         df = merge_financial_factors(df, fin)
-    if C.INDUSTRY_NEUTRAL and hasattr(connector, "get_industry_map"):
+    if C.INDUSTRY_NEUTRAL and isinstance(connector, SupportsIndustryMap):
         df = add_industry_features(df, connector.get_industry_map())
     # Raw/intermediate columns are no longer needed; drop them before option IV
     # and target computation to keep memory flat on whole-market panels.
@@ -730,12 +781,13 @@ def list_factor_columns(panel: pd.DataFrame) -> list[str]:
     """Factor (non-meta) columns of a panel from load_factor_panel."""
     meta = {"date", "symbol", C.TARGET, C.DATE_COL, C.TIME_COL, C.SYMBOL_COL,
             C.WEIGHT, "close", "adj_close",
-            # multi-horizon targets are labels, not features
-            "responder_fw_5", "responder_fw_10", "responder_fw_20",
-            "responder_fw_30", "responder_fw_60",
             # daily-trading meta (kept by keep_trade_cols, never model features):
             "open", "high", "low", "bb_upper_20", "bb_lower_20"}
-    return [c for c in panel.columns if c not in meta]
+    # multi-horizon targets (responder_fw_*) are labels, not features — 按前缀
+    # 排除而非硬编码名单，改 MULTI_HORIZON_WINDOWS 后新标签也不会混进特征
+    # （标签进特征 = 直接前视泄露）。
+    return [c for c in panel.columns
+            if c not in meta and not c.startswith("responder_fw_")]
 
 
 def inspect_dataset(df: pd.DataFrame, verbose: bool = True) -> dict:

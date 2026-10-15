@@ -2,20 +2,18 @@
 在相同输入下产出相同订单。
 
 通过 monkeypatch 替换 load_factor_panel / ensemble_predict_latest，避免真实数据加载。
+
+路径由 tests/conftest.py 统一处理；standalone 运行：
+PYTHONPATH=src:. uv run python tests/test_nextday_cli_consistency.py
 """
 from __future__ import annotations
 
 import os
 import sys
 import tempfile
-from datetime import datetime
-from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-sys.path.insert(0, os.path.dirname(__file__))
 
 import config as C
 from pipeline import context as ctxmod
@@ -55,7 +53,8 @@ def _fake_ensemble(panel, factors, params=None):
     return today, info
 
 
-def main():
+def test_nextday_session_matches_cli():
+    """同输入下，pipeline nextday 步骤与 predict_tomorrow CLI 产出完全一致的订单。"""
     panel = _make_panel()
     params = {
         "capital": 1000000, "initial_holdings": "",
@@ -69,17 +68,14 @@ def main():
         ctx = ctxmod.StepContext(session_dir=tmp, params=params, shared={"panel": panel})
         ctx.shared["today"], ctx.shared["pred_info"] = _fake_ensemble(panel, ["feature_00"])
         ctx.shared["factors"] = ["feature_00"]
-        report = generate_orders(ctx)
-        print("nextday report:", report)
+        generate_orders(ctx)
         nextday_csv = ctx.artifact_path("orders.csv")
-        print("nextday orders csv path:", nextday_csv, "exists:", os.path.exists(nextday_csv))
-        if os.path.exists(nextday_csv):
-            df_nextday = pd.read_csv(nextday_csv)
-        else:
-            df_nextday = pd.DataFrame()
+        df_nextday = (pd.read_csv(nextday_csv) if os.path.exists(nextday_csv)
+                      else pd.DataFrame())
 
     # 2) predict_tomorrow.py main (monkeypatch data/ensemble)
     import predict_tomorrow as pt
+    from unittest.mock import patch
     with tempfile.TemporaryDirectory() as tmp:
         out_dir = os.path.join(tmp, "outputs")
         os.makedirs(out_dir, exist_ok=True)
@@ -98,27 +94,18 @@ def main():
         latest = panel["date"].max().strftime("%Y%m%d")
         df_cli = pd.read_csv(os.path.join(out_dir, f"orders_{latest}.csv"))
 
-    # 3) 比较
-    print("Nextday session orders:")
-    print(df_nextday[["symbol", "side", "shares", "limit_price"]].to_string(index=False) if len(df_nextday) else "(empty)")
-    print("\nCLI predict_tomorrow orders:")
-    print(df_cli[["symbol", "side", "shares", "limit_price"]].to_string(index=False) if len(df_cli) else "(empty)")
-
-    if len(df_nextday) != len(df_cli):
-        print(f"\n行数不一致: nextday={len(df_nextday)}, cli={len(df_cli)}")
-        return 1
+    # 3) 比较：行数一致且逐行相同
+    assert len(df_nextday) == len(df_cli), (
+        f"行数不一致: nextday={len(df_nextday)}, cli={len(df_cli)}\n"
+        f"nextday:\n{df_nextday}\ncli:\n{df_cli}")
     if len(df_nextday) == 0:
-        print("\n两者都为空，一致。")
-        return 0
+        return  # 两者都为空也算一致
     cols = ["symbol", "side", "shares", "limit_price"]
     merged = df_nextday[cols].merge(df_cli[cols], on=cols, how="outer", indicator=True)
     diff = merged[merged["_merge"] != "both"]
-    if len(diff):
-        print(f"\n不一致行：\n{diff}")
-        return 1
-    print("\n订单完全一致 ✓")
-    return 0
+    assert len(diff) == 0, f"订单不一致行：\n{diff}"
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    test_nextday_session_matches_cli()
+    print("nextday vs CLI consistency test passed")

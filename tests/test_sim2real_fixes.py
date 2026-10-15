@@ -1,19 +1,17 @@
 """Focused smoke tests for sim-to-real gap fixes.
 
 Avoids slow data loading by mocking the panel / ensemble path.
-Run: PYTHONPATH=src:. uv run python3 tests/test_sim2real_fixes.py
+路径由 tests/conftest.py 统一处理；standalone 运行：
+PYTHONPATH=src:. uv run python tests/test_sim2real_fixes.py
 """
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 import json
 
 import numpy as np
 import pandas as pd
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import config as C
 from trading import PortfolioState, decide_orders, simulate_fills, detect_board_limit
@@ -139,13 +137,23 @@ def test_make_orders_risk_state():
         state.total_values[-3:] = [1_100_000, 900_000, 850_000]
         save_risk_state(rpath, state)
 
+        # 提供真实现金 → 真实总估值入账（vol/dd 两层由此驱动）
         orders = make_orders_from_state(
             today, score, {}, 1_000_000,
             params={"topk": 0.4, "use_bb_timing": False},
-            price_col="close", risk_state_path=rpath)
+            price_col="close", risk_state_path=rpath, cash=1_000_000.0)
         loaded = load_risk_state(rpath)
         assert loaded.last_update == "2026-07-09"
         assert len(loaded.total_values) == 9
+
+        # 不提供现金 → 跳过 vol/dd 状态更新（不喂固定 capital 假净值）
+        orders2 = make_orders_from_state(
+            today, score, {}, 1_000_000,
+            params={"topk": 0.4, "use_bb_timing": False},
+            price_col="close", risk_state_path=rpath)
+        loaded2 = load_risk_state(rpath)
+        assert len(loaded2.total_values) == 9      # 未追加假净值
+        assert loaded2.last_update == "2026-07-09"
         print("✓ make_orders_from_state risk state")
 
 

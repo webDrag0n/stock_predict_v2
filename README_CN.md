@@ -3,7 +3,7 @@
 源自 Jane Street 笔记本（`jane-street-baseline-lgb-xgb-and-catboost.ipynb`）的建模思路，改造为面向**中国A股**、使用 **tushare** 数据的完整端到端系统，目标是**最大化实际收益**。
 
 ```
-tushare行情 (沪深300成分股)  →  技术+A股因子  →  预测 (responder_6)  →  策略 (仓位)  →  回测 (收益、风险)
+tushare行情 (全市场 ~5700 只 ex-ST)  →  技术+A股因子  →  预测 (responder_6)  →  策略 (仓位)  →  回测 (收益、风险)
 ```
 
 ## 环境配置（uv）
@@ -14,16 +14,23 @@ tushare行情 (沪深300成分股)  →  技术+A股因子  →  预测 (respond
 # 1. 安装 uv（如未安装）
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. 在项目目录创建虚拟环境并安装依赖
+# 2. 在项目目录创建虚拟环境并安装依赖（依赖声明在 pyproject.toml，由 uv 管理）
 cd ~/stock_predict_v2
-uv venv                          # 创建 .venv
-uv pip install -r pyproject.toml # 安装依赖
+uv sync --extra dev          # 创建 .venv 并安装核心依赖 + pytest
 
 # 3. 配置 tushare token（见下）后运行
-.venv/bin/python scripts/run_pipeline.py
+.venv/bin/python run_webapp.py                 # 前端会话（推荐）
+# 或命令行：
+.venv/bin/python scripts/run_walkforward.py    # 滚动 walk-forward 样本外回测
+.venv/bin/python predict_tomorrow.py           # 生成次日可执行订单
 ```
 
-可选的额外集成模型（XGBoost / CatBoost）：`uv pip install -e ".[full]"`
+> 阶段 5 架构收敛已删除旧端到端入口 `scripts/run_pipeline.py` 与其模型实现
+> `src/model.py`（无 embargo 切分的驻留式 CV，存在泄露与虚高）；当前入口就是
+> 上面三个（详见 CLAUDE.md 第 5 节）。
+
+可选 extra：`--extra attn`（注意力模型 leg，torch）、`--extra full`（XGBoost / CatBoost）、
+`--extra ui`（webapp）。
 
 ## 配置 tushare token
 
@@ -39,25 +46,20 @@ token = "你的token"
 ## 快速开始
 
 ```bash
-.venv/bin/python scripts/run_pipeline.py            # 自动选策略：验证集选，测试集报
-.venv/bin/python scripts/run_pipeline.py --compare  # 额外在测试集展示所有策略（仅研究对比）
-.venv/bin/python scripts/run_pipeline.py --strategy long_topk  # 指定策略，跳过自动选择
+.venv/bin/python run_webapp.py                      # 前端：创建 backtest / nextday 会话（推荐）
+.venv/bin/python scripts/run_walkforward.py         # 滚动窗口 OOS 回测 + 仪表盘
+.venv/bin/python predict_tomorrow.py --capital 1000000   # 生成次日订单
 ```
 
-默认 universe 为**沪深300成分股**（约5年历史）。首次运行按股票下载并缓存到 `data_cache/tushare/`，之后秒级加载。
+默认 universe 为**全市场**（约 5700 只 ex-ST 股票，按日拉取）。首次运行按日下载并缓存到 `data_cache/tushare/`，之后秒级加载。
 
 ### 数据源配置
 
 ```bash
-# 切换指数 universe（如中证500）
-DEFAULT_INDEX=000905.SH .venv/bin/python scripts/run_pipeline.py
-
-# 自定义日期范围和预测窗口
+# 自定义日期范围和预测窗口（env 覆盖对所有入口生效）
 START_DATE=2020-01-01 END_DATE=2024-12-31 FORWARD_WINDOW=5 \
-  .venv/bin/python scripts/run_pipeline.py
+  .venv/bin/python scripts/run_walkforward.py
 ```
-
-成分股 universe 默认按**回测期间各月成分股的并集**取得，**已修复存活偏差**（被调出指数的股票仍纳入）。
 
 ### 预测目标与策略对齐（重要）
 
@@ -69,9 +71,10 @@ START_DATE=2020-01-01 END_DATE=2024-12-31 FORWARD_WINDOW=5 \
 ## 核心功能
 
 ### 1. 预测模型
-- **集成模型**：LightGBM（必备）+ XGBoost + CatBoost（装了就自动用）
-- **时间切分交叉验证**：按日期分折，避免日内泄露
-- **评估指标**：加权R²
+- **多模型增量集成**（`src/ensemble.py`）：gbm_l2 / gbm_ret_weighted / ic_linear 三腿，
+  每日续训（LightGBM init_model）+ 滚动 OOS IC 定权（EMA 平滑）
+- **滚动 walk-forward 引擎**（`src/walkforward.py`）：embargo 隔离的样本外验证，
+  与集成共用同一套 GBM 超参与截面归一化
 
 ### 2. 交易策略
 - **long_topk**（A股默认，可实盘）：每个交易日做多预测排名前 `TOPK_RATIO`（默认20%）的股票，等权，仓位和归一为1。**仅做多**，符合A股散户约束。
@@ -79,16 +82,11 @@ START_DATE=2020-01-01 END_DATE=2024-12-31 FORWARD_WINDOW=5 \
 - **cross_sectional**（**研究对照，非实盘**）：市场中性多空。A股散户无法做空个股，仅用于诊断信号质量。
 
 ### 3. 策略选择方法（避免数据窥探）
-三段时序切分：
 
-```
-日期轴: ──── 训练 ──── | ── 验证 ── | ── 测试 ──
-        拟合模型        选策略        唯一汇报点
-```
-
-- 在**验证集**比较各策略，选 Sharpe 最高者
-- 仅对选中策略在**测试集**做最终样本外汇报
-- **在测试集上挑最优=数据窥探偏差**，会系统性高估表现，本系统刻意避免
+旧的"训练/验证/测试三段切分 + 验证集选策略"管线（run_pipeline）已删除。
+当前的防窥探约定：**策略与超参固定在 config.py，所有结论只看滚动
+walk-forward 的拼接样本外曲线**（`scripts/run_walkforward.py`），调参实验
+只允许对照历史 OOS 做研究性参考，不进生产默认值而不标注。
 
 ### 4. 回测引擎
 - **严格时序**：测试集模型从未见过
@@ -102,13 +100,12 @@ START_DATE=2020-01-01 END_DATE=2024-12-31 FORWARD_WINDOW=5 \
 
 ```bash
 .venv/bin/python scripts/eval_factors.py            # 评估全部命名因子
-.venv/bin/python scripts/eval_factors.py --plot     # 额外输出分层累计净值曲线
 .venv/bin/python scripts/eval_factors.py --layers 10
 ```
 
 - 指标：IC、RankIC、ICIR（含年化）、IC 的 t 统计量、分层收益单调性、Top-Bottom 多空、换手
 - 准入门槛（已按小横截面调校，主用统计显著性）：`|IC_t|≥2` 且 `|RankICIR|≥0.2` 且 `|RankIC|≥0.02` 且 `单调性≥0.5`
-- 输出 `outputs/factor_eval.csv`（按 |IC_t| 排序）和 `outputs/factor_layers.png`
+- 输出 `outputs/factor_eval.csv`（按 |IC_t| 排序）；因子分层累计净值图已迁移到前端回测会话的因子分析步骤
 - 核心实现 `src/factor_eval.py`；命名因子面板由 `data.load_factor_panel()` 提供（保留因子原名，区别于喂模型的 `feature_NN`）
 
 ### 6. 基本面因子（估值类）
@@ -133,11 +130,11 @@ USE_SCREENING=1 UNIVERSE_SIZE=300 FORWARD_WINDOW=20 .venv/bin/python scripts/run
 ```
 
 修复了三个前瞻泄露源：
-- **embargo**：训练段与样本外段之间剔除 `EMBARGO_DAYS`(默认=FORWARD_WINDOW)天，杜绝标签跨界重叠
+- **embargo**：训练段与样本外段之间剔除 `EMBARGO_DAYS`(默认=FORWARD_WINDOW)天，杜绝标签跨界重叠（config import 期硬断言 + 引擎层防御性断言）
 - **因子选择隔离**：每个滚动窗口只用其训练段选因子（`select_passing_factors`），绝不碰测试段
-- **连续块 purged CV**：折划分从 `date%N_FOLD` 交错改为连续块 + 块间 embargo
+- **窗口内 early-stopping 验证集 embargo**：GBM 早停用的训练段尾部验证集前再剔除 embargo 天，防止验证标签偷看训练尾部
 
-输出 `outputs/walkforward_*.png`（连续 OOS 净值）和 `walkforward_windows_*.csv`（各窗口指标分布）。**重点看「为正窗口占比」**——衡量信号能否跨时间稳健复现，比单一 Sharpe 可信得多。
+输出 `outputs/walkforward_windows_*.csv`（各窗口指标分布）和 `walkforward_oos_curve.parquet`（连续 OOS 净值序列）；多面板仪表盘已迁移到前端「滚动Walk-Forward」会话（净值 vs 基准 / 累计 alpha / 逐窗口 Sharpe / 回撤）。**重点看「为正窗口占比」**——衡量信号能否跨时间稳健复现，比单一 Sharpe 可信得多。
 
 > **实测结论（记住这两行）：**
 > - 49 只蓝筹：所有配置均为负 OOS Sharpe，3~4/11 窗口为正 ≈ 随机——信号不足以战胜成本。
@@ -149,10 +146,9 @@ USE_SCREENING=1 UNIVERSE_SIZE=300 FORWARD_WINDOW=20 .venv/bin/python scripts/run
 
 运行后生成 `outputs/` 目录：
 
-- **equity_<strategy>.png** — 权益曲线 + 回撤图
-- **factor_eval.csv / factor_layers.png** — 单因子评估表与分层净值
-- **predictions.csv** — 每行的预测值、仓位、实际PnL
-- **report.json** — 数据来源、参数、所有策略的完整指标
+- **因子分层净值 / walk-forward 多面板 / 多 seed 稳健性仪表盘** — 已迁移到前端（回测会话因子分析步骤、「滚动Walk-Forward」「多Seed稳健性」会话）
+- **factor_eval.csv** — 单因子评估表
+- **orders_*.csv** — 次日可执行订单（predict_tomorrow.py）
 
 ## 主要文件
 
@@ -165,23 +161,24 @@ predict_tomorrow.py        # 生成次日订单
 
 src/
   data/                    # 数据连接器与因子工程
-  model.py / ensemble.py   # 集成模型
+  ensemble.py              # 多模型增量集成（每日续训 + 滚动 IC 定权）
   walkforward.py           # 滚动回测引擎
   strategy.py              # 预测 → 持仓
   trading.py               # 每日决策 + 成交模拟
-  backtest*.py             # 回测引擎
+  risk.py                  # 五层风控叠乘链（回测/实盘共用唯一实现）
+  backtest.py              # 周期调仓回测引擎（run_backtest_periodic）
+  backtest_daily.py        # 每日重放回测引擎
   factor_eval.py           # 单因子评估
   measure_alpha.py         # Alpha 显著性检验
 
-scripts/                   # 研究脚本（按功能分类）
+scripts/                   # 研究脚本（活/归档清单见 scripts/README.md）
   eval_factors.py          # 单因子评估 CLI
-  run_pipeline.py          # 旧端到端管线
-  run_walkforward.py       # 旧 walk-forward CLI
+  run_walkforward.py       # walk-forward CLI
   diagnose_factors.py      # 因子诊断
-  ablation/                # 消融实验
   diagnostics/             # 诊断脚本
-  optimize/                # 参数优化
-  research/                # 研究复现
+  optimize/                # 参数优化（optimize_daily_params.py）
+  research/                # 研究复现（multiseed_robust.py）
+  archive/                 # 一次性实验归档（不再维护）
 
 pipeline/                  # 会话式流水线
 webapp/                    # Dash 前端
@@ -193,37 +190,46 @@ tests/                     # 单元/集成测试
 ## 常用命令
 
 ```bash
-# 自动选策略（验证集选，测试集报）
-.venv/bin/python scripts/run_pipeline.py
+# 滚动 walk-forward 样本外回测（拼接 OOS 净值 + 各窗口指标分布）
+.venv/bin/python scripts/run_walkforward.py
 
-# 指定策略
-.venv/bin/python scripts/run_pipeline.py --strategy long_topk
+# 每窗口在训练段内做因子准入筛选（隔离，无泄露）并对比
+.venv/bin/python scripts/run_walkforward.py --compare
 
-# 自动选择时只考虑A股可交易（long-only）策略
-.venv/bin/python scripts/run_pipeline.py --tradeable-only
+# 生成次日订单 / 确认成交后写回持仓
+.venv/bin/python predict_tomorrow.py --capital 1000000
+.venv/bin/python predict_tomorrow.py --commit
 
-# 额外在测试集对比所有策略（仅研究）
-.venv/bin/python scripts/run_pipeline.py --compare
+# 模型门控：新配方模型先入 models/staging/ 双回放对比，Sharpe 更高且回撤不劣才晋升
+.venv/bin/python predict_tomorrow.py --no-gate          # 跳过门控（旧行为）
+.venv/bin/python predict_tomorrow.py --promote <id>     # 人工晋升 staging 候选
 
-# 复用已训练模型
-.venv/bin/python scripts/run_pipeline.py --no-train
+# 自适应重训与偏差跟踪：默认指标触发才重训（IC 退化/收益落后/超龄）
+.venv/bin/python predict_tomorrow.py --force-retrain    # 强制今晚重训
+.venv/bin/python predict_tomorrow.py --tracking-report  # 回测 vs 实盘偏差报告
 
-# 切换 universe / 预测窗口
-DEFAULT_INDEX=000905.SH FORWARD_WINDOW=10 .venv/bin/python scripts/run_pipeline.py
+# 单因子评估 / 多 seed 稳健性复核
+.venv/bin/python scripts/eval_factors.py
+.venv/bin/python scripts/research/multiseed_robust.py
+
+# 切换预测窗口等参数（env 覆盖对所有入口生效）
+FORWARD_WINDOW=10 .venv/bin/python scripts/run_walkforward.py
 ```
 
 ## 输出结果
 
 运行后生成 `outputs/`：
-- **equity_<strategy>.png** — 选中策略的净值曲线 + 回撤
-- **predictions.csv** — 测试集每行的预测、仓位、净PnL
-- **report.json** — 数据源/参数/成本、验证集选择过程、测试集最终指标
+- **walkforward_windows_\*.csv** — 各滚动窗口的 OOS 指标
+- **walkforward_oos_curve.parquet** — 连续 OOS 净值序列（前端「滚动Walk-Forward」会话的数据源）
+- **净值/多面板/多 seed 仪表盘图** — 已迁移到前端会话，不再输出 PNG
+- **orders_\*.csv / holdings.csv / account.csv** — 次日订单与实盘持仓/现金状态
 
 ## 关于"是否只用一个策略"
 
-**结论：最终只用一个策略，但必须在验证集选、测试集报。**
-
-在测试集上挑表现最好的策略是数据窥探偏差，会系统性高估真实表现。本系统用三段切分严格区分"选策略"和"报表现"。对 A 股散户而言更简单：`long_topk` 是唯一实际可交易的策略，可直接 `--strategy long_topk` 指定，从根本上无需在测试集挑选。`cross_sectional` 中性多空保留为研究对照（不可实盘）。
+**结论：最终只用一个策略。** 对 A 股散户而言很简单：`long_topk` 是唯一实际
+可交易的策略（仅做多），`cross_sectional` 中性多空保留为研究对照（不可实盘）。
+策略与超参固定在 `config.py`，结论一律看滚动 walk-forward 的拼接样本外曲线，
+避免"在测试集上挑最优"的数据窥探偏差。
 
 ## 如何继续优化
 
@@ -240,7 +246,7 @@ DEFAULT_INDEX=000905.SH FORWARD_WINDOW=10 .venv/bin/python scripts/run_pipeline.
 
 - 本系统仅供研究和回测，不构成投资建议；历史回测不保证未来收益。
 - universe 已修复存活偏差，但 tushare `index_weight` 历史深度有限，极早期可能回退到当前成分。
-- A股 **T+1**（当日买入次日才能卖）尚未在回测中强制，当前以日频持仓近似；做日内或高频前需补充该约束。
+- A股 **T+1** 已在撮合层强制（当日买入次日才能卖），见 `src/trading.py`。
 - 原 Kaggle 笔记本保持不变，本系统独立运行。
 
 ## 技术细节
@@ -249,7 +255,8 @@ DEFAULT_INDEX=000905.SH FORWARD_WINDOW=10 .venv/bin/python scripts/run_pipeline.
 `responder_6` = 未来 `FORWARD_WINDOW` 日收益（裁剪到 ±0.5）。`MARKET_NEUTRAL_TARGET=1` 时再减去当日全体均值，变为横截面超额收益。
 
 ### 时间切分
-模型训练内部按 `date_index % N_FOLD != fold` 分折，确保同一日期所有行同折，避免日内泄露。整体三段（训练/验证/测试）按时序前后切分。
+滚动 walk-forward：每步用前 `TRAIN_WINDOW` 天训练、剔除 `EMBARGO_DAYS` 天 embargo、
+预测其后 `TEST_WINDOW` 天（纯样本外），各窗口 OOS 拼接成连续净值曲线。
 
 ### long_topk 策略
 每个交易日：按预测值取横截面前 `TOPK_RATIO`，等权买入，权重和归一为 `GROSS_LEVERAGE`。仓位恒非负（long-only）。

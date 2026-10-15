@@ -5,14 +5,8 @@ run without error on a small panel containing responder_fw_* columns.
 """
 from __future__ import annotations
 
-import os
-import sys
-
 import numpy as np
 import pandas as pd
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import config as C
 from walkforward import (_train_predict_multi_ret_weighted,

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import glob
 import functools
+import threading
 
 import numpy as np
 import pandas as pd
@@ -188,3 +189,31 @@ def warm_load() -> dict:
         "amount_available": oos_with_amount_keys()[0],
         "n_factors": len(panel_factor_columns()),
     }
+
+
+# --- cache lifecycle ---------------------------------------------------------
+def refresh_caches() -> None:
+    """回填/新数据落盘后调用：清空全部 memoized loader，下次访问重新读盘。"""
+    for fn in (available_seeds, seed_oos, amount_map, oos_with_amount_keys,
+               daily_files, trade_dates, universe, symbol_bars,
+               consolidated_bars, market_breadth, output_csv,
+               panel_factor_columns):
+        fn.cache_clear()
+
+
+def preheat_async() -> threading.Thread:
+    """后台线程预热重型首次 IO（consolidated_bars / market_breadth）。
+
+    两者各要读全部 daily_*.parquet（~6M 行），同步做会拖慢启动数秒；
+    放 daemon 线程里跑，回调若先触发也只是重复一次 IO（lru_cache 在 GIL 下
+    并发安全，最坏结果是算两遍，不会损坏状态）。预热失败不致命。
+    """
+    def _job():
+        try:
+            consolidated_bars()
+            market_breadth()
+        except Exception:
+            pass
+    t = threading.Thread(target=_job, name="dataio-preheat", daemon=True)
+    t.start()
+    return t

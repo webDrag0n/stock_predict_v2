@@ -13,7 +13,7 @@ A-share 量化研究系统：数据 → 因子 → 模型 → 策略 → 回测/
 - **稳健 alpha 极其微弱**：在防泄露、 realistic cost、全市场 (~5700 只) 条件下，ret_weighted 目标 + 全量因子库的长期样本外 alpha 约 **+13.8%/年，NW-t ≈ 2.80**（3 个独立 seed 稳健显著）。但这是经过大量试错后才收敛到的结果。
 - **常见捷径都会虚高**：小股票池 (49/300 只)、未复权价格、每日重叠调仓、偷看测试集选策略等都会让 Sharpe/alpha 虚高数倍，必须逐项修正。
 - **信号站得住，但容量有限**：alpha 主要来源于小盘错误定价，容量天花板约 **¥1500 万**；流动性倾斜会摧毁 alpha。
-- **默认引擎是事件驱动的每日重放**：新版回测用 `src/backtest_daily.py` 逐日重放每日决策 + 次日撮合，与实盘 `predict_tomorrow.py` / `pipeline` 次日交易共用同一套 `src/trading.py` 决策代码，保证回测=实盘同分布。
+- **默认引擎是每日重放回测**：`src/backtest_daily.py` 逐日重放每日决策 + 次日撮合，与实盘 `predict_tomorrow.py` / `pipeline` 次日交易共用同一套 `src/trading.py` 决策代码，保证回测=实盘同分布。（旧的事件驱动引擎 `src/backtest_event.py` 含一日前视，已随阶段 5 删除；**基于它得出的历史结论一律作废**。）
 
 做任何改动前，先确认跑的是**目标模型**且**缓存没被覆盖**。这是项目最重要的方法论铁律。
 
@@ -28,7 +28,7 @@ A-share 量化研究系统：数据 → 因子 → 模型 → 策略 → 回测/
 │  → 基本面/财务（月度快照，merge_asof 防泄露）→ 期权 IV 宏观特征        │
 │  → Jane Street 行格式 或 命名因子面板                                 │
 ├──────────────────────────────────────────────────────────────────────┤
-│  模型层 (src/walkforward.py, src/ensemble.py, src/model*.py)          │
+│  模型层 (src/walkforward.py, src/ensemble.py, src/model_attn*.py)         │
 │  滚动 / 增量集成；目标：l2 / ret_weighted / lambdarank / ic_linear / fusion │
 │  截面 MAD-winsorize + z-score；多 seed bagging；滚动 IC 定权           │
 ├──────────────────────────────────────────────────────────────────────┤
@@ -81,65 +81,48 @@ src/
       orthogonal.py        # 异象因子（Amihud、MAX、特质波动、残差动量等）
       alpha158.py          # Qlib Alpha158 家族
       gtja191.py           # 国泰君安 191 精选子集
-  model.py                 # 旧 EnsembleModel（purged CV，LGB+XGB+CBT）
   model_attn.py            # 截面自注意力模型（可选 leg）
   model_attn_seq.py        # 序列注意力模型
-  features.py              # feature_00..NN 矩阵提取
+  features.py              # feature_00..NN 矩阵提取（Jane Street 旧格式专用）
   walkforward.py           # 滚动回测引擎（WF）+ 目标/模型分发 + 截面归一化
-  ensemble.py              # IncrementalEnsemble（每日续训+滚动 IC 定权）
+                           #   + GBM 超参唯一真相源（GBM_PARAMS，ensemble 经映射共用）
+  ensemble.py              # IncrementalEnsemble（每日续训+滚动 IC 定权+EMA 平滑）
   strategy.py              # 预测 → 持仓（long_topk / tanh / cross_sectional）
   trading.py               # 每日决策核心 + 逐笔订单 + 成交模拟 + 持仓状态
-  backtest.py              # 旧 walk-forward / 固定周期回测引擎
+  risk.py                  # 五层风控叠乘链唯一实现（compute_risk_scale，回测/实盘共用）
+  backtest.py              # 周期调仓回测引擎（run_backtest_periodic，唯一口径）
   backtest_daily.py        # 新版每日重放回测引擎
-  backtest_event.py        # 事件驱动调仓引擎（研究用）
-  live.py                  # 实盘推理：train_and_predict_latest / ensemble_predict_latest
-  live_state.py            # 实盘风控状态（波动/回撤/IC）
+  live.py                  # 实盘推理：ensemble_predict_latest / make_orders_from_state
+  live_state.py            # 实盘风控状态（波动/回撤/IC + 持久化预测历史）
   factor_eval.py           # 单因子 IC/ICIR/分层评估 + _windows / _daily_rank_ic 共享函数
+  multiseed_eval.py        # 多 seed 回测纯计算（seed_backtest，前端 robustness 会话用）
   measure_alpha.py         # Newey-West alpha/beta 显著性检验（_newey_west_alpha_t）
 
-scripts/                   # 研究脚本（按功能分类）
-  run_pipeline.py          # 旧端到端管线
+scripts/                   # 研究脚本（活脚本清单见 scripts/README.md）
   run_walkforward.py       # 旧 walk-forward CLI
   eval_factors.py          # 单因子评估 CLI
   diagnose_factors.py      # 因子层诊断三件套（CLI）
   measure_alpha.py         # Alpha/beta 测量（CLI）
-  plot_multiseed_dashboard.py  # 多 seed 仪表盘
-  ablation/                # 消融实验
-    ablation_attn_daily.py
-    ablation_risk_controls_daily.py
-    run_ablation_attn.py
-    run_ablation_multi_horizon.py
-    run_ablation_risk_controls.py
-    *.sh                   # 消融运行脚本
-  diagnostics/             # 诊断脚本
-    diag_decile.py
-    diag_linear_vs_gbm.py
-    diag_option_iv.py
-  optimize/                # 参数扫描/优化
-    optimize_accuracy.py
-    optimize_daily_params.py
-    optimize_topk.py / optimize_topk_params.py
-    event_sweep.py
-    rebalance_sweep.py
-    ensemble_opt.py
-  demo/                    # 合成数据演示
-  research/                # 研究/复现
-    realistic_cost.py
-    reproduce_ensemble.py
-    reexplore_corrected.py
-    multiseed_robust.py
-    simulate_short.py
+  diagnostics/             # 诊断脚本（diag_decile / diag_linear_vs_gbm / diag_option_iv）
+  optimize/                # optimize_daily_params.py（日频参数调优）
+  demo/                    # 合成数据端到端冒烟演示
+  research/                # multiseed_robust.py（多 seed 稳健性复核）
+  archive/                 # 一次性实验脚本归档（ablation/optimize/research，不再维护）
 
 pipeline/                  # 会话式流水线
   registry.py              # mode → 步骤序列 + 参数 schema
+  param_env.py             # 参数 → 环境变量映射（轻量，先于 config import 使用）
   context.py               # StepContext + report 构造器
   steps_backtest.py        # 回测模式 4 步实现
   steps_nextday.py         # 次日交易模式 3 步实现
+  steps_walkforward.py     # 滚动 Walk-Forward 模式（替代原 walkforward PNG 仪表盘）
+  steps_robustness.py      # 多 Seed 稳健性模式（替代原 dashboard_multiseed PNG）
 
 webapp/                    # Dash 前端
-  app.py                   # 应用入口与路由
-  sessions.py              # session 列表 + 新建/删除
-  pages/                   # 会话详情、行情浏览器、因子实验室等
+  app.py                   # 应用入口与路由（注册：会话/会话详情/行情浏览器/因子实验室）
+  sessions.py              # session 创建/调度/删除（detached 子进程 + 日志）
+  dataio.py                # 轻量缓存加载（面板/净值/因子元数据）
+  pages/                   # sessions、session_detail、market_explorer、factor_lab
   render.py                # 通用 step report 渲染器
 
 run_session.py             # 独立子进程执行一个 session
@@ -148,7 +131,7 @@ predict_tomorrow.py        # 生成次日订单 CLI
 
 tests/                     # 单元/集成测试
 outputs/                   # 报告、模型、session 产物
-models/                    # 保存的模型
+models/                    # 模型工件：champion/（生产）+ staging/（候选）+ archive/（退役），见 5.2a
 data_cache/                # 数据与中间面板缓存
 ```
 
@@ -174,17 +157,25 @@ data_cache/                # 数据与中间面板缓存
 | `ORDER_PRICE_MODE` | 成交模式 | `next_open` |
 | `USE_BB_TIMING` | 布林/RSI 择时 | 0（默认关） |
 | `USE_IMPACT_COST` | 市场冲击成本 | 1 |
+| `MIN_COMMISSION` | 每笔最低佣金（元） | 5.0 |
+| `MAX_PARTICIPATION` | 单笔成交占次日成交额上限 | 0.10 |
 | `USE_OPTION_FEATURES` | 期权 IV 宏观特征 | 1 |
 | `USE_DYNAMIC_TOPK` | 基于滚动 IC 的动态集中度 | 0 |
 | `USE_BETA_CONSTRAINT` | 组合 beta 约束（替换高 beta 股） | 0 |
 | `MAX_PORTFOLIO_BETA` | 最大允许组合 beta | 1.10 |
 | `MULTI_HORIZON_WINDOWS` | 多 horizon 目标窗口（逗号分隔） | 5,10,60 |
-| `ENSEMBLE_MODELS` | 增量集成 legs | `gbm_l2,gbm_ret_weighted,ic_linear` |
+| `ENSEMBLE_MODELS` | 增量集成 legs | `gbm_l2,ic_linear` |
+| `SEED_COMBINE` | 多 seed 融合方式（walkforward 直接读 config，无兜底） | `mean` |
+| `N_SEEDS` | walkforward 窗口内 bagging seed 数（增量集成为 `ENSEMBLE_N_SEEDS`，默认 1） | 3 |
+| `IC_WEIGHT_EMA_HALFLIFE` | 滚动 IC 定权 EMA 平滑半衰期（交易日，0=不平滑） | 5 |
+| `INCR_TREES` | 增量续训树数 = INCR_TREES × 新成熟天数（总树数上限 FULL_TREES×2，超限提前重建） | 60 |
+
+已删除的开关：`PERIODIC_REBALANCE`（每日重叠引擎 `run_backtest` 已删除，周期调仓是唯一口径，无回落开关）。
 
 ### 4.2 数据格式
 
 - **命名因子面板** (`load_factor_panel`)：长格式，列包括 `date`, `symbol`, `<命名因子...>`, `responder_6`，可选 `close/open/high/low/bb_*` 等 meta 列。
-- **Jane Street 行格式** (`load_data`)：行是 `(date_id, time_id, symbol_id)`，特征重命名为 `feature_00..feature_NN`。旧入口，主要用于兼容早期代码与 `src/model.py`。
+- **Jane Street 行格式** (`load_data`)：行是 `(date_id, time_id, symbol_id)`，特征重命名为 `feature_00..feature_NN`。旧入口；`src/model.py`（唯一消费方）已删除，目前仅兼容用途。缓存落盘时附带 `*.features.json` sidecar（因子名 → 列号映射），防止历史缓存列含义错位。
 
 模型实际训练使用**命名因子面板**。
 
@@ -212,10 +203,13 @@ data_cache/                # 数据与中间面板缓存
 
 ### 4.5 成本模型
 
-- 佣金双边：`COMMISSION_RATE = 0.0002`
+成本公式唯一实现于 `trading.trade_costs`（每日重放引擎、周期调仓引擎、实盘事前估算共用）：
+
+- 佣金双边：`max(notional × COMMISSION_RATE, MIN_COMMISSION)`（`COMMISSION_RATE = 0.0002`，每笔最低 `MIN_COMMISSION = 5` 元）
 - 印花税卖出单边：`STAMP_DUTY_RATE = 0.001`
 - 可选平方根市场冲击：`IMPACT_K * sqrt(notional / ADV) * notional`
-- A 股规则：涨跌停拦截、T+1 锁仓、整手（100 股）
+- 参与率上限：单笔成交 ≤ `MAX_PARTICIPATION`(0.10) × 次日成交额（冲击只计价不限量，此上限防止大单不切实际地全额成交；0 = 不限量）
+- A 股规则：涨跌停拦截、T+1 锁仓（按当日新增股数粒度，老仓可卖）、整手（100 股）
 
 ---
 
@@ -236,6 +230,44 @@ uv run python predict_tomorrow.py
 ```
 
 读取当前持仓 `holdings.csv`，生成 `outputs/orders_*.csv`。
+
+### 5.2a 模型门控与自适应重训（champion/staging + 触发式重训 + 偏差跟踪）
+
+**默认不再每晚重训。** 每晚先算跟踪指标，`src/retrain_trigger.py` 做 OR 判定，
+任一触发才训练候选：
+
+| 条件 | 阈值（config，均可 env 覆盖） |
+| --- | --- |
+| 活体 IC 退化 | 成熟样本 ≥ `RETRAIN_IC_MIN_SAMPLES`(10) 且尾部 `RETRAIN_IC_WINDOW`(20) 日 OOS rank-IC 均值 < `RETRAIN_IC_MIN`(0) |
+| 收益落后（需 `account.csv` 真实净值） | 尾部 `RETRAIN_UNDERPERF_DAYS`(20) 实盘收益 < 等权基准 − `RETRAIN_UNDERPERF_MARGIN`(0.03) |
+| 模型超龄（硬上限） | `train_end_date` 距今 > `MAX_MODEL_AGE_DAYS`(60) 个交易日 |
+
+- **未触发** → 加载 champion 冻结工件直接预测（`live.champion_predict_latest`），
+  IC 定权状态每日照常刷新并回存（`train_end_date` 不变）；
+- **触发** → 训练候选 → `src/model_gate.py` 门控：配方指纹与 champion 相同 →
+  原位刷新工件；不同 → 候选落盘 `models/staging/<id>/`，双方各跑一遍最近
+  `PROMOTE_EVAL_DAYS`（默认 120）个交易日的完整每日重放，**候选 Sharpe 更高
+  且最大回撤不劣于 champion − `PROMOTE_DD_TOLERANCE`**（默认 2pp）才晋升；
+  被拒则用冻结 champion 出信号（订单永远出自 champion）。
+
+**回测 vs 实盘偏差跟踪**（`src/live_tracking.py`）：每晚追加一行到
+`outputs/tracking/live_daily.parquet`，重生成 `tracking_report.json` ——
+晋升时回测预期 × 实盘实际（活体 IC + 真实净值表现）× 偏差 × 告警
+（IC 退化 / 收益落后 / 方向背离 / 临近超龄）。无 `account.csv` 时净值维度
+降级为 None 并告警提示，IC 维度照常。
+
+```bash
+uv run python predict_tomorrow.py --force-retrain      # 无视指标强制重训
+uv run python predict_tomorrow.py --tracking-report    # 打印偏差报告后退出
+uv run python predict_tomorrow.py --no-gate            # 跳过门控（每晚重训旧行为）
+uv run python predict_tomorrow.py --promote <id>       # 人工晋升 staging 候选
+USE_ADAPTIVE_RETRAIN=0 uv run python predict_tomorrow.py  # 关自适应，每晚重训
+USE_MODEL_GATE=0 uv run python predict_tomorrow.py        # 整体关门控
+```
+
+门控指标与 webapp 回测报告同源：`src/perf_metrics.py::compute_performance`；
+活体 IC 与 IC 降仓层同源：`live_state.collect_matured_ics`（纯函数）。
+`USE_ADAPTIVE_RETRAIN=0` 时退回"每晚重训 + 门控"（即初版门控行为）。
 
 ### 5.3 旧 walk-forward CLI
 
@@ -258,22 +290,13 @@ uv run pytest tests/ -v
 # 一次训练，复用 score_cache，避免每个组合都重训模型
 uv run python scripts/optimize/optimize_daily_params.py
 
-# 多 horizon 目标消融
-ABL_START_DATE=2024-01-01 ABL_END_DATE=2024-12-31 \
-uv run python scripts/ablation/run_ablation_multi_horizon.py
-
-# Attention leg 消融
-ABL_START_DATE=2024-01-01 ABL_END_DATE=2024-12-31 \
-uv run python scripts/ablation/run_ablation_attn.py
-
-# 风控（动态 TOPK / Beta 约束）消融
-ABL_START_DATE=2024-01-01 ABL_END_DATE=2024-12-31 \
-uv run python scripts/ablation/run_ablation_risk_controls.py
-
 # 合成数据演示（验证框架本身）
 uv run python scripts/demo/demo_optimize_daily_synthetic.py
 uv run python scripts/demo/demo_liquidity_ablation_synthetic.py
 ```
+
+更早的消融/参数扫描脚本（attn、multi-horizon、风控消融等）已归档到
+`scripts/archive/`（一次性实验，不再维护；清单见 `scripts/README.md`）。
 
 ---
 
@@ -282,10 +305,13 @@ uv run python scripts/demo/demo_liquidity_ablation_synthetic.py
 1. **缓存污染**：`data_cache/dataset_*.parquet` 的签名包含因子开关，但如果改的是签名没覆盖到的参数（如截面归一化实现本身），会读到旧缓存。调试新逻辑时主动删除缓存。
 2. **未复权价格**：必须用 `adj_close` 计算远期收益，否则除权除息日会注入虚假收益。
 3. **小股票池虚高**：49/300 只池子破坏截面相关性，结果不稳定。研究用全市场 `UNIVERSE_MODE=all`。
-4. **每日重叠调仓虚高**：周期调仓 `PERIODIC_REBALANCE=1` 是默认；关它会得到不真实的 Sharpe。
+4. **每日重叠调仓虚高**：旧的每日重叠引擎 `run_backtest`（Sharpe/PnL 双重虚高）与 `PERIODIC_REBALANCE` 开关已一并删除，周期调仓 `run_backtest_periodic` 是唯一回测口径——不要再引入"每天赚 pos×N日收益"的写法。
 5. **训练窗口过大导致 OOS 过短**：`TRAIN_WINDOW=750` 把 OOS 压缩到 7 个窗口，NW-t 会掉到 1.74。保持 500。
 6. **BB/RSI 择时默认应关闭**：历史归因证明它只稀释信号，不增加价值。
 7. **Regime 空仓默认应关闭**：滞后趋势规则在 V 型反弹里追涨杀跌。
+8. **公司行动不入账（known limitation）**：回测只做务实级除权处理——估值按 `pre_close` 链条调整（`backtest_daily._price_map` 维护每股累计 `val_factor`，单次调整幅度超 [1/3, 3] 判定为脏数据跳过并计数），消除除权日净值假性盈亏；但现金分红/送股不入账（无全量公司行动引擎），长期回测会轻微低估真实收益。成交价始终用原始 OHLC，不受估值因子影响。
+9. **score_cache 必须带指纹复用**：复用缓存分跳过训练时，传 `{"scores": ..., "fingerprint": meta["score_fingerprint"]}` 包装；指纹（特征列+ensemble 配置+前瞻窗）不匹配会被引擎拒绝，无指纹的旧 pkl 只警告放行——特征或模型改过后切勿复用旧缓存。
+10. **冻结期回测≠实盘分布**：自适应重训（5.2a）下实盘在触发间隔内用冻结 champion，而回测引擎每日增量重训——两者分布不同，回测净值会系统性偏优。`outputs/tracking/tracking_report.json` 的 divergence/方向背离告警就是度量这个偏差的；看到持续背离先怀疑分布漂移，不要直接信回测 Sharpe。
 
 ---
 

@@ -28,7 +28,7 @@ import pandas as pd
 
 import config as C
 from walkforward import _cross_sectional_norm
-from model_attn import _ic_loss, _by_date, _device
+from model_attn import _ic_loss, _by_date, _device, _require_torch
 
 
 def _build_seq_gather(panel: pd.DataFrame, seq_len: int) -> tuple[np.ndarray, np.ndarray]:
@@ -90,6 +90,7 @@ def _build_seq_model(n_feat, d_model, n_heads, n_layers, dropout, seq_len):
 def attn_seq_predict(train: pd.DataFrame, test: pd.DataFrame,
                      feat_cols: list[str], params: dict | None = None) -> np.ndarray:
     """时序+截面 attn：train 上训练、test 上 OOS 预测。返回与 test 行对齐的分。"""
+    _require_torch()
     import torch
     p = dict(params or {})
     seq_len = int(p.get("seq_len", os.environ.get("ATTN_SEQ_LEN", "20")))

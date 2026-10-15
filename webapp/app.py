@@ -11,6 +11,7 @@ from dash import dcc, html, Input, Output
 import dash_bootstrap_components as dbc
 
 from . import dataio
+from . import sessions as sessions_mgr
 from .theme import PALETTE
 from .pages import sessions as sessions_page
 from .pages import session_detail, market_explorer, factor_lab
@@ -28,6 +29,12 @@ server = app.server
 
 # warm-load light caches once at startup
 _STATUS = dataio.warm_load()
+
+# 启动对账：把磁盘上 pid 已死的僵尸 running 会话标记 failed（防阻塞队列）
+_N_RECONCILED = sessions_mgr.reconcile_on_startup()
+
+# 重型首次 IO（consolidated_bars / market_breadth）后台线程预热，不阻塞启动
+dataio.preheat_async()
 
 NAV_ITEMS = [
     ("/", "会话", "Sessions"),

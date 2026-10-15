@@ -8,14 +8,12 @@ families already present (ROC/MA/STD/MAX/MIN ≈ momentum/volatility/price_to_ma
 """
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 import pandas as pd
 
 # Repeated column insertion in rolling-window loops triggers pandas fragmentation
-# warnings; the data size is small enough that the warning is noise here.
-warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
+# warnings; the data size is small enough that the warning is noise here. 但库
+# 模块不在 import 期动全局 warnings 状态——由入口脚本显式设置。
 
 
 def _rolling_r2(y: np.ndarray) -> float:

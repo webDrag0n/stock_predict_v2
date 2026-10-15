@@ -347,7 +347,7 @@ def format_panel_report(table: pd.DataFrame) -> str:
 
 def _layer_equity(panel: pd.DataFrame, factor: str, target: str,
                   n_layers: int) -> pd.DataFrame:
-    """各层逐日平均收益 -> 累计净值（用于画图）。返回 index=date 的净值 DataFrame。"""
+    """各层逐日平均收益 -> 累计净值。返回 index=date 的净值 DataFrame（前端复用此数据自行渲染）。"""
     df = panel[["date", factor, target]].dropna(subset=[factor, target]).copy()
     df[factor] = df.groupby("date", group_keys=False)[factor].apply(_winsorize)
 
@@ -369,61 +369,6 @@ def _layer_equity(panel: pd.DataFrame, factor: str, target: str,
     # 累计净值（按 period 重叠，这里用简单累乘近似展示趋势）
     equity = (1.0 + daily.fillna(0.0)).cumprod()
     return equity
-
-
-def plot_layered_returns(panel: pd.DataFrame, factors: list[str],
-                         out_path: str, target: str = None,
-                         n_layers: int = 5) -> str:
-    """Layered cumulative returns for up to 6 factors (2×3 subplots)."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    plt.rcParams["font.family"] = "DejaVu Sans"
-
-    target = target or C.TARGET
-    factors = factors[:6]
-    n = len(factors)
-    ncol = min(3, n)
-    nrow = (n + ncol - 1) // ncol
-    fig, axes = plt.subplots(nrow, ncol, figsize=(5.5 * ncol, 4.0 * nrow),
-                             squeeze=False)
-    cmap = plt.get_cmap("RdYlGn")
-    for i, fac in enumerate(factors):
-        ax = axes[i // ncol][i % ncol]
-        eq = _layer_equity(panel, fac, target, n_layers)
-        x = np.arange(len(eq))
-        for li, col in enumerate(eq.columns):
-            ax.plot(x, eq[col].values, lw=1.1,
-                    color=cmap(li / max(n_layers - 1, 1)),
-                    label=f"Q{int(col)+1}")
-        ax.set_title(fac, fontsize=10)
-        ax.axhline(1.0, color="grey", lw=0.6, ls="--", label="Baseline=1")
-        ax.set_ylabel("Cum. return (1=start)", fontsize=7)
-        ax.set_xlabel("Trading day", fontsize=7)
-        ax.grid(alpha=0.25)
-        ax.legend(fontsize=6, ncol=n_layers + 1, loc="upper left")
-    for j in range(n, nrow * ncol):
-        axes[j // ncol][j % ncol].axis("off")
-
-    fig.suptitle(
-        f"Factor Quintile Return Spreads  —  {n_layers} layers, "
-        f"Q1=lowest factor value, Q{n_layers}=highest",
-        fontsize=11, y=1.01)
-
-    note = ("How to read:  Each subplot shows one factor split into quintiles "
-            f"(Q1=lowest {100//n_layers}%, Q{n_layers}=highest {100//n_layers}%) "
-            "sorted daily across all stocks.\n"
-            "Cumulative return of each quintile is plotted over time (starting at 1.0).\n"
-            "A good factor shows Q1 < Q2 < … < Q5 (monotone spread): "
-            "high-ranked stocks should outperform low-ranked ones.\n"
-            "Diverging fan = strong factor; flat or crossing lines = weak/noisy factor.")
-    fig.text(0.01, -0.04, note, fontsize=7.5, va="top",
-             bbox=dict(boxstyle="round,pad=0.4", fc="#f9f9f9", ec="#cccccc", alpha=0.9))
-
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=110, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
 
 
 def select_features(eval_csv: str = None) -> list[str] | None:

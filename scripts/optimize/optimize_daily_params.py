@@ -132,15 +132,21 @@ def main() -> None:
     if resume_cache and os.path.exists(resume_cache):
         print(f"===== 复用已有 score_cache: {resume_cache} =====")
         with open(resume_cache, "rb") as f:
-            score_cache = pickle.load(f)
+            score_cache_arg = pickle.load(f)
+        # 引擎直接吃包装（解包+校验指纹）；本脚本查日期用裸分数 dict
+        score_cache = (score_cache_arg["scores"]
+                       if isinstance(score_cache_arg, dict) and "scores" in score_cache_arg
+                       else score_cache_arg)
         print(f"score_cache: {len(score_cache)} 决策日\n")
     else:
         print("===== 基线训练 + 收集 score_cache =====")
         base_res = run_daily_replay(panel, factors, initial_cash=initial_cash,
                                     params=base_params, progress=True)
         score_cache = base_res["score_cache"]
+        score_cache_arg = {"scores": score_cache,
+                           "fingerprint": base_res["meta"]["score_fingerprint"]}
         with open(cache_path, "wb") as f:
-            pickle.dump(score_cache, f)
+            pickle.dump(score_cache_arg, f)
         print(f"score_cache: {len(score_cache)} 决策日 (已保存 {cache_path})\n")
 
     # 2) 参数网格（可通过环境变量 JSON 覆盖，便于快速测试）
@@ -160,7 +166,7 @@ def main() -> None:
     rows = []
     for combo in combos:
         p = dict(base_params)
-        p["score_cache"] = score_cache          # 复用缓存，跳过训练
+        p["score_cache"] = score_cache_arg      # 复用缓存（含指纹），跳过训练
         p["collect_scores"] = False
         p.update(dict(zip(keys, combo)))
         # 默认关闭择时，专注策略/执行参数

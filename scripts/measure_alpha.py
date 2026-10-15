@@ -26,7 +26,7 @@ from measure_alpha import _newey_west_alpha_t
 def main() -> None:
     os.makedirs(C.OUTPUT_DIR, exist_ok=True)
     print(f"锁定配置: 预测器={C.MODEL_OBJECTIVE} topk={C.TOPK_RATIO} "
-          f"hold={C.HOLD_RATIO} 周期调仓={C.REBALANCE_DAYS}日 周期回测={C.PERIODIC_REBALANCE}")
+          f"hold={C.HOLD_RATIO} 周期调仓={C.REBALANCE_DAYS}日")
     panel = load_factor_panel(keep_price=True)
     factors = list_factor_columns(panel)
     res = run_walkforward(panel, factors, strategy="long_topk", verbose=False)

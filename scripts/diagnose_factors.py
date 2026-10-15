@@ -14,7 +14,7 @@ run_walkforward 的连续 OOS 结果对照。
 
 用法
 ----
-  python diagnose_factors.py                 # 跑全部三件套,CSV+图存 outputs/
+  python diagnose_factors.py                 # 跑全部三件套,CSV 存 outputs/
   python diagnose_factors.py --no-model      # 跳过模型(只看因子,快)
 """
 from __future__ import annotations
@@ -154,29 +154,6 @@ def model_vs_best_factor(panel: pd.DataFrame, factors: list[str],
     return pd.DataFrame(rows)
 
 
-def plot_corr_heatmap(corr: pd.DataFrame, out_path: str) -> str:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    plt.rcParams["font.family"] = "DejaVu Sans"
-
-    n = len(corr)
-    fig, ax = plt.subplots(figsize=(max(8, n * 0.32), max(7, n * 0.30)))
-    im = ax.imshow(corr.values, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
-    ax.set_xticks(range(n))
-    ax.set_yticks(range(n))
-    ax.set_xticklabels(corr.columns, rotation=90, fontsize=6)
-    ax.set_yticklabels(corr.index, fontsize=6)
-    ax.set_title("Factor correlation (per-date cross-sectional z-score, Pearson)\n"
-                 "Red blocks off-diagonal = redundant factor clusters",
-                 fontsize=10)
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=110, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="因子层诊断三件套(防泄露 OOS)")
     ap.add_argument("--no-model", action="store_true",
@@ -213,7 +190,6 @@ def main() -> None:
     print("=" * 70)
     corr = factor_correlation(panel, factors)
     corr.to_csv(os.path.join(C.OUTPUT_DIR, "diag_factor_corr.csv"))
-    heat = plot_corr_heatmap(corr, os.path.join(C.OUTPUT_DIR, "diag_factor_corr.png"))
     clusters = redundant_clusters(corr, args.corr_thresh)
     if clusters:
         print(f"发现 {len(clusters)} 个冗余因子簇(簇内高度相关,可考虑降维/择一):")
@@ -221,7 +197,7 @@ def main() -> None:
             print(f"  簇{i+1}: {', '.join(cl)}")
     else:
         print(f"无 |corr|>={args.corr_thresh} 的冗余簇。")
-    print(f"-> outputs/diag_factor_corr.csv, outputs/diag_factor_corr.png")
+    print(f"-> outputs/diag_factor_corr.csv")
 
     # ---- 诊断3: 模型 vs 最强单因子 ----
     if not args.no_model:

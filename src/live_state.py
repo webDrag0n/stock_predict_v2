@@ -1,7 +1,13 @@
 """实盘风险状态持久化与风控缩放计算。
 
-把 backtest_daily.py 里每日计算的 vol/dd/IC/regime/IV 五层风控抽象成纯函数，
-供 live 路径复用。状态通过 JSON 持久化到磁盘，跨 predict_tomorrow 运行保留。
+五层风控叠乘链的唯一实现在 src/risk.py（与 backtest_daily 共用）；本模块只做
+实盘侧的状态读写与"预计算"（regime 标志 / IV 缩放 / 成熟 IC 入队），保证
+回测与实盘数学逐项一致。
+
+状态文件（随 predict_tomorrow 每日运行累积，默认在 outputs/ 下）：
+  · live_risk_state.json           —— RiskState（净值/IC 队列/已打分日期）
+  · live_risk_state_pred_hist.parquet —— 持久化预测历史（date, symbol, score,
+    pred_<model>...），供 IC 降仓（本模块）与 IC 定权（live.py，真 OOS）复用。
 """
 from __future__ import annotations
 
@@ -9,13 +15,13 @@ import json
 import os
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
 
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
 import config as C
+import risk as _risk
 
 
 # ---------------------------------------------------------------------------
@@ -25,6 +31,7 @@ class RiskState:
     dates: list[str] = field(default_factory=list)           # ISO 决策日序列
     total_values: list[float] = field(default_factory=list)  # 对应 total_value
     ic_queue: deque = field(default_factory=lambda: deque(maxlen=100))  # 成熟 IC
+    scored_ic_dates: list[str] = field(default_factory=list)  # 已打分/已跳过的预测日
     last_update: str | None = None
 
     def __post_init__(self):
@@ -36,6 +43,7 @@ class RiskState:
             "dates": self.dates,
             "total_values": self.total_values,
             "ic_queue": list(self.ic_queue),
+            "scored_ic_dates": self.scored_ic_dates,
             "last_update": self.last_update,
         }
 
@@ -45,6 +53,7 @@ class RiskState:
             dates=list(d.get("dates", [])),
             total_values=list(d.get("total_values", [])),
             ic_queue=deque(d.get("ic_queue", []), maxlen=100),
+            scored_ic_dates=list(d.get("scored_ic_dates", [])),
             last_update=d.get("last_update"),
         )
 
@@ -56,7 +65,16 @@ def load_risk_state(path: str) -> RiskState:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return RiskState.from_dict(json.load(f))
-    except Exception:
+    except Exception as e:
+        # 不静默清零：备份损坏文件后从空状态重建，并醒目提示人工核对
+        bak = path + ".corrupt-" + pd.Timestamp.now().strftime("%Y%m%d%H%M%S") + ".bak"
+        try:
+            os.replace(path, bak)
+        except OSError:
+            bak = ""
+        print(f"[警告] 风控状态文件 {path} 损坏（{type(e).__name__}: {e}），"
+              f"已从空状态重建" + (f"，原文件已备份到 {bak}，请人工核对。" if bak
+                                   else "，备份失败，请尽快人工核查。"))
         return RiskState()
 
 
@@ -64,6 +82,57 @@ def save_risk_state(path: str, state: RiskState) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(state.to_dict(), f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# 持久化预测历史（pred_hist）：小 parquet，与 risk_state JSON 同目录同行命名
+# ---------------------------------------------------------------------------
+def pred_hist_path_for(risk_state_path: str) -> str:
+    """risk_state JSON 路径 → 同行的 pred_hist parquet 路径。"""
+    base, _ = os.path.splitext(risk_state_path)
+    return base + "_pred_hist.parquet"
+
+
+def load_pred_hist(path: str | None) -> pd.DataFrame:
+    """读取持久化预测历史（columns: date[str], symbol, score, pred_<model>...）。"""
+    empty = pd.DataFrame(columns=["date", "symbol", "score"])
+    if not path or not os.path.exists(path):
+        return empty
+    try:
+        return pd.read_parquet(path)
+    except Exception as e:
+        print(f"[警告] 预测历史 {path} 读取失败（{type(e).__name__}: {e}），"
+              f"本次按空历史处理（IC 降仓/定权将退化）。")
+        return empty
+
+
+def append_pred_hist(path: str, date, frame: pd.DataFrame,
+                     keep_days: int = 120) -> pd.DataFrame:
+    """把当日预测分落盘（同日重跑覆盖旧行），并裁剪到最近 keep_days 个预测日。
+
+    frame 需含 symbol/score 列；pred_<model> 列若存在一并持久化（供实盘
+    OOS IC 定权复用，见 live.ensemble_predict_latest）。
+    """
+    cols = ["symbol", "score"] + [c for c in frame.columns
+                                  if c.startswith("pred_") and c != "pred_"]
+    new = frame[cols].copy()
+    new.insert(0, "date", str(pd.Timestamp(date).date()))
+    dstr = new["date"].iloc[0]
+
+    hist = load_pred_hist(path)
+    if len(hist):
+        hist = hist[hist["date"] != dstr]
+        # 列对齐（模型腿变化时老文件可能缺 pred_* 列）
+        hist = hist.reindex(columns=new.columns)
+        hist = pd.concat([hist, new], ignore_index=True)
+    else:
+        hist = new
+    days = sorted(hist["date"].unique())
+    if len(days) > keep_days:
+        hist = hist[hist["date"].isin(set(days[-keep_days:]))]
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    hist.to_parquet(path, index=False)
+    return hist
 
 
 # ---------------------------------------------------------------------------
@@ -115,18 +184,77 @@ def _iv_scale(panel: pd.DataFrame, d: object,
     return 1.0 + t * (iv_min_scale - 1.0)
 
 
-def _update_ic_queue(state: RiskState, panel: pd.DataFrame,
-                     d: object, fw: int) -> None:
-    """把新成熟的预测日打分算入 IC 队列。panel 需含 date, symbol, TARGET。"""
-    if C.TARGET not in panel.columns:
-        return
+def collect_matured_ics(panel: pd.DataFrame, pred_hist: pd.DataFrame,
+                        d: object, fw: int) -> tuple[dict, list]:
+    """计算截至决策日 d 已成熟预测日的 rank-IC（纯函数，不维护状态）。
+
+    防泄露口径：预测日 d_prev 在 d_prev + fw ≤ d（按 panel 交易日序数）时成熟。
+    样本门槛：截面 ≥30 只、有效对 ≥20。
+
+    Returns:
+        (ics, done)：ics = {预测日 str: rank-IC}（只含成功打分的）；done =
+        截至 d 已定局的预测日列表（打分成功或永久性无法打分：滚出面板/样本不足），
+        未成熟的预测日不在 done 中（留待未来运行）。
+    """
+    ics: dict[str, float] = {}
+    done: list[str] = []
+    if pred_hist is None or not len(pred_hist) or C.TARGET not in panel.columns:
+        return ics, done
     all_dates = np.sort(panel["date"].unique())
-    di = int(np.searchsorted(all_dates, np.datetime64(d), side="right")) - 1
-    if di < 0:
+    if not len(all_dates):
+        return ics, done
+    d64 = np.datetime64(d)
+    di = int(np.searchsorted(all_dates, d64))
+    if di >= len(all_dates) or all_dates[di] != d64:
+        return ics, done
+    tgt_by_date = {dd: sub for dd, sub in panel.groupby("date")}
+    for d_prev in sorted(pred_hist["date"].unique()):
+        d_prev64 = np.datetime64(d_prev)
+        i_prev = int(np.searchsorted(all_dates, d_prev64))
+        if i_prev >= len(all_dates) or all_dates[i_prev] != d_prev64:
+            done.append(d_prev)   # 预测日已老出当前面板窗口：永远无法打分
+            continue
+        if i_prev + fw > di:
+            continue              # 标签未成熟，留待 fw 天后的运行
+        done.append(d_prev)       # 已成熟：打分或（样本不足时）永久跳过
+        sub = tgt_by_date.get(d_prev64)
+        if sub is None:
+            continue
+        ph = pred_hist[pred_hist["date"] == d_prev]
+        joined = ph.merge(sub[["symbol", C.TARGET]], on="symbol", how="inner")
+        if len(joined) < 30:
+            continue
+        ok = np.isfinite(joined[C.TARGET].to_numpy(float)) & \
+            np.isfinite(joined["score"].to_numpy(float))
+        if ok.sum() < 20:
+            continue
+        ic_val = spearmanr(joined["score"].to_numpy(float)[ok],
+                           joined[C.TARGET].to_numpy(float)[ok]).correlation
+        if ic_val == ic_val:
+            ics[d_prev] = float(ic_val)
+    return ics, done
+
+
+def _update_ic_queue(state: RiskState, panel: pd.DataFrame,
+                     d: object, fw: int,
+                     pred_hist: pd.DataFrame | None = None) -> None:
+    """把新成熟的持久化预测日打分算入 IC 队列（实盘 IC 降仓的数据来源）。
+
+    防泄露（与 backtest_daily 同口径）：只对满足 d_prev + fw ≤ d 的预测日打分
+    （此时 responder 标签已成熟）；未成熟的留待未来运行。样本量门槛与回测一致
+    （截面 ≥30 只、有效对 ≥20）。打分过的预测日记入 state.scored_ic_dates，
+    跨运行不重复入队。打分核心在 collect_matured_ics（纯函数，tracking 复用）。
+    """
+    if pred_hist is None or not len(pred_hist):
         return
-    # 找那些预测日 + fw 已成熟的预测历史（这里简化为：若 state 里存了 pred_hist）
-    # 实际上 live 端不保存 pred_hist，此函数在 live 主要依赖已持久化的 ic_queue。
-    # 为 future-proof：如果后续把 pred_hist 也持久化，可在这里计算。
+    ics, done = collect_matured_ics(panel, pred_hist, d, fw)
+    scored = set(state.scored_ic_dates)
+    for d_prev in done:
+        if d_prev in scored:
+            continue
+        if d_prev in ics:
+            state.ic_queue.append(ics[d_prev])
+        state.scored_ic_dates.append(d_prev)
 
 
 def compute_risk_scale(
@@ -134,8 +262,14 @@ def compute_risk_scale(
     decision_date: object,
     state: RiskState | None = None,
     params: dict | None = None,
+    pred_hist: pd.DataFrame | None = None,
 ) -> tuple[float, RiskState]:
-    """计算与 backtest_daily 一致的风控缩放系数，并更新 RiskState。
+    """实盘风控缩放：薄包装 = 状态读写 + 预计算，叠乘链调 src/risk.py 唯一实现。
+
+    Args:
+        panel     : 完整历史面板（多日期），用于 regime/IV/成熟 IC 打分。
+        pred_hist : 持久化预测历史（load_pred_hist 的结果）；提供后本函数会
+                    先把新成熟的预测日打分入 ic_queue（修复原空函数死代码）。
 
     Returns:
         (risk_scale, updated_state)
@@ -143,63 +277,28 @@ def compute_risk_scale(
     p = dict(params or {})
     state = state or RiskState()
 
-    use_vol_target = bool(p.get("use_vol_target", C.USE_VOL_TARGET))
-    target_vol = float(p.get("target_vol", C.TARGET_VOL))
-    vol_window = int(p.get("vol_window", C.VOL_WINDOW))
-    use_dd_brake = bool(p.get("use_dd_brake", C.USE_DD_BRAKE))
-    dd_threshold = float(p.get("dd_threshold", C.DD_THRESHOLD))
-    dd_scale = float(p.get("dd_scale", C.DD_SCALE))
-    use_ic_scale = bool(p.get("use_ic_scale", C.USE_IC_SCALE))
-    ic_zero_scale = float(p.get("ic_zero_scale", C.IC_ZERO_SCALE))
-    ic_full_scale = float(p.get("ic_full_scale", C.IC_FULL_SCALE))
-    ic_min_scale = float(p.get("ic_min_scale", C.IC_MIN_SCALE))
-    use_regime = bool(p.get("use_regime", C.USE_REGIME_FILTER))
-    regime_window = int(p.get("regime_window", C.REGIME_WINDOW))
-    regime_floor_ret = float(p.get("regime_floor_ret", C.REGIME_FLOOR_RET))
-    regime_min = float(p.get("regime_min", C.REGIME_MIN))
-    use_iv_scale = bool(p.get("use_iv_scale", C.USE_IV_SCALE))
-    iv_scale_window = int(p.get("iv_scale_window", C.IV_SCALE_WINDOW))
-    iv_feature = p.get("iv_feature_for_scale", C.IV_FEATURE_FOR_SCALE)
-    iv_min_scale = float(p.get("iv_min_scale", C.IV_MIN_SCALE))
+    if bool(p.get("use_ic_scale", C.USE_IC_SCALE)):
+        _update_ic_queue(state, panel, decision_date,
+                         int(getattr(C, "FORWARD_WINDOW", 20)), pred_hist)
 
-    risk_scale = 1.0
+    risk_on = True
+    if bool(p.get("use_regime", C.USE_REGIME_FILTER)):
+        risk_on = _regime_risk_on(
+            panel, decision_date,
+            int(p.get("regime_window", C.REGIME_WINDOW)),
+            float(p.get("regime_floor_ret", C.REGIME_FLOOR_RET)))
+    iv_scale = 1.0
+    if bool(p.get("use_iv_scale", C.USE_IV_SCALE)):
+        iv_scale = _iv_scale(
+            panel, decision_date,
+            p.get("iv_feature_for_scale", C.IV_FEATURE_FOR_SCALE),
+            int(p.get("iv_scale_window", C.IV_SCALE_WINDOW)),
+            float(p.get("iv_min_scale", C.IV_MIN_SCALE)))
 
-    # IC 信号失效降仓
-    ic_scale = 1.0
-    if use_ic_scale and len(state.ic_queue) >= 3:
-        roll_ic = float(np.mean(state.ic_queue))
-        t = ((roll_ic - ic_zero_scale) /
-             (ic_full_scale - ic_zero_scale + 1e-9))
-        t = max(0.0, min(1.0, t))
-        ic_scale = ic_min_scale + t * (1.0 - ic_min_scale)
-    risk_scale *= ic_scale
-
-    # vol target + dd brake
-    if (use_vol_target or use_dd_brake) and len(state.total_values) >= 6:
-        tvs = np.array(state.total_values, dtype=np.float64)
-        rets = tvs[1:] / tvs[:-1] - 1.0
-        if use_vol_target and len(rets) >= 5:
-            rv = float(np.std(rets[-vol_window:])) + 1e-12
-            target_daily = target_vol / np.sqrt(252.0)
-            risk_scale = min(risk_scale, target_daily / rv)
-        if use_dd_brake:
-            dd = tvs[-1] / tvs.max() - 1.0
-            if dd < -dd_threshold:
-                risk_scale *= dd_scale
-
-    # regime 择时
-    if use_regime and not _regime_risk_on(
-        panel, decision_date, regime_window, regime_floor_ret
-    ):
-        risk_scale *= regime_min
-
-    # IV 缩放
-    if use_iv_scale:
-        risk_scale *= _iv_scale(
-            panel, decision_date, iv_feature, iv_scale_window, iv_min_scale
-        )
-
-    return float(risk_scale), state
+    scale, _, _ = _risk.compute_risk_scale(
+        state.total_values, state.ic_queue, params=p,
+        risk_on=risk_on, iv_scale=iv_scale)
+    return scale, state
 
 
 def update_risk_state(

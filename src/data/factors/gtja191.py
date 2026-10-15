@@ -20,8 +20,6 @@ we use ``amount / volume``.
 """
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 import pandas as pd
 
@@ -30,16 +28,20 @@ from ._base import (
     ts_rank, ts_sum, signed_power, safe_div,
 )
 
-warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
+# 不在 import 期全局屏蔽 PerformanceWarning——由入口脚本显式设置（库模块不该
+# 动全局 warnings 状态）。
 
 
 # -----------------------------------------------------------------------------
 # Default curated subset. Override via config env var GTJA191_ALPHA_SUBSET.
+# alpha024 与 alpha014 互为精确负值（-1 * (CLOSE - DELAY(CLOSE,5))），重复入
+# 库只会加倍权重；alpha010 把 close² 与 std(ret)² 混排，数值上已退化——两者
+# 移出默认子集（函数本体保留，可用 GTJA191_ALPHA_SUBSET 显式启用）。
 # -----------------------------------------------------------------------------
 DEFAULT_SUBSET = [
     "alpha001", "alpha002", "alpha003", "alpha005", "alpha006",
-    "alpha007", "alpha008", "alpha010", "alpha012", "alpha014",
-    "alpha017", "alpha020", "alpha021", "alpha023", "alpha024",
+    "alpha007", "alpha008", "alpha012", "alpha014",
+    "alpha017", "alpha020", "alpha021", "alpha023",
     "alpha028", "alpha029", "alpha032", "alpha034", "alpha041",
     "alpha045", "alpha054", "alpha060", "alpha101", "alpha102",
 ]
@@ -87,7 +89,9 @@ def _alpha005(df: pd.DataFrame, o, h, l, c, v) -> pd.Series:
 
 def _alpha006(df: pd.DataFrame, o, h, l, c, v) -> pd.Series:
     # -1 * DELTA( OPEN*0.85 + HIGH*0.15, 4 )
-    return -ts_delta(o * 0.85 + h * 0.15, 4)
+    # 原始输出是价格量纲（元），高价股天然占尺度优势（截面尺度污染）；
+    # 套 per-date 截面 rank 保持排序语义、消除量纲。
+    return cs_rank(-ts_delta(o * 0.85 + h * 0.15, 4))
 
 
 def _alpha007(df: pd.DataFrame, o, h, l, c, v) -> pd.Series:
@@ -122,7 +126,9 @@ def _alpha012(df: pd.DataFrame, o, h, l, c, v) -> pd.Series:
 
 def _alpha014(df: pd.DataFrame, o, h, l, c, v) -> pd.Series:
     # CLOSE - DELAY(CLOSE, 5)
-    return c - ts_delay(c, 5)
+    # 原始输出是价格量纲（元），高价股天然占尺度优势（截面尺度污染）；
+    # 套 per-date 截面 rank 保持排序语义、消除量纲。
+    return cs_rank(c - ts_delay(c, 5))
 
 
 def _alpha017(df: pd.DataFrame, o, h, l, c, v) -> pd.Series:

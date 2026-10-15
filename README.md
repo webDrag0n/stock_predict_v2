@@ -16,64 +16,67 @@ predict (responder_6)  ->  strategy (positions)  ->  backtest (PnL, risk)
 | File | Role |
 |------|------|
 | `config.py` | All paths, schema, and tunable parameters in one place |
-| `src/data.py` | Loads real `train.parquet` if present; else generates a Jane-Street-like synthetic panel with real (noisy) signal |
-| `src/features.py` | Feature matrix extraction, NaN fill, optional cross-sectional rank normalization |
-| `src/model.py` | `EnsembleModel`: purged date-based CV over LGB (+XGB/CatBoost if installed), weighted-R² scoring, save/load |
-| `src/strategy.py` | Maps predictions to positions: `threshold`, `tanh`, or `cross_sectional` (dollar-neutral) |
-| `src/backtest.py` | Walk-forward PnL engine + metrics (Sharpe, Sortino, Calmar, max drawdown, hit rate, turnover) + equity-curve plot |
-| `run_pipeline.py` | CLI that runs the whole thing and writes outputs |
+| `src/data/` | Data connectors (tushare) + factor engineering + panel loaders |
+| `src/features.py` | Feature matrix extraction, NaN fill (Jane-Street row format) |
+| `src/walkforward.py` | Rolling walk-forward engine + model objective dispatch |
+| `src/ensemble.py` | `IncrementalEnsemble`: daily continued-training + rolling-IC weighting |
+| `src/strategy.py` | Maps predictions to positions: `long_topk`, `tanh`, or `cross_sectional` (dollar-neutral) |
+| `src/backtest.py` | Periodic-rebalance PnL engine + metrics (Sharpe, Sortino, Calmar, max drawdown, hit rate) |
+| `src/backtest_daily.py` | Daily-replay engine: per-day decisions + next-day fill simulation |
+| `predict_tomorrow.py` | CLI: train on data up to today, emit next-day executable orders |
+| `run_webapp.py` | Dash front-end (session-based pipelines) |
+
+> Removed in the phase-5 architecture cleanup: `src/model.py` (leaky purged-CV
+> ensemble) and its CLI `run_pipeline.py`; the one-day-lookahead event engine
+> `src/backtest_event.py`; and the inflated daily-overlap `run_backtest` in
+> `src/backtest.py` (`run_backtest_periodic` is the only backtest path).
 
 ## Quick start
 
 ```bash
-pip install -r requirements.txt        # lightgbm + sklearn are the minimum
-python run_pipeline.py --compare       # train, then backtest all strategies
+uv sync --extra dev                     # 安装依赖（含 pytest；torch 见下）
+uv run python scripts/run_walkforward.py   # rolling walk-forward OOS backtest
+uv run python predict_tomorrow.py          # next-day orders from current holdings
+uv run pytest tests/ -v                    # test suite
 ```
 
-With no Kaggle data present it runs on synthetic data automatically, so it works
-out of the box. Point it at the real dataset by setting `JS_DATA_DIR`:
-
-```bash
-JS_DATA_DIR=/path/to/jane-street-real-time-market-data-forecasting \
-  python run_pipeline.py --strategy cross_sectional
-```
-
-### Common commands
-
-```bash
-python run_pipeline.py                    # default strategy (cross_sectional)
-python run_pipeline.py --strategy tanh    # smooth sizing
-python run_pipeline.py --no-train         # reuse models/ensemble.joblib
-python run_pipeline.py --cost 0.0005      # heavier transaction cost
-```
+Dependencies are declared in `pyproject.toml` (managed by uv; `uv sync` creates
+`.venv` automatically). Optional extras: `--extra attn` for the attention model
+leg (torch), `--extra full` for XGBoost/CatBoost, `--extra ui` for the webapp.
 
 ## How it works
 
-**Prediction.** `responder_6` is a clipped forward return. The ensemble trains
-one set of models per fold, where fold `f` trains on dates with
-`date_index % N_FOLD != f` and validates on the rest — disjoint by `date_id`,
-so there is no intra-day leakage. Final prediction is the mean across all
-fitted models. Scored with the competition's weighted R²
-`1 - sum(w·(y-ŷ)²)/sum(w·y²)`.
+**Prediction.** `responder_6` is a clipped forward return. Models are trained on
+the named factor panel: the rolling walk-forward engine (`src/walkforward.py`,
+research/validation) and the incremental multi-model ensemble
+(`src/ensemble.py`, production daily path) share the same per-date
+cross-sectional normalization and GBM hyperparameters (single source:
+`walkforward.GBM_PARAMS`).
 
 **Strategy.** A larger predicted return should mean a larger position:
-- `threshold` — go ±1 only when the signal clears `PRED_THRESHOLD`.
+- `long_topk` — long the top-K% predicted names, equal weight (the only
+  practically tradeable strategy for A-share retail; the default).
 - `tanh` — smooth sizing `tanh(scale·pred)`, clipped to [-1, 1].
 - `cross_sectional` — demean predictions within each `(date_id, time_id)` and
   size proportional to the demeaned value, normalized to fixed gross exposure.
-  This is a market-neutral long/short book, the natural fit for a per-timestamp
-  relative-value signal.
+  This is a market-neutral long/short book (research reference only).
 
-**Backtest.** Strictly walk-forward on the last `NUM_VALID_DATES` dates, which
-the model never saw in training. A position earns `pos · responder_6`;
-transaction cost is charged on per-symbol turnover between steps. PnL is
-aggregated per timestamp into an equity curve, then summarized.
+**Backtest.** `run_backtest_periodic` adopts the strategy weights on a rebalance
+grid (every `REBALANCE_DAYS` dates), holds them in between, and earns the actual
+daily return of held names — each return counted exactly once. The daily-replay
+engine (`src/backtest_daily.py`) goes further: per-day orders via
+`trading.decide_orders`, fills simulated against the next day's OHLC with
+limit-up/down rules, T+1 and lot constraints.
 
 ## Outputs (`outputs/`)
 
-- `equity_<strategy>.png` — equity curve + drawdown
-- `predictions.csv` — per-row prediction, position, and net PnL for the best strategy
-- `report.json` — data source, parameters, and full metrics per strategy
+- `orders_*.csv` — next-day executable orders (from `predict_tomorrow.py`)
+- `walkforward_windows_*.csv` — per-window OOS metrics
+- `walkforward_oos_curve.parquet` — stitched OOS daily curve (plot data)
+
+All charts (walk-forward dashboards, multi-seed robustness, factor layers)
+have moved to the Dash frontend (`run_webapp.py`): use the 滚动Walk-Forward /
+多Seed稳健性 sessions and the backtest session's factor analysis step.
 
 ## Notes & caveats
 

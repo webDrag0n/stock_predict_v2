@@ -20,14 +20,14 @@ import pandas as pd
 
 import config as C
 from data import load_factor_panel, list_factor_columns
-from factor_eval import evaluate_panel
+from factor_eval import evaluate_panel, _layer_equity
 from backtest_daily import run_daily_replay, compute_trade_stats
 from trading import parse_initial_holdings
-from measure_alpha import _newey_west_alpha_t
+from perf_metrics import compute_performance
 
 from . import context as ctxmod
 from .context import (kpi, table, fig_line, fig_bar, fig_scatter, fig_hist,
-                      fig_area_stacked, report)
+                      fig_area_stacked, fig_heatmap, report)
 
 
 # 回测默认窗口：留空 start_date 时用今天 - 92 天 (3 个月含容差)
@@ -132,6 +132,33 @@ def factor_analysis(ctx: ctxmod.StepContext) -> dict:
                 top["factor"].tolist(), top["RankICIR"].to_numpy(),
                 yaxis="RankICIR", diverging=True),
     ]
+    # 因子分层累计净值（tbl 已按 |IC_t| 排序，取 Top6）
+    notes = []
+    n_layer_figs = 0
+    for f in tbl.head(6)["factor"]:
+        try:
+            eq = _layer_equity(panel, f, C.TARGET, 5)
+        except Exception:
+            continue
+        if eq is None or eq.empty or len(eq) < 5:
+            continue
+        lxdts = [str(pd.Timestamp(x).date()) for x in eq.index]
+        series = []
+        for i, col in enumerate(sorted(eq.columns)):
+            q = i + 1
+            s = {"name": f"Q{q}", "y": eq[col].to_numpy()}
+            if q == len(eq.columns):      # 最高层强调
+                s.update({"color": "#16a34a", "width": 2.5})
+            elif q == 1:
+                s["color"] = "#d62728"
+            else:
+                s["opacity"] = 0.7
+            series.append(s)
+        figures.append(fig_line(f"因子分层累计净值：{f}（Q1=因子最小）",
+                                lxdts, series, yaxis="净值", x_is_date=True))
+        n_layer_figs += 1
+    if n_layer_figs == 0:
+        notes.append("ℹ️ 数据不足，未生成因子分层累计净值图")
     disp = tbl.copy()
     for c in ("RankIC", "RankICIR", "RankICIR_ann", "IC", "ICIR", "IC_t",
               "IC>0占比", "多空收益", "单调性", "换手"):
@@ -144,7 +171,7 @@ def factor_analysis(ctx: ctxmod.StepContext) -> dict:
     ]
     return report("factor_analysis", "因子分析",
                   summary=f"{len(tbl)} 因子评估 · {n_pass} 个通过准入",
-                  kpis=kpis, figures=figures,
+                  kpis=kpis, figures=figures, notes=notes,
                   tables=[table("因子评估汇总（按 |IC_t| 排序）", disp, max_rows=80)])
 
 
@@ -320,42 +347,21 @@ def performance(ctx: ctxmod.StepContext) -> dict:
                       notes=["⚠️ daily_replay 未产生任何交易日"])
 
     initial_cash = res["meta"]["initial_cash"]
-    dts_raw = daily["date"].to_numpy()
-    dts = [str(pd.Timestamp(x).date()) for x in dts_raw]
-    tv = daily["total_value"].to_numpy(dtype=np.float64)
-    # 策略日收益率（基于总值）
-    strat_ret = np.zeros(len(tv))
-    strat_ret[1:] = tv[1:] / tv[:-1] - 1.0
-    strat_cum = (tv / initial_cash - 1.0) * 100.0
-
-    # 基准：全市场等权日收益，对齐到回测交易日
-    ret_col = ("return_1d" if "return_1d" in panel.columns
-               else ("pct_chg" if "pct_chg" in panel.columns else None))
-    bench_cum = None; alpha_ann = beta = t_nw = float("nan")
-    if ret_col is not None:
-        bser = panel.groupby("date")[ret_col].mean()
-        if ret_col == "pct_chg":
-            bser = bser / 100.0
-        bench = bser.reindex(pd.Index(dts_raw)).fillna(0.0).to_numpy()
-        bench_cum = (np.cumprod(1.0 + bench) - 1.0) * 100.0
-        # CAPM + Newey-West（滞后≈调仓持有期，用 FORWARD_WINDOW 兜底）
-        lags = int(ctx.params.get("rebuild_days", getattr(C, "REBALANCE_DAYS", 20)))
-        a_d, beta, t_nw, _ = _newey_west_alpha_t(
-            strat_ret[1:], bench[1:], max(1, min(lags, len(strat_ret) - 2)))
-        alpha_ann = a_d * 252
-
-    # 回撤（按总值）
-    peak = np.maximum.accumulate(tv)
-    dd = (tv - peak) / peak * 100.0
-    max_dd = float(dd.min())
-
-    # Sharpe / Sortino（日收益年化）
-    rr = strat_ret[1:]
-    sharpe = float(rr.mean() / rr.std() * np.sqrt(252)) if rr.std() > 1e-12 else 0.0
-    downside = rr[rr < 0]
-    sortino = (float(rr.mean() / downside.std() * np.sqrt(252))
-               if len(downside) > 1 and downside.std() > 1e-12 else 0.0)
-    hit = float((rr > 0).mean()) if len(rr) else float("nan")
+    # 指标计算与 model_gate 门控共用同一实现（src/perf_metrics），口径一致
+    lags = int(ctx.params.get("rebuild_days", getattr(C, "REBALANCE_DAYS", 20)))
+    perf = compute_performance(daily, panel, initial_cash, lags=lags)
+    dts = perf["dts"]
+    strat_ret = perf["strat_ret"]
+    strat_cum = perf["strat_cum"]
+    bench_cum = perf["bench_cum"]
+    dd = perf["dd"]
+    max_dd = perf["max_drawdown"]
+    sharpe = perf["sharpe"]
+    sortino = perf["sortino"]
+    hit = perf["hit_rate"]
+    alpha_ann = perf["alpha_ann"]
+    beta = perf["beta"]
+    t_nw = perf["t_nw"]
 
     figures = []
     notes = []
@@ -386,6 +392,41 @@ def performance(ctx: ctxmod.StepContext) -> dict:
                                 [{"name": "换手额", "y": daily["turnover"].to_numpy(),
                                   "color": "#0891b2"}],
                                 yaxis="成交额 (元)", x_is_date=True))
+    # 滚动 63 日年化 Sharpe
+    if len(dts) >= 63:
+        sr = pd.Series(strat_ret, index=pd.to_datetime(dts))
+        roll = sr.rolling(63)
+        roll_sharpe = (roll.mean() / roll.std().replace(0.0, np.nan)
+                       * np.sqrt(252.0)).dropna()
+        if len(roll_sharpe):
+            figures.append(fig_line(
+                "滚动 63 日年化 Sharpe",
+                roll_sharpe.index.strftime("%Y-%m-%d").tolist(),
+                [{"name": "Sharpe(63d)", "y": roll_sharpe.to_numpy(),
+                  "color": "#0e7490"}],
+                yaxis="年化 Sharpe", x_is_date=True))
+    else:
+        notes.append(f"ℹ️ 回测仅 {len(dts)} 个交易日（<63），跳过滚动 Sharpe 图")
+    # 月收益热力图（自然月聚合，年 × 月）
+    sr_m = pd.Series(strat_ret, index=pd.to_datetime(dts))
+    monthly = (1.0 + sr_m).resample("ME").prod() - 1.0
+    if len(monthly) >= 2:
+        years = sorted(monthly.index.year.unique())
+        z = []
+        for y_ in years:
+            row = []
+            for m in range(1, 13):
+                sel = monthly[(monthly.index.year == y_)
+                              & (monthly.index.month == m)]
+                row.append(float(sel.iloc[0] * 100.0) if len(sel) else np.nan)
+            z.append(row)
+        figures.append(fig_heatmap(
+            "月度收益热力图（%）", z,
+            x=[f"{m}月" for m in range(1, 13)],
+            y=[str(y_) for y_ in years],
+            xaxis="月份", yaxis="年份"))
+    else:
+        notes.append("ℹ️ 回测跨越不足 2 个自然月，跳过月度收益热力图")
     # 模型权重随时间
     if len(weights):
         wdts = [str(pd.Timestamp(x).date()) for x in weights["date"]]

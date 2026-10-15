@@ -102,6 +102,10 @@ def register(app):
         if not pathname or not pathname.startswith("/session/"):
             return html.Div(), html.Div(), True
         sid = pathname.split("/session/", 1)[1].strip("/")
+        if not sessions.valid_sid(sid):
+            return dbc.Alert("非法会话 ID。", color="danger"), html.Div(), True
+        # 详情页轮询同样推进调度：只停留在详情页时队列也不能停摆
+        sessions.tick()
         meta = sessions.get(sid)
         if meta is None:
             return dbc.Alert("会话不存在或已删除。", color="warning"), html.Div(), True

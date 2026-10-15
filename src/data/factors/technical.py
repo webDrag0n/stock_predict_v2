@@ -6,14 +6,14 @@ DataConnector may provide (turnover_rate, volume_ratio, pct_chg).
 """
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 import pandas as pd
 
 import config as C
 
-warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
+# 注：不在 import 期全局屏蔽 PerformanceWarning——库模块不该动全局 warnings
+# 状态，由入口脚本（run_session.py / predict_tomorrow.py / run_walkforward.py）
+# 显式设置。
 
 
 def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -81,7 +81,8 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     df["hl_ma_5"] = df.groupby("symbol", group_keys=False)["hl_pct"].transform(
         lambda x: x.rolling(5).mean())
 
-    # RSI (Relative Strength Index)
+    # RSI (Relative Strength Index) — 在 adj_close 上计算：
+    # 除权日原始 close 的假跳变会污染 RSI 的涨跌计数；复权序列才是真实涨跌。
     def compute_rsi(series, period=14):
         delta = series.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -89,17 +90,20 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
         rs = gain / loss
         return 100 - (100 / (1 + rs))
 
-    df["rsi_14"] = g["close"].transform(compute_rsi)
+    df["rsi_14"] = ga.transform(compute_rsi)
 
-    # MACD
-    exp1 = g["close"].transform(lambda x: x.ewm(span=12, adjust=False).mean())
-    exp2 = g["close"].transform(lambda x: x.ewm(span=26, adjust=False).mean())
+    # MACD — 同样在 adj_close 上计算（跨日差分，除权假跳变会产生伪信号）
+    exp1 = ga.transform(lambda x: x.ewm(span=12, adjust=False).mean())
+    exp2 = ga.transform(lambda x: x.ewm(span=26, adjust=False).mean())
     df["macd"] = exp1 - exp2
     df["macd_signal"] = df.groupby("symbol", group_keys=False)["macd"].transform(
         lambda x: x.ewm(span=9, adjust=False).mean())
     df["macd_diff"] = df["macd"] - df["macd_signal"]
 
-    # Bollinger Bands (20-day)
+    # Bollinger Bands (20-day) — 有意保持原始 close（不复权）：
+    # 交易层的挂单价位要与真实市价可比，布林带若用复权价会与盘口价格脱节。
+    # 这是与 RSI/MACD/Stochastic 的有意分叉：震荡类指标看“真实涨跌”用复权，
+    # 通道/价位类指标要与市价对齐用原始价。
     ma20 = g["close"].transform(lambda x: x.rolling(20).mean())
     std20 = g["close"].transform(lambda x: x.rolling(20).std())
     df["bb_upper_20"] = ma20 + 2 * std20
@@ -107,10 +111,16 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     df["bb_position_20"] = (df["close"] - df["bb_lower_20"]) / (
         df["bb_upper_20"] - df["bb_lower_20"])
 
-    # Stochastic oscillator
-    low_14 = g["low"].transform(lambda x: x.rolling(14).min())
-    high_14 = g["high"].transform(lambda x: x.rolling(14).max())
-    df["stoch_k"] = 100 * (df["close"] - low_14) / (high_14 - low_14)
+    # Stochastic oscillator — 用复权后的 high/low/close（按当日复权因子等比
+    # 缩放 high/low），避免除权日假跳变污染 %K 的位置度量
+    adj_ratio = df["adj_close"] / df["close"].replace(0, np.nan)
+    adj_high = df["high"] * adj_ratio
+    adj_low = df["low"] * adj_ratio
+    low_14 = adj_low.groupby(df["symbol"], group_keys=False).transform(
+        lambda x: x.rolling(14).min())
+    high_14 = adj_high.groupby(df["symbol"], group_keys=False).transform(
+        lambda x: x.rolling(14).max())
+    df["stoch_k"] = 100 * (df["adj_close"] - low_14) / (high_14 - low_14)
     df["stoch_d"] = df.groupby("symbol", group_keys=False)["stoch_k"].transform(
         lambda x: x.rolling(3).mean())
 

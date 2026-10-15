@@ -2,20 +2,23 @@
 
 Verifies that IncrementalEnsemble can include 'attn' as one of its model legs
 and run through update/predict/combine without error on a small panel.
+torch 是可选依赖（uv sync --extra attn），缺失时整个模块 skip。
+
+路径由 tests/conftest.py 统一处理；standalone 运行：
+PYTHONPATH=src:. uv run python tests/test_ensemble_attn.py
 """
 from __future__ import annotations
 
 import os
-import sys
 
 import numpy as np
 import pandas as pd
+import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+torch = pytest.importorskip("torch", reason="torch 未安装（可选依赖 attn extra）")
 
-import config as C
-from ensemble import IncrementalEnsemble
+import config as C  # noqa: E402
+from ensemble import IncrementalEnsemble  # noqa: E402
 
 
 def _make_panel(n_dates: int = 40):

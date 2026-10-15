@@ -34,24 +34,82 @@ LOT = 100   # A股最小交易单位：1 手 = 100 股
 
 
 # ---------------------------------------------------------------------------
+def trade_costs(notional, side: str, adv=np.inf, params: dict | None = None):
+    """单笔订单的 A股交易成本（唯一实现，回测两个引擎与实盘估算共用）。
+
+    佣金 = max(notional × COMMISSION_RATE, MIN_COMMISSION)   —— 买卖双边
+    印花税 = notional × STAMP_DUTY_RATE                       —— 仅卖出
+    冲击 = notional × IMPACT_K × sqrt(notional / ADV)         —— 可选
+
+    Args:
+        notional : 成交额（元），标量或 numpy 数组（向量化时逐元素计算）。
+        side     : "buy" | "sell"。
+        adv      : 该股次日成交额（元），标量或与 notional 同形数组；
+                   inf / NaN / <=0 → 冲击为 0。
+        params   : 覆盖 config（commission/min_commission/stamp_duty/use_impact/impact_k）。
+
+    Returns:
+        (commission, stamp, impact)，与 notional 同形。
+    """
+    p = params or {}
+    rate = float(p.get("commission", C.COMMISSION_RATE))
+    min_comm = float(p.get("min_commission", getattr(C, "MIN_COMMISSION", 0.0)))
+    stamp_rate = float(p.get("stamp_duty", C.STAMP_DUTY_RATE))
+    use_impact = bool(p.get("use_impact", C.USE_IMPACT_COST))
+    impact_k = float(p.get("impact_k", C.IMPACT_K))
+
+    notional = np.asarray(notional, dtype=np.float64)
+    adv = np.asarray(adv, dtype=np.float64)
+    comm = notional * rate
+    if min_comm > 0:
+        comm = np.where(notional > 0, np.maximum(comm, min_comm), 0.0)
+    stamp = notional * stamp_rate if side == "sell" else np.zeros_like(notional)
+    ok_adv = np.isfinite(adv) & (adv > 0)
+    ratio = np.divide(notional, adv, out=np.zeros_like(notional), where=ok_adv)
+    impact = np.where(ok_adv & (notional > 0) & use_impact,
+                      impact_k * np.sqrt(ratio) * notional, 0.0)
+    return comm, stamp, impact
+
+
+# ---------------------------------------------------------------------------
 @dataclass
 class PortfolioState:
     """组合状态：现金 + 持仓(代码→股数) + 建仓信息(用于持有天数/止损)。
 
     market_value / total_value 需要传入"当日各股价格"才能估值（持仓本身只记股数）。
+    last_price 记录每股最近一次可得的原始价：当日缺价（停牌/跌出横截面）时用它
+    兜底估值，不再按 0 计（消除停牌日净值假跌与风控刹车误触）。
+    val_factor 是每股累计除权估值因子（由回测侧按 pre_close 链条维护，见
+    backtest_daily._price_map），估值价 = 原始价 × val_factor，消除除权日假性盈亏。
+    注意：last_price 假定原始价口径（price_col="close"），不要喂 adj_close。
+    t1_locked 记录 T+1 锁定明细：代码 -> (锁定决策日, 当日买入的股数)。锁仓按
+    【当日新增股数】粒度——老仓位不受新买入影响（真实 T+1 只锁当日买入部分）。
     """
     cash: float
     holdings: dict[str, int] = field(default_factory=dict)        # 代码 -> 股数
     cost_basis: dict[str, float] = field(default_factory=dict)    # 代码 -> 建仓均价
     entry_date: dict[str, object] = field(default_factory=dict)   # 代码 -> 建仓日
+    last_price: dict[str, float] = field(default_factory=dict)    # 代码 -> 最近可得原始价
+    val_factor: dict[str, float] = field(default_factory=dict)    # 代码 -> 累计除权估值因子
+    t1_locked: dict[str, tuple] = field(default_factory=dict)     # 代码 -> (锁定决策日, 锁定股数)
 
     def market_value(self, prices: dict[str, float]) -> float:
-        """持仓市值 = Σ 股数 × 当日价（缺价的股按 0 计，调用方应保证覆盖）。"""
+        """持仓市值 = Σ 股数 × 估值价（原始价 × val_factor）。
+
+        当日有价的股顺手刷新 last_price；缺价的股（停牌等）用 last_price 兜底，
+        不再按 0 计。完全无历史价的持仓才按 0 计（刚建仓尚未估值的边缘情形）。
+        """
         mv = 0.0
         for sym, sh in self.holdings.items():
+            f = self.val_factor.get(sym, 1.0)
             px = prices.get(sym)
             if px is not None and px == px and px > 0:
-                mv += sh * px
+                self.last_price[sym] = float(px)
+                mv += sh * px * f
+                continue
+            lp = self.last_price.get(sym)
+            if lp is not None and lp > 0:
+                mv += sh * lp * f
         return float(mv)
 
     def total_value(self, prices: dict[str, float]) -> float:
@@ -62,7 +120,9 @@ class PortfolioState:
 
     def copy(self) -> "PortfolioState":
         return PortfolioState(self.cash, dict(self.holdings),
-                              dict(self.cost_basis), dict(self.entry_date))
+                              dict(self.cost_basis), dict(self.entry_date),
+                              dict(self.last_price), dict(self.val_factor),
+                              dict(self.t1_locked))
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +131,9 @@ def _board_limit_pct(symbol: str, is_st: bool | None = None) -> float:
     if is_st:
         return 0.05
     s = str(symbol).split(".")[0] if "." in str(symbol) else str(symbol)
-    # 北交所：8/4/9 开头（新三板精选层/北交所）
+    # 北交所：4/8 开头及 920 新号段（这里保留 "9" 前缀即按北交所 30% 处理）。
+    # 注意沪市 B 股 900xxx / 深市 B 股 200xxx 是 10% 主板幅度，会被 "9" 误伤——
+    # 因此 B 股已在 tushare.py 的 universe 构建处整体剔除，正常不会走到这里。
     if s.startswith(("8", "4", "9")):
         return 0.30
     # 创业板 30 开头 / 科创板 68 开头
@@ -102,8 +164,12 @@ def detect_board_limit(symbol: str, pct_chg: float | None,
         down = low <= pre_close * (1.0 - limit_pct) * 1.001
     else:
         up = down = False
-    one_word = (high is not None and low is not None
-                and high == low and high > 0)
+    # 一字板：high≈low。精确浮点相等会被分笔噪声/舍入漏判，改用
+    # 容差 abs(h-l) <= 0.1% × pre_close（pre_close 缺失时退化为以 high 为尺度）。
+    one_word = False
+    if high is not None and low is not None and high > 0:
+        scale = pre_close if (pre_close is not None and pre_close > 0) else high
+        one_word = abs(high - low) <= 0.001 * scale
     return up, down, one_word
 
 
@@ -341,7 +407,17 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
             if cur <= tgt:
                 continue
             delta = cur - tgt
-            if i is None:                       # 该名今日无行情 → 无法定价，跳过
+            if i is None:
+                # 跌出当日决策横截面（停牌/被剔出样本）→ 不再卡死持有。
+                # 有历史价则按 last_price 发市价清退单：next_open 模式下挂单价
+                # 只是占位，成交与否/成交价由 simulate_fills 用次日行情决定
+                # （次日仍停牌则自然不成交，下一天再发）；完全无历史价才继续持有。
+                lp = state.last_price.get(s_held)
+                if lp is None or lp <= 0:
+                    continue
+                rows.append(_row(s_held, None, None, "sell", delta, lp, lp,
+                                 "跌出横截面:清退", np.nan, np.nan, np.nan,
+                                 blocked=False, asof_date=asof_date))
                 continue
             px = close[i]
             # 碎单过滤只作用于"减仓微调"（tgt>0 的小幅超配）；清仓(tgt==0)永远执行。
@@ -442,6 +518,20 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
                              px, reason, rank_pct[i], bbp, r,
                              blocked=False, asof_date=asof_date))
 
+    # 跌出当日横截面的持仓：上面的循环只遍历今日面板里的票，查不到持仓股——
+    # 与满仓再平衡分支同样处理：有历史价则按 last_price 发市价清退单，
+    # 由 simulate_fills 用次日行情决定成交；无历史价则继续持有等待。
+    sym_set = set(sym.tolist())
+    for s_held in held:
+        if s_held in sym_set:
+            continue
+        lp = state.last_price.get(s_held)
+        if lp is None or lp <= 0:
+            continue
+        rows.append(_row(s_held, None, None, "sell", state.holdings[s_held], lp, lp,
+                         "跌出横截面:清退", np.nan, np.nan, np.nan,
+                         blocked=False, asof_date=asof_date))
+
     cols = ["symbol", "name", "side", "shares", "limit_price", "ref_close",
             "reason", "rank_pct", "bb_pos", "rsi", "blocked", "asof_date"]
     orders = pd.DataFrame(rows, columns=cols)
@@ -482,11 +572,13 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
       · next_open 模式：以次日 OPEN 成交（市价单），必成交（除非停牌/一字板反向/T+1锁）。
       · limit_bb 模式：买单需次日 low ≤ 买入挂单价（价区触及），成交价=min(挂单价, open)；
         卖单需次日 high ≥ 卖出挂单价，成交价=max(挂单价, open)。未触及→不成交。
-      · T+1 锁：当日买入/加仓的票，次日决策日不能卖出（实盘 T+1 交割）。
+      · T+1 锁：当日决策买入的【股数】不能在同决策日的卖出单中卖出（老仓可卖）。
       · 买入还需现金充足（含成本），否则按可用现金缩减到整手；不足 1 手则放弃。
 
-    成本：佣金双边 COMMISSION_RATE；印花税卖出单边 STAMP_DUTY_RATE；
-    可选平方根冲击成本（按成交额/ADV）。
+    成本：佣金双边 COMMISSION_RATE（每笔最低 MIN_COMMISSION）；印花税卖出单边
+    STAMP_DUTY_RATE；可选平方根冲击成本（按成交额/ADV）。三者由 trade_costs
+    统一计算。可选参与率上限：单笔成交 ≤ MAX_PARTICIPATION × 次日成交额
+    （冲击模型只计价不限量，没有上限时大单会不切实际地全额成交）。
 
     Returns:
         {"fills": DataFrame(逐笔成交), "n_fill", "n_reject", "buy_notional",
@@ -494,10 +586,8 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
     """
     p = params or {}
     price_mode = str(p.get("order_price_mode", C.ORDER_PRICE_MODE))
-    commission = float(p.get("commission", C.COMMISSION_RATE))
-    stamp = float(p.get("stamp_duty", C.STAMP_DUTY_RATE))
-    use_impact = bool(p.get("use_impact", C.USE_IMPACT_COST))
-    impact_k = float(p.get("impact_k", C.IMPACT_K))
+    max_participation = float(p.get("max_participation",
+                                    getattr(C, "MAX_PARTICIPATION", 0.0)))
 
     nb = next_bars.set_index("symbol") if "symbol" in next_bars.columns else next_bars
     has_open = "open" in nb.columns
@@ -508,17 +598,19 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
     tot_comm = tot_stamp = tot_impact = 0.0
     buy_notional = sell_notional = 0.0
 
-    # 交易日序列：用于 T+1 锁仓的"至少隔 1 个交易日"判断
-    trade_dates = None
-    if t1_lock:
-        # 从订单 asof_date 和面板推断；若无法推断，退化为同自然日锁
-        pass
+    # T+1 锁仓的实际判定在下方卖出分支：t1_locked 里锁定日 == 订单 asof_date 的
+    # 股数不能卖（每日决策节奏下同一决策日买入的部分次日才能卖，无需额外交易日序列）。
 
     for o in orders.itertuples(index=False):
         s = o.symbol
         side = o.side
         want = int(o.shares)
         asof = getattr(o, "asof_date", None)
+        # 决策层拦截（涨跌停 blocked=True）的订单记 0 成交直接跳过——与实盘
+        # --commit 跳过 blocked 单的语义一致（此前回测会照常撮合，回测≠实盘）。
+        if bool(getattr(o, "blocked", False)):
+            fills.append(_fill(o, 0, np.nan, "决策层拦截", filled=False))
+            continue
         if want <= 0 or s not in nb.index:
             fills.append(_fill(o, 0, np.nan, "停牌/无次日行情" if s not in nb.index else "零股数",
                                filled=False))
@@ -541,15 +633,15 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
         up_board, down_board, one_word = detect_board_limit(
             s, npct, nhigh, nlow, pre_close, is_st=is_st)
 
-        # T+1 锁仓检查：卖出时若建仓日就是 asof_date（同一决策日买入），实盘不能卖
+        # T+1 锁仓（按当日新增股数粒度）：当日决策买入的部分，同决策日的卖出单
+        # 不能动；早于当日买入的老仓位可正常卖。真实 T+1 只锁当日买入的股数。
+        t1_sellable_cap: int | None = None
         if t1_lock and side == "sell" and asof is not None:
-            entry = state.entry_date.get(s)
-            if entry is not None:
-                entry_str = str(pd.Timestamp(entry).date())
-                asof_str = str(pd.Timestamp(asof).date())
-                if entry_str == asof_str:
-                    fills.append(_fill(o, 0, np.nan, "T+1锁仓", filled=False))
-                    continue
+            lock = state.t1_locked.get(s)
+            if lock is not None:
+                lock_date, lock_shares = lock
+                if str(pd.Timestamp(lock_date).date()) == str(pd.Timestamp(asof).date()):
+                    t1_sellable_cap = max(state.holdings.get(s, 0) - int(lock_shares), 0)
 
         # 成交价确定
         fill_px = np.nan
@@ -581,32 +673,40 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
             fills.append(_fill(o, 0, np.nan, reject or "无效成交价", filled=False))
             continue
 
-        # ---- 买入：现金约束（含成本），不足则缩到可买整手 ----
+        # ---- 买入：参与率上限 → 现金约束（含成本），不足则缩到可买整手 ----
         if side == "buy":
             adv = float(bar["amount"]) * 1000.0 if has_amt and bar["amount"] == bar["amount"] else np.inf
             shares = want
-            # 估算单位股的总成本率（佣金 + 冲击），迭代一次确定可买量
-            per_share_cost = fill_px * (1.0 + commission)
+            capped = False
+            # 参与率上限：单笔不超过次日成交额的一定比例（冲击模型只计价不限量）
+            if max_participation > 0 and np.isfinite(adv) and adv > 0:
+                cap_shares = int(np.floor(max_participation * adv / fill_px / LOT) * LOT)
+                if cap_shares < shares:
+                    shares = max(cap_shares, 0)
+                    capped = True
+            # 估算单位股的总成本率（佣金），迭代确定可买量
+            comm_rate = float(p.get("commission", C.COMMISSION_RATE))
+            per_share_cost = fill_px * (1.0 + comm_rate)
             affordable = int(np.floor(state.cash / per_share_cost / LOT) * LOT)
             shares = min(shares, max(affordable, 0))
             if shares <= 0:
-                fills.append(_fill(o, 0, fill_px, "现金不足", filled=False))
+                fills.append(_fill(o, 0, fill_px,
+                                   "流动性不足(参与率上限)" if capped else "现金不足",
+                                   filled=False))
                 continue
             notional = shares * fill_px
-            comm = notional * commission
-            impact = (impact_k * np.sqrt(notional / adv) * notional
-                      if use_impact and np.isfinite(adv) and adv > 0 else 0.0)
+            comm, _, impact = trade_costs(notional, "buy", adv, p)
             total = notional + comm + impact
-            if total > state.cash + 1e-6:           # 缩一手再试（冲击使其略超）
+            # 最低佣金/冲击成本可能使总价略超现金：循环缩手直到买得起或股数归零
+            # （修复前只缩一手，冲击大时仍会扣出负现金）。
+            while shares > 0 and total > state.cash + 1e-6:
                 shares -= LOT
-                if shares <= 0:
-                    fills.append(_fill(o, 0, fill_px, "现金不足", filled=False))
-                    continue
                 notional = shares * fill_px
-                comm = notional * commission
-                impact = (impact_k * np.sqrt(notional / adv) * notional
-                          if use_impact and np.isfinite(adv) and adv > 0 else 0.0)
+                comm, _, impact = trade_costs(notional, "buy", adv, p)
                 total = notional + comm + impact
+            if shares <= 0:
+                fills.append(_fill(o, 0, fill_px, "现金不足", filled=False))
+                continue
             state.cash -= total
             prev = state.holdings.get(s, 0)
             new_sh = prev + shares
@@ -614,36 +714,61 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
             prev_cost = state.cost_basis.get(s, 0.0) * prev
             state.cost_basis[s] = (prev_cost + notional) / new_sh if new_sh else fill_px
             state.holdings[s] = new_sh
-            # T+1：记录本次决策日为建仓日（加仓也更新为最新决策日）
+            # T+1：记录本次决策日为建仓日；锁定明细按当日新增股数累计（加仓不锁老仓）
             state.entry_date[s] = asof
+            asof_str = str(pd.Timestamp(asof).date()) if asof is not None else None
+            if asof_str is not None:
+                lock = state.t1_locked.get(s)
+                if lock is not None and str(pd.Timestamp(lock[0]).date()) == asof_str:
+                    state.t1_locked[s] = (asof_str, int(lock[1]) + shares)
+                else:
+                    state.t1_locked[s] = (asof_str, shares)
             tot_comm += comm; tot_impact += impact; buy_notional += notional
-            fills.append(_fill(o, shares, fill_px, "成交", filled=True,
-                               cost=comm + impact))
+            fills.append(_fill(o, shares, fill_px,
+                               "成交(参与率限量)" if capped else "成交",
+                               filled=True, cost=comm + impact))
         # ---- 卖出 ----
         else:
             prev = state.holdings.get(s, 0)
             shares = min(want, prev)
+            # T+1 粒度锁：只能卖"非当日买入"的部分
+            if t1_sellable_cap is not None:
+                shares = min(shares, t1_sellable_cap)
             if shares <= 0:
-                fills.append(_fill(o, 0, fill_px, "无持仓可卖", filled=False))
+                status = ("T+1锁仓" if (t1_sellable_cap is not None and prev > 0)
+                          else "无持仓可卖")
+                fills.append(_fill(o, 0, fill_px, status, filled=False))
                 continue
             adv = float(bar["amount"]) * 1000.0 if has_amt and bar["amount"] == bar["amount"] else np.inf
+            capped = False
+            if max_participation > 0 and np.isfinite(adv) and adv > 0:
+                cap_shares = int(np.floor(max_participation * adv / fill_px / LOT) * LOT)
+                if cap_shares < shares:
+                    shares = max(cap_shares, 0)
+                    capped = True
+            if shares <= 0:
+                fills.append(_fill(o, 0, fill_px, "流动性不足(参与率上限)", filled=False))
+                continue
             notional = shares * fill_px
-            comm = notional * commission
-            st = notional * stamp
-            impact = (impact_k * np.sqrt(notional / adv) * notional
-                      if use_impact and np.isfinite(adv) and adv > 0 else 0.0)
+            comm, st, impact = trade_costs(notional, "sell", adv, p)
             state.cash += notional - comm - st - impact
             new_sh = prev - shares
             if new_sh <= 0:
                 state.holdings.pop(s, None)
                 state.cost_basis.pop(s, None)
                 state.entry_date.pop(s, None)
+                # 清仓后估值缓存一并清掉，防止日后再次建仓时沿用陈旧的
+                # last_price / 除权因子造成估值口径漂移
+                state.last_price.pop(s, None)
+                state.val_factor.pop(s, None)
+                state.t1_locked.pop(s, None)
             else:
                 state.holdings[s] = new_sh
             tot_comm += comm; tot_stamp += st; tot_impact += impact
             sell_notional += notional
-            fills.append(_fill(o, shares, fill_px, "成交", filled=True,
-                               cost=comm + st + impact))
+            fills.append(_fill(o, shares, fill_px,
+                               "成交(参与率限量)" if capped else "成交",
+                               filled=True, cost=comm + st + impact))
 
     fdf = pd.DataFrame(fills)
     n_fill = int(fdf["filled"].sum()) if len(fdf) else 0
@@ -663,12 +788,10 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
 def estimate_order_cost(orders: pd.DataFrame, params: dict | None = None) -> dict:
     """估算一批订单（decide_orders 产出）的交易成本（佣金双边 + 印花税卖出单边）。
 
-    仅用于实盘订单展示的事前估算（按挂单价 × 股数 算名义额）。真实成交成本由
-    simulate_fills 用次日价计；这里给用户一个下单前的成本预估。被拦截(blocked)
-    的订单不计入。"""
-    p = params or {}
-    commission = float(p.get("commission", C.COMMISSION_RATE))
-    stamp = float(p.get("stamp_duty", C.STAMP_DUTY_RATE))
+    仅用于实盘订单展示的事前估算（按挂单价 × 股数 算名义额），成本公式与
+    撮合侧完全一致（trade_costs，含每笔最低佣金；不含冲击——事前无法知道
+    次日 ADV 口径的成交价）。真实成交成本由 simulate_fills 用次日价计。
+    被拦截(blocked)的订单不计入。"""
     if orders is None or len(orders) == 0:
         return {"buy_notional": 0.0, "sell_notional": 0.0, "commission": 0.0,
                 "stamp_duty": 0.0, "total": 0.0}
@@ -677,10 +800,12 @@ def estimate_order_cost(orders: pd.DataFrame, params: dict | None = None) -> dic
     is_buy = (o["side"] == "buy").to_numpy()
     buy = float(notion[is_buy].sum())
     sell = float(notion[~is_buy].sum())
-    comm = (buy + sell) * commission
-    st = sell * stamp
-    return {"buy_notional": buy, "sell_notional": sell, "commission": float(comm),
-            "stamp_duty": float(st), "total": float(comm + st)}
+    comm_buy, _, _ = trade_costs(notion[is_buy], "buy", params=params)
+    comm_sell, st_sell, _ = trade_costs(notion[~is_buy], "sell", params=params)
+    comm = float(comm_buy.sum() + comm_sell.sum())
+    st = float(st_sell.sum())
+    return {"buy_notional": buy, "sell_notional": sell, "commission": comm,
+            "stamp_duty": st, "total": comm + st}
 
 
 def _fill(o, shares, price, status, filled, cost=0.0):
