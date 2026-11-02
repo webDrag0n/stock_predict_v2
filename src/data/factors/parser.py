@@ -18,20 +18,45 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # From src/data/factors/_base.py
-DSL_PRIMITIVES = frozenset({
-    "ts_delay", "ts_delta", "ts_sum", "ts_mean", "ts_std",
-    "ts_max", "ts_min", "ts_skew", "ts_argmax", "ts_argmin",
-    "ts_corr", "ts_rank", "cs_rank", "cs_zscore",
-    "signed_power", "safe_div", "ts_quantile",
-    "ts_reg_resid", "ts_reg_r2",
-})
+DSL_PRIMITIVES = frozenset(
+    {
+        "ts_delay",
+        "ts_delta",
+        "ts_sum",
+        "ts_mean",
+        "ts_std",
+        "ts_max",
+        "ts_min",
+        "ts_skew",
+        "ts_argmax",
+        "ts_argmin",
+        "ts_corr",
+        "ts_rank",
+        "cs_rank",
+        "cs_zscore",
+        "signed_power",
+        "safe_div",
+        "ts_quantile",
+        "ts_reg_resid",
+        "ts_reg_r2",
+    }
+)
 
 # Safe math builtins (mapped to numpy equivalents at runtime)
-SAFE_BUILTINS = frozenset({
-    "log", "abs", "sqrt", "sign",
-    "exp", "log2", "log10", "round",
-    "min", "max",
-})
+SAFE_BUILTINS = frozenset(
+    {
+        "log",
+        "abs",
+        "sqrt",
+        "sign",
+        "exp",
+        "log2",
+        "log10",
+        "round",
+        "min",
+        "max",
+    }
+)
 
 # All names that are functions, NOT column references
 _FUNCTION_NAMES = DSL_PRIMITIVES | SAFE_BUILTINS
@@ -44,88 +69,99 @@ _FUNCTION_NAMES = DSL_PRIMITIVES | SAFE_BUILTINS
 _SAFE_NODES: set[type] = {
     # Module / Expression wrapper
     ast.Module,
-
     # Expression statement (wraps a bare expression in a Module body)
     ast.Expr,
-
     # Literals
     ast.Constant,
-
     # Variable reference (Name(id=..., ctx=Load))
     ast.Name,
     ast.Load,
-
     # Binary operators
     ast.BinOp,
-    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
-    ast.LShift, ast.RShift, ast.BitOr, ast.BitXor, ast.BitAnd,
-
+    ast.Add,
+    ast.Sub,
+    ast.Mult,
+    ast.Div,
+    ast.FloorDiv,
+    ast.Mod,
+    ast.Pow,
+    ast.LShift,
+    ast.RShift,
+    ast.BitOr,
+    ast.BitXor,
+    ast.BitAnd,
     # Unary operators
     ast.UnaryOp,
-    ast.UAdd, ast.USub, ast.Not, ast.Invert,
-
+    ast.UAdd,
+    ast.USub,
+    ast.Not,
+    ast.Invert,
     # Boolean operators
     ast.BoolOp,
-    ast.And, ast.Or,
-
+    ast.And,
+    ast.Or,
     # Comparison
     ast.Compare,
-    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
-    ast.Is, ast.IsNot, ast.In, ast.NotIn,
-
+    ast.Eq,
+    ast.NotEq,
+    ast.Lt,
+    ast.LtE,
+    ast.Gt,
+    ast.GtE,
+    ast.Is,
+    ast.IsNot,
+    ast.In,
+    ast.NotIn,
     # Ternary
     ast.IfExp,
-
     # Function call (only to registered names)
     ast.Call,
-
     # Parenthesised / tuple
     ast.Tuple,
     ast.List,
-
     # Slicing (for literal numbers in expressions, not for subscript)
     ast.Slice,
 }
 
 # Node types that are EXPLICITLY FORBIDDEN (security-relevant)
 _FORBIDDEN_NODES = {
-    ast.Attribute,       # obj.method() / obj.attr — could access os.system etc.
-    ast.Subscript,       # x[0] / d["key"] — could access globals
-    ast.Lambda,          # lambda x: ...
-    ast.DictComp,        # {k:v for ...}
-    ast.SetComp,         # {x for ...}
-    ast.ListComp,        # [x for ...]
-    ast.GeneratorExp,    # (x for ...)
-    ast.Import,           # import ...
-    ast.ImportFrom,       # from ... import ...
-    ast.Assign,           # x = ...
-    ast.AugAssign,        # x += ...
-    ast.AnnAssign,        # x: int = ...
-    ast.NamedExpr,        # x := ... (walrus)
-    ast.Starred,          # *args
-    ast.Await,            # await ...
-    ast.Yield,            # yield ...
-    ast.YieldFrom,        # yield from ...
-    ast.Global,           # global x
-    ast.Nonlocal,         # nonlocal x
-    ast.Delete,           # del x
-    ast.Raise,            # raise ...
-    ast.Assert,           # assert ...
-    ast.Pass,             # pass
-    ast.Break,            # break
-    ast.Continue,         # continue
-    ast.Return,           # return ...
-    ast.ClassDef,         # class ...
-    ast.FunctionDef,      # def ...
-    ast.AsyncFunctionDef, # async def ...
-    ast.For,              # for ...
-    ast.AsyncFor,         # async for ...
-    ast.While,            # while ...
-    ast.If,               # if stmt (IfExp is the ternary, which IS safe)
-    ast.Try,              # try ...
-    ast.With,             # with ...
-    ast.AsyncWith,        # async with ...
-    ast.Match,            # match ... (Python 3.10+)
+    ast.Attribute,  # obj.method() / obj.attr — could access os.system etc.
+    ast.Subscript,  # x[0] / d["key"] — could access globals
+    ast.Lambda,  # lambda x: ...
+    ast.DictComp,  # {k:v for ...}
+    ast.SetComp,  # {x for ...}
+    ast.ListComp,  # [x for ...]
+    ast.GeneratorExp,  # (x for ...)
+    ast.Import,  # import ...
+    ast.ImportFrom,  # from ... import ...
+    ast.Assign,  # x = ...
+    ast.AugAssign,  # x += ...
+    ast.AnnAssign,  # x: int = ...
+    ast.NamedExpr,  # x := ... (walrus)
+    ast.Starred,  # *args
+    ast.Await,  # await ...
+    ast.Yield,  # yield ...
+    ast.YieldFrom,  # yield from ...
+    ast.Global,  # global x
+    ast.Nonlocal,  # nonlocal x
+    ast.Delete,  # del x
+    ast.Raise,  # raise ...
+    ast.Assert,  # assert ...
+    ast.Pass,  # pass
+    ast.Break,  # break
+    ast.Continue,  # continue
+    ast.Return,  # return ...
+    ast.ClassDef,  # class ...
+    ast.FunctionDef,  # def ...
+    ast.AsyncFunctionDef,  # async def ...
+    ast.For,  # for ...
+    ast.AsyncFor,  # async for ...
+    ast.While,  # while ...
+    ast.If,  # if stmt (IfExp is the ternary, which IS safe)
+    ast.Try,  # try ...
+    ast.With,  # with ...
+    ast.AsyncWith,  # async with ...
+    ast.Match,  # match ... (Python 3.10+)
 }
 
 

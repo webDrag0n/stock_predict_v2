@@ -24,7 +24,10 @@ which returns a daily DataFrame with columns like:
 
 from __future__ import annotations
 
+import glob
+import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -33,6 +36,8 @@ import numpy as np
 import pandas as pd
 
 import config as C
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +50,7 @@ def _get_a_share_trade_dates(start_date: str, end_date: str) -> list[str]:
     calendar (same as Shenzhen for our purposes).
     """
     import akshare as ak
+
     cal = ak.tool_trade_date_hist_sina()
     cal["trade_date"] = pd.to_datetime(cal["trade_date"])
     start = pd.to_datetime(_fmt8(start_date), format="%Y%m%d")
@@ -86,6 +92,7 @@ def _yf_download(ticker: str, start: str, end: str, column: str = "Close") -> pd
     versions by always pulling the first (and only) ticker's column.
     """
     import yfinance as yf
+
     df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
     if df.empty:
         return pd.Series(dtype=np.float64)
@@ -104,13 +111,15 @@ def _yf_download(ticker: str, start: str, end: str, column: str = "Close") -> pd
     return s.dropna()
 
 
-def _yf_download_multi(tickers: list[str], start: str, end: str,
-                       column: str = "Close") -> pd.DataFrame:
+def _yf_download_multi(
+    tickers: list[str], start: str, end: str, column: str = "Close"
+) -> pd.DataFrame:
     """Download multiple yfinance tickers at once; return date-indexed DataFrame.
 
     Extracts only the requested ``column`` (default 'Close') for each ticker.
     """
     import yfinance as yf
+
     df = yf.download(tickers, start=start, end=end, progress=False, auto_adjust=True)
     if df.empty:
         return pd.DataFrame()
@@ -193,28 +202,50 @@ def _fetch_us_dollar_index(start: str, end: str) -> pd.Series:
     return _yf_download("DX-Y.NYB", s, e, "Close")
 
 
-def _fetch_cn_10y_yield(start: str, end: str) -> pd.Series:
-    """Fetch China 10Y government bond yield from akshare.
+def _read_cn_10y_cache(path: str) -> pd.Series:
+    """Read a cn_10y parquet cache back into a Series (empty if unreadable shape)."""
+    cached = pd.read_parquet(path)
+    if isinstance(cached, pd.DataFrame) and cached.shape[1] > 0:
+        s = cached.iloc[:, 0]
+        s.index = pd.to_datetime(s.index)
+        return s
+    return pd.Series(dtype=np.float64)
 
-    Uses ``bond_china_yield`` which returns the full yield curve (multiple bond
-    types) for up to 1 year per call. We filter for the 国债 (government bond)
-    curve and extract the "10年" (10-year) maturity column.
+
+def _find_cn_10y_cache(
+    cache_dir: str, start_dt: pd.Timestamp, end_dt: pd.Timestamp, exclude: str
+) -> Optional[str]:
+    """Pick the cached cn_10y file overlapping the request with the best coverage.
+
+    The cache key contains the (start, end) range; daily runs advance ``end`` by
+    one trading day, so the exact key never hits. Reusing the best overlapping
+    file lets the caller fetch only the missing head/tail instead of the full
+    history every night.
     """
+    best_path, best_key = None, None
+    for path in glob.glob(os.path.join(cache_dir, "cn_10y_*.parquet")):
+        if os.path.abspath(path) == os.path.abspath(exclude):
+            continue
+        m = re.fullmatch(r"cn_10y_(\d{8})_(\d{8})\.parquet", os.path.basename(path))
+        if not m:
+            continue
+        cs = pd.to_datetime(m.group(1), format="%Y%m%d")
+        ce = pd.to_datetime(m.group(2), format="%Y%m%d")
+        overlap = (min(ce, end_dt) - max(cs, start_dt)).days
+        if overlap < 0:
+            continue
+        key = (overlap, ce)  # widest coverage first, then freshest tail
+        if best_key is None or key > best_key:
+            best_path, best_key = path, key
+    return best_path
+
+
+def _fetch_cn_10y_records(start_dt: pd.Timestamp, end_dt: pd.Timestamp) -> tuple[list[dict], bool]:
+    """Fetch 中债国债 10Y yield records chunk-wise; returns (records, any_failed)."""
     import akshare as ak
 
-    cache_dir = os.path.join(C.CACHE_DIR, "macro")
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_file = os.path.join(cache_dir, f"cn_10y_{_fmt8(start)}_{_fmt8(end)}.parquet")
-    if os.path.exists(cache_file):
-        cached = pd.read_parquet(cache_file)
-        if isinstance(cached, pd.DataFrame) and cached.shape[1] > 0:
-            return cached.iloc[:, 0]
-        return pd.Series(dtype=np.float64)
-
-    start_dt = pd.to_datetime(start, format="%Y%m%d")
-    end_dt = pd.to_datetime(end, format="%Y%m%d")
-
     records: list[dict] = []
+    failed = False
     cursor = start_dt
     while cursor <= end_dt:
         chunk_end = min(cursor + timedelta(days=340), end_dt)
@@ -223,7 +254,8 @@ def _fetch_cn_10y_yield(start: str, end: str) -> pd.Series:
         try:
             df = ak.bond_china_yield(start_date=cs, end_date=ce)
         except Exception as e:
-            print(f"  ⚠️ 国债收益率获取失败 {cs}-{ce}: {e}")
+            logger.warning(f"  ⚠️ 国债收益率获取失败 {cs}-{ce}: {e}")
+            failed = True
             cursor = chunk_end + timedelta(days=1)
             continue
 
@@ -258,18 +290,80 @@ def _fetch_cn_10y_yield(start: str, end: str) -> pd.Series:
             for _, row in govt.iterrows():
                 val = row.get(ten_col)
                 if pd.notna(val):
-                    records.append({
-                        "date": row[date_col],
-                        "cn_10y": float(val),
-                    })
+                    records.append(
+                        {
+                            "date": row[date_col],
+                            "cn_10y": float(val),
+                        }
+                    )
 
         cursor = chunk_end + timedelta(days=1)
         time.sleep(0.3)
 
-    if not records:
+    return records, failed
+
+
+def _fetch_cn_10y_yield(start: str, end: str) -> pd.Series:
+    """Fetch China 10Y government bond yield from akshare.
+
+    Uses ``bond_china_yield`` which returns the full yield curve (multiple bond
+    types) for up to 1 year per call. We filter for the 国债 (government bond)
+    curve and extract the "10年" (10-year) maturity column.
+
+    Cached by (start, end) range under data_cache/macro/. On a range-key miss
+    the best overlapping cache is reused and only the missing head/tail spans
+    are fetched; if that incremental fetch fails we fall back to the stale
+    cache with a warning instead of re-pulling the full history.
+    """
+    cache_dir = os.path.join(C.CACHE_DIR, "macro")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = os.path.join(cache_dir, f"cn_10y_{_fmt8(start)}_{_fmt8(end)}.parquet")
+    if os.path.exists(cache_file):
+        return _read_cn_10y_cache(cache_file)
+
+    start_dt = pd.to_datetime(start, format="%Y%m%d")
+    end_dt = pd.to_datetime(end, format="%Y%m%d")
+
+    base = pd.Series(dtype=np.float64)
+    prev = _find_cn_10y_cache(cache_dir, start_dt, end_dt, exclude=cache_file)
+    if prev is not None:
+        try:
+            base = _read_cn_10y_cache(prev)
+        except Exception as e:
+            logger.warning(f"  ⚠️ 国债收益率旧缓存读取失败 {prev}: {e}")
+
+    spans: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    if base.empty:
+        spans.append((start_dt, end_dt))
+    else:
+        if start_dt < base.index.min():
+            spans.append((start_dt, base.index.min() - timedelta(days=1)))
+        if end_dt > base.index.max():
+            spans.append((base.index.max() + timedelta(days=1), end_dt))
+
+    frames: list[pd.DataFrame] = []
+    if not base.empty:
+        frames.append(pd.DataFrame({"date": base.index, "cn_10y": base.to_numpy()}))
+    failed = False
+    for lo, hi in spans:
+        try:
+            records, span_failed = _fetch_cn_10y_records(lo, hi)
+        except Exception as e:
+            logger.warning(f"  ⚠️ 国债收益率获取异常: {e}")
+            records, span_failed = [], True
+        failed |= span_failed
+        if records:
+            frames.append(pd.DataFrame(records))
+
+    if failed and not base.empty:
+        logger.warning(
+            f"  ⚠️ 国债收益率增量获取失败，回退旧缓存 (截至 {base.index.max():%Y-%m-%d})"
+        )
+
+    if not frames:
         return pd.Series(dtype=np.float64)
 
-    out = pd.DataFrame(records).drop_duplicates(subset=["date"]).set_index("date")
+    out = pd.concat(frames).drop_duplicates(subset=["date"]).set_index("date")
     out = out.sort_index()
 
     # Bond yields are slow-moving (1-3bp daily changes). Reindex to all
@@ -278,6 +372,7 @@ def _fetch_cn_10y_yield(start: str, end: str) -> pd.Series:
     out = out.reindex(full_idx).ffill()
 
     s = out["cn_10y"]
+    s = s[s.index >= start_dt]  # recycled cache may reach back before `start`
     pd.DataFrame(s).to_parquet(cache_file)
     return s
 
@@ -300,7 +395,7 @@ def _fetch_cn_usd_cny(start: str, end: str) -> pd.Series:
     try:
         df = ak.currency_boc_sina(symbol="美元", start_date=s_date, end_date=e_date)
     except Exception as e:
-        print(f"  ⚠️ USD/CNY 获取失败: {e}")
+        logger.warning(f"  ⚠️ USD/CNY 获取失败: {e}")
         return pd.Series(dtype=np.float64)
 
     if df is None or df.empty:
@@ -341,7 +436,7 @@ def _fetch_north_flow(start: str, end: str) -> pd.Series:
     try:
         df = ak.stock_hsgt_hist_em(symbol="北向资金")
     except Exception as e:
-        print(f"  ⚠️ 沪深港通资金流获取失败: {e}")
+        logger.warning(f"  ⚠️ 沪深港通资金流获取失败: {e}")
         return pd.Series(dtype=np.float64)
 
     if df is None or df.empty:
@@ -451,8 +546,11 @@ def _add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
         df["us_vix_level"] = df["vix"]
         df["us_vix_chg_5d"] = df["vix"].pct_change(5)
         df["us_vix_chg_20d"] = df["vix"].pct_change(20)
-        df["us_vix_rank_60d"] = df["vix"].rolling(60, min_periods=20).apply(
-            lambda x: x.rank(pct=True).iloc[-1], raw=False)
+        df["us_vix_rank_60d"] = (
+            df["vix"]
+            .rolling(60, min_periods=20)
+            .apply(lambda x: x.rank(pct=True).iloc[-1], raw=False)
+        )
 
     # US Treasury
     if "us_10y" in df.columns:
@@ -489,23 +587,37 @@ def _select_output_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Keep only the final named feature columns for the panel merge."""
     wanted = [
         # US equity returns
-        "spx_ret", "ndx_ret", "dji_ret",
+        "spx_ret",
+        "ndx_ret",
+        "dji_ret",
         # VIX
-        "us_vix_level", "us_vix_chg_5d", "us_vix_chg_20d", "us_vix_rank_60d",
+        "us_vix_level",
+        "us_vix_chg_5d",
+        "us_vix_chg_20d",
+        "us_vix_rank_60d",
         # US yields
-        "us_10y", "us_10y_chg_20d",
+        "us_10y",
+        "us_10y_chg_20d",
         "us_5y",
-        "us_yield_spread_10y2y", "us_spread_chg_20d",
+        "us_yield_spread_10y2y",
+        "us_spread_chg_20d",
         # DXY
-        "us_dxy_level", "us_dxy_ret_1d", "us_dxy_chg_20d",
+        "us_dxy_level",
+        "us_dxy_ret_1d",
+        "us_dxy_chg_20d",
         # China bonds
         "cn_10y",
         # China-US spread
-        "cn_us_spread_10y", "cn_us_spread_10y_chg_20d",
+        "cn_us_spread_10y",
+        "cn_us_spread_10y_chg_20d",
         # FX
-        "cn_usd_cny", "cn_usd_cny_chg_5d", "cn_usd_cny_chg_20d",
+        "cn_usd_cny",
+        "cn_usd_cny_chg_5d",
+        "cn_usd_cny_chg_20d",
         # Capital flow
-        "north_flow_net", "north_flow_5d", "north_flow_20d",
+        "north_flow_net",
+        "north_flow_5d",
+        "north_flow_20d",
     ]
     keep = [c for c in wanted if c in df.columns]
     return df[keep]
@@ -549,18 +661,18 @@ def get_global_macro_features(
         df["date"] = pd.to_datetime(df["date"])
         return df
 
-    print("拉取全球宏观特征 (yfinance + akshare)...")
+    logger.info("拉取全球宏观特征 (yfinance + akshare)...")
 
     # 1. A-share trading calendar
     try:
         trade_dates = _get_a_share_trade_dates(start8, end8)
     except Exception as e:
-        print(f"  ⚠️ 获取交易日历失败: {e}")
+        logger.warning(f"  ⚠️ 获取交易日历失败: {e}")
         return pd.DataFrame()
     if not trade_dates:
-        print("  ⚠️ 无交易日数据")
+        logger.warning("  ⚠️ 无交易日数据")
         return pd.DataFrame()
-    print(f"  A股交易日: {len(trade_dates)} 天 ({trade_dates[0]} ~ {trade_dates[-1]})")
+    logger.info(f"  A股交易日: {len(trade_dates)} 天 ({trade_dates[0]} ~ {trade_dates[-1]})")
 
     # 2. Fetch each source
     all_dfs: list[pd.DataFrame] = []
@@ -571,9 +683,9 @@ def get_global_macro_features(
         us_idx_aligned = _align_to_a_share_calendar(us_idx, trade_dates, lag=1)
         if not us_idx_aligned.empty:
             all_dfs.append(us_idx_aligned)
-            print(f"  美股指数: {len(us_idx_aligned)} 天")
+            logger.info(f"  美股指数: {len(us_idx_aligned)} 天")
     except Exception as e:
-        print(f"  ⚠️ 美股指数获取失败: {e}")
+        logger.warning(f"  ⚠️ 美股指数获取失败: {e}")
 
     # --- VIX (yfinance) ---
     try:
@@ -581,9 +693,9 @@ def get_global_macro_features(
         vix_aligned = _align_series_to_a_share_calendar(vix, trade_dates, lag=1, col_name="vix")
         if not vix_aligned.empty:
             all_dfs.append(vix_aligned)
-            print(f"  VIX: {len(vix_aligned)} 天")
+            logger.info(f"  VIX: {len(vix_aligned)} 天")
     except Exception as e:
-        print(f"  ⚠️ VIX获取失败: {e}")
+        logger.warning(f"  ⚠️ VIX获取失败: {e}")
 
     # --- US Treasury (yfinance) ---
     try:
@@ -591,9 +703,9 @@ def get_global_macro_features(
         ust_aligned = _align_to_a_share_calendar(ust, trade_dates, lag=1)
         if not ust_aligned.empty:
             all_dfs.append(ust_aligned)
-            print(f"  美债收益率: {len(ust_aligned)} 天")
+            logger.info(f"  美债收益率: {len(ust_aligned)} 天")
     except Exception as e:
-        print(f"  ⚠️ 美债收益率获取失败: {e}")
+        logger.warning(f"  ⚠️ 美债收益率获取失败: {e}")
 
     # --- DXY (yfinance) ---
     try:
@@ -601,46 +713,49 @@ def get_global_macro_features(
         dxy_aligned = _align_series_to_a_share_calendar(dxy, trade_dates, lag=1, col_name="dxy")
         if not dxy_aligned.empty:
             all_dfs.append(dxy_aligned)
-            print(f"  DXY: {len(dxy_aligned)} 天")
+            logger.info(f"  DXY: {len(dxy_aligned)} 天")
     except Exception as e:
-        print(f"  ⚠️ DXY获取失败: {e}")
+        logger.warning(f"  ⚠️ DXY获取失败: {e}")
 
     # --- China 10Y yield (akshare) ---
     try:
         cn10y = _fetch_cn_10y_yield(start8, end8)
         cn10y_aligned = _align_series_to_a_share_calendar(
-            cn10y, trade_dates, lag=1, col_name="cn_10y")
+            cn10y, trade_dates, lag=1, col_name="cn_10y"
+        )
         if not cn10y_aligned.empty:
             all_dfs.append(cn10y_aligned)
-            print(f"  中国10年国债: {len(cn10y_aligned)} 天")
+            logger.info(f"  中国10年国债: {len(cn10y_aligned)} 天")
     except Exception as e:
-        print(f"  ⚠️ 中国国债收益率获取失败: {e}")
+        logger.warning(f"  ⚠️ 中国国债收益率获取失败: {e}")
 
     # --- USD/CNY (akshare) ---
     try:
         usdcny = _fetch_cn_usd_cny(start8, end8)
         usdcny_aligned = _align_series_to_a_share_calendar(
-            usdcny, trade_dates, lag=1, col_name="cn_usd_cny")
+            usdcny, trade_dates, lag=1, col_name="cn_usd_cny"
+        )
         if not usdcny_aligned.empty:
             all_dfs.append(usdcny_aligned)
-            print(f"  USD/CNY: {len(usdcny_aligned)} 天")
+            logger.info(f"  USD/CNY: {len(usdcny_aligned)} 天")
     except Exception as e:
-        print(f"  ⚠️ USD/CNY获取失败: {e}")
+        logger.warning(f"  ⚠️ USD/CNY获取失败: {e}")
 
     # --- North-bound flow (akshare) ---
     try:
         north = _fetch_north_flow(start8, end8)
         north_aligned = _align_series_to_a_share_calendar(
-            north, trade_dates, lag=1, col_name="north_flow_net")
+            north, trade_dates, lag=1, col_name="north_flow_net"
+        )
         if not north_aligned.empty:
             all_dfs.append(north_aligned)
-            print(f"  北向资金: {len(north_aligned)} 天")
+            logger.info(f"  北向资金: {len(north_aligned)} 天")
     except Exception as e:
-        print(f"  ⚠️ 北向资金获取失败: {e}")
+        logger.warning(f"  ⚠️ 北向资金获取失败: {e}")
 
     # 3. Merge all sources on date
     if not all_dfs:
-        print("  ⚠️ 所有宏观数据源均获取失败")
+        logger.warning("  ⚠️ 所有宏观数据源均获取失败")
         return pd.DataFrame()
 
     merged = all_dfs[0]
@@ -669,7 +784,7 @@ def get_global_macro_features(
     merged.to_parquet(cache_file, index=False)
 
     n_cols = len([c for c in merged.columns if c != "date"])
-    print(f"  全球宏观特征: {len(merged)} 天, {n_cols} 个特征")
+    logger.info(f"  全球宏观特征: {len(merged)} 天, {n_cols} 个特征")
     return merged
 
 
@@ -694,7 +809,7 @@ def merge_global_macro_features(df: pd.DataFrame) -> pd.DataFrame:
     try:
         macro = get_global_macro_features(start_date=start, end_date=end)
     except Exception as e:
-        print(f"  ⚠️ 全球宏观特征合并失败: {e}")
+        logger.warning(f"  ⚠️ 全球宏观特征合并失败: {e}")
         return df
 
     if macro is None or macro.empty:
@@ -778,7 +893,9 @@ def _compute_macro_interactions(df: pd.DataFrame, macro_cols: list[str]) -> pd.D
     if df.empty:
         return df
 
-    df = df.copy()
+    # 注意：不要 df.copy()——全市场面板 ~8GB，复制会把构建峰值推高近一倍
+    # （曾在 32GB 机器上直接 OOM）。调用方均以后续赋值接管返回值，原地插入
+    # 新列是安全的（每列只是一次 block 追加，无全帧拷贝）。
     available_macro = {c for c in macro_cols if c in df.columns}
 
     for macro, stock_fac in _MACRO_INTERACTION_PAIRS:

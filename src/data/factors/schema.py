@@ -127,8 +127,9 @@ def load_factor_definitions(
         try:
             import config as C
 
-            library_dir = getattr(C, "FACTOR_LIBRARY_DIR",
-                                  os.path.join(os.path.expanduser("~"), "factor_library"))
+            library_dir = getattr(
+                C, "FACTOR_LIBRARY_DIR", os.path.join(os.path.expanduser("~"), "factor_library")
+            )
         except Exception:
             library_dir = os.path.join(os.path.expanduser("~"), "factor_library")
 
@@ -158,8 +159,7 @@ def load_factor_definitions(
             try:
                 fd = FactorDefinition(**raw)
             except Exception:
-                logger.warning("因子定义格式错误, 跳过: %s", raw.get("id", "?"),
-                               exc_info=True)
+                logger.warning("因子定义格式错误, 跳过: %s", raw.get("id", "?"), exc_info=True)
                 continue
 
             if fd.id in exclude:

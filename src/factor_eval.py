@@ -13,6 +13,7 @@
 设计为零外部依赖（只用 pandas/numpy/scipy），纯本地计算，不消耗任何 API。
 配合 src/data.load_factor_panel() 使用——后者保留因子原名。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -25,38 +26,39 @@ from scipy import stats
 import config as C
 
 # 准入门槛（业界A股日频经验值，可按需调整）
-GATE_RANKIC = 0.03      # |mean RankIC| 下限
-GATE_ICIR = 0.30        # |ICIR| 下限
+GATE_RANKIC = 0.03  # |mean RankIC| 下限
+GATE_ICIR = 0.30  # |ICIR| 下限
 # 准入门槛。小横截面（如本项目仅 ~49 只股票）下 IC 噪声大，单纯卡 IC 绝对
 # 值会过严，因此主门槛用 IC 序列的 t 统计量（衡量显著性，天然随样本量调整），
 # 辅以放宽后的 RankICIR 与单调性。三者皆可按需调整。
-GATE_IC_T = 2.0         # |IC t统计量| 下限——主门槛，统计显著性
-GATE_RANKICIR = 0.15    # |RankICIR| 下限（小横截面49只，放宽至0.15；全市场常用0.3）
-GATE_RANKIC = 0.02      # |mean RankIC| 下限
-GATE_MONOTONIC = 0.5    # 分层单调性下限
+GATE_IC_T = 2.0  # |IC t统计量| 下限——主门槛，统计显著性
+GATE_RANKICIR = 0.15  # |RankICIR| 下限（小横截面49只，放宽至0.15；全市场常用0.3）
+GATE_RANKIC = 0.02  # |mean RankIC| 下限
+GATE_MONOTONIC = 0.5  # 分层单调性下限
 
 
 @dataclass
 class FactorReport:
     """单个因子的评估结果。"""
+
     name: str
     n_obs: int
     n_dates: int
     ic_mean: float
     ic_std: float
     icir: float
-    icir_annual: float          # 年化 ICIR = ICIR * sqrt(252/period)
+    icir_annual: float  # 年化 ICIR = ICIR * sqrt(252/period)
     rank_ic_mean: float
     rank_ic_std: float
     rank_icir: float
     rank_icir_annual: float
-    ic_t_stat: float            # IC 序列的 t 统计量（是否显著不为0）
-    ic_positive_ratio: float    # IC > 0 的日子占比
-    long_short_return: float    # 分层 Top-Bottom 多空累计收益
-    monotonicity: float         # 分层收益单调性（层序与层收益的秩相关）
-    turnover: float             # 因子排序的平均换手
+    ic_t_stat: float  # IC 序列的 t 统计量（是否显著不为0）
+    ic_positive_ratio: float  # IC > 0 的日子占比
+    long_short_return: float  # 分层 Top-Bottom 多空累计收益
+    monotonicity: float  # 分层收益单调性（层序与层收益的秩相关）
+    turnover: float  # 因子排序的平均换手
     layer_returns: list = field(default_factory=list)  # 各层平均下期收益
-    passed: bool = False        # 是否通过准入门槛
+    passed: bool = False  # 是否通过准入门槛
 
     def gate(self) -> "FactorReport":
         # 主门槛：IC 显著（t 检验）；辅以稳定性（RankICIR）与单调性。
@@ -69,7 +71,7 @@ class FactorReport:
         return self
 
 
-def _windows(dates: np.ndarray):
+def windows(dates: np.ndarray):
     """复刻 walkforward.run_walkforward 的窗口切分,逐个 yield (tr_dates, te_dates)。
 
     供诊断/优化脚本复用，保证所有脚本的窗口切分与主回测完全一致。
@@ -80,21 +82,23 @@ def _windows(dates: np.ndarray):
     start = train_w + embargo
     win_id = 0
     while start + test_w <= n:
-        tr = dates[start - embargo - train_w: start - embargo]
-        te = dates[start: start + test_w]
+        tr = dates[start - embargo - train_w : start - embargo]
+        te = dates[start : start + test_w]
         yield win_id, tr, te
         start += step
         win_id += 1
 
 
-def _daily_rank_ic(sub: pd.DataFrame, factor: str, target: str) -> pd.Series:
+def daily_rank_ic(sub: pd.DataFrame, factor: str, target: str) -> pd.Series:
     """sub 内每个截面日的 Spearman RankIC 序列(防泄露由调用方保证:sub=OOS段)。"""
+
     def _one(g):
         x, y = g[factor], g[target]
         m = x.notna() & y.notna()
         if m.sum() < 5 or x[m].nunique() < 2 or y[m].nunique() < 2:
             return np.nan
         return stats.spearmanr(x[m], y[m]).correlation
+
     return sub.groupby("date", group_keys=False).apply(_one, include_groups=False)
 
 
@@ -103,9 +107,9 @@ def _winsorize(s: pd.Series, lower: float = 0.01, upper: float = 0.99) -> pd.Ser
     return s.clip(lo, hi)
 
 
-def _daily_ic(panel: pd.DataFrame, factor: str, target: str,
-              method: str) -> pd.Series:
+def _daily_ic(panel: pd.DataFrame, factor: str, target: str, method: str) -> pd.Series:
     """每个截面日的 (Rank)IC 序列。method: 'pearson' | 'spearman'。"""
+
     def _one(g):
         x, y = g[factor], g[target]
         m = x.notna() & y.notna()
@@ -117,28 +121,29 @@ def _daily_ic(panel: pd.DataFrame, factor: str, target: str,
         if method == "spearman":
             return stats.spearmanr(x, y).correlation
         return stats.pearsonr(x, y)[0]
+
     return panel.groupby("date", group_keys=False).apply(_one, include_groups=False)
 
 
-def _layered_returns(panel: pd.DataFrame, factor: str, target: str,
-                     n_layers: int = 5) -> tuple[list[float], float, float]:
+def _layered_returns(
+    panel: pd.DataFrame, factor: str, target: str, n_layers: int = 5
+) -> tuple[list[float], float, float]:
     """按因子值分 N 层，返回 (各层平均下期收益, Top-Bottom多空收益, 单调性)。
 
     每个截面日内把股票按因子值分 n_layers 组，组1=因子最小，组N=因子最大。
     返回各层在全样本上的平均下期收益、最高层减最低层、以及层序与层收益的秩相关。
     """
+
     def _assign(g):
         x = g[factor]
         if x.notna().sum() < n_layers:
             return pd.Series(np.nan, index=g.index)
         try:
-            return pd.qcut(x.rank(method="first"), n_layers,
-                           labels=False, duplicates="drop")
+            return pd.qcut(x.rank(method="first"), n_layers, labels=False, duplicates="drop")
         except ValueError:
             return pd.Series(np.nan, index=g.index)
 
-    layer = panel.groupby("date", group_keys=False).apply(
-        _assign, include_groups=False)
+    layer = panel.groupby("date", group_keys=False).apply(_assign, include_groups=False)
     tmp = pd.DataFrame({"layer": layer.values, target: panel[target].values})
     tmp = tmp.dropna()
     if tmp.empty:
@@ -181,17 +186,21 @@ def _turnover(panel: pd.DataFrame, factor: str, top_frac: float = 0.2) -> float:
     return float(np.mean(turns)) if turns else np.nan
 
 
-def evaluate_factor(panel: pd.DataFrame, factor: str, target: str = None,
-                    n_layers: int = 5, winsorize: bool = True,
-                    period: int = None) -> FactorReport:
+def evaluate_factor(
+    panel: pd.DataFrame,
+    factor: str,
+    target: str = None,
+    n_layers: int = 5,
+    winsorize: bool = True,
+    period: int = None,
+) -> FactorReport:
     """对单个因子做完整评估，返回 FactorReport（已判定准入）。"""
     target = target or C.TARGET
     period = period or C.FORWARD_WINDOW
     df = panel[["date", "symbol", factor, target]].copy()
     df = df.dropna(subset=[factor, target])
     if winsorize:
-        df[factor] = df.groupby("date", group_keys=False)[factor].apply(
-            lambda s: _winsorize(s))
+        df[factor] = df.groupby("date", group_keys=False)[factor].apply(lambda s: _winsorize(s))
 
     ic = _daily_ic(df, factor, target, "pearson").dropna()
     ric = _daily_ic(df, factor, target, "spearman").dropna()
@@ -214,10 +223,14 @@ def evaluate_factor(panel: pd.DataFrame, factor: str, target: str = None,
         name=factor,
         n_obs=len(df),
         n_dates=int(df["date"].nunique()),
-        ic_mean=float(ic_mean), ic_std=float(ic_std), icir=float(icir),
+        ic_mean=float(ic_mean),
+        ic_std=float(ic_std),
+        icir=float(icir),
         icir_annual=float(icir_ann),
-        rank_ic_mean=float(ric_mean), rank_ic_std=float(ric_std),
-        rank_icir=float(ricir), rank_icir_annual=float(ricir_ann),
+        rank_ic_mean=float(ric_mean),
+        rank_ic_std=float(ric_std),
+        rank_icir=float(ricir),
+        rank_icir_annual=float(ricir_ann),
         ic_t_stat=float(t_stat),
         ic_positive_ratio=float((ic > 0).mean()) if len(ic) else 0.0,
         long_short_return=ls_ret,
@@ -228,10 +241,48 @@ def evaluate_factor(panel: pd.DataFrame, factor: str, target: str = None,
     return rep.gate()
 
 
-def evaluate_panel(panel: pd.DataFrame, factors: list[str] = None,
-                   target: str = None, n_layers: int = 5,
-                   n_jobs: int = -1, verbose: bool = True,
-                   chunk_size: int = 16) -> pd.DataFrame:
+def reports_to_table(reports: list) -> pd.DataFrame:
+    """把 FactorReport 列表组装成评估汇总表（按 |IC_t| 降序）。
+
+    从 evaluate_panel 拆出的汇总函数：pipeline/steps_factoreval 逐因子评估
+    （需逐因子上报进度，无法用 evaluate_panel 的整包并行）后复用同一套
+    列结构组装，保证 outputs/factor_eval.csv 契约与 CLI 完全一致。
+    """
+    if not reports:
+        return pd.DataFrame()
+    table = pd.DataFrame(
+        [
+            {
+                "factor": r.name,
+                "RankIC": r.rank_ic_mean,
+                "RankICIR": r.rank_icir,
+                "RankICIR_ann": r.rank_icir_annual,
+                "IC": r.ic_mean,
+                "ICIR": r.icir,
+                "IC_t": r.ic_t_stat,
+                "IC>0占比": r.ic_positive_ratio,
+                "多空收益": r.long_short_return,
+                "单调性": r.monotonicity,
+                "换手": r.turnover,
+                "准入": "✓" if r.passed else "",
+            }
+            for r in reports
+        ]
+    )
+    table["_abs"] = table["IC_t"].abs()
+    table = table.sort_values("_abs", ascending=False).drop(columns="_abs")
+    return table.reset_index(drop=True)
+
+
+def evaluate_panel(
+    panel: pd.DataFrame,
+    factors: list[str] = None,
+    target: str = None,
+    n_layers: int = 5,
+    n_jobs: int = -1,
+    verbose: bool = True,
+    chunk_size: int = 16,
+) -> pd.DataFrame:
     """评估面板中所有因子，返回按 |RankICIR| 排序的汇总表。
 
     全市场面板的因子评估是 CPU 密集且可并行的：每个因子独立计算，因此对
@@ -247,8 +298,9 @@ def evaluate_panel(panel: pd.DataFrame, factors: list[str] = None,
     needed = ["date", "symbol", target]
 
     # Pre-filter and count; avoid building all subsets at once.
-    valid_factors = [f for f in factors
-                     if panel[f].notna().sum() >= 100 and panel[f].nunique() >= 5]
+    valid_factors = [
+        f for f in factors if panel[f].notna().sum() >= 100 and panel[f].nunique() >= 5
+    ]
     if not valid_factors:
         return pd.DataFrame()
 
@@ -261,8 +313,7 @@ def evaluate_panel(panel: pd.DataFrame, factors: list[str] = None,
     def _eval_one(name_sub):
         name, sub = name_sub
         try:
-            return evaluate_factor(sub, factor=name, target=target,
-                                   n_layers=n_layers)
+            return evaluate_factor(sub, factor=name, target=target, n_layers=n_layers)
         except Exception as ex:
             if verbose:
                 print(f"  因子 {name} 评估失败: {ex}")
@@ -271,7 +322,7 @@ def evaluate_panel(panel: pd.DataFrame, factors: list[str] = None,
     rows = []
     n_chunks = (len(valid_factors) + chunk_size - 1) // chunk_size
     for i in range(n_chunks):
-        chunk_factors = valid_factors[i * chunk_size:(i + 1) * chunk_size]
+        chunk_factors = valid_factors[i * chunk_size : (i + 1) * chunk_size]
         if verbose:
             print(f"  chunk {i + 1}/{n_chunks}: {len(chunk_factors)} 个因子")
         chunk = [(f, panel[needed + [f]].copy()) for f in chunk_factors]
@@ -283,27 +334,12 @@ def evaluate_panel(panel: pd.DataFrame, factors: list[str] = None,
 
     if not rows:
         return pd.DataFrame()
-    table = pd.DataFrame([{
-        "factor": r.name,
-        "RankIC": r.rank_ic_mean,
-        "RankICIR": r.rank_icir,
-        "RankICIR_ann": r.rank_icir_annual,
-        "IC": r.ic_mean,
-        "ICIR": r.icir,
-        "IC_t": r.ic_t_stat,
-        "IC>0占比": r.ic_positive_ratio,
-        "多空收益": r.long_short_return,
-        "单调性": r.monotonicity,
-        "换手": r.turnover,
-        "准入": "✓" if r.passed else "",
-    } for r in rows])
-    table["_abs"] = table["IC_t"].abs()
-    table = table.sort_values("_abs", ascending=False).drop(columns="_abs")
-    return table.reset_index(drop=True)
+    return reports_to_table(rows)
 
 
-def select_passing_factors(panel: pd.DataFrame, date_lo=None, date_hi=None,
-                           target: str = None) -> list[str]:
+def select_passing_factors(
+    panel: pd.DataFrame, date_lo=None, date_hi=None, target: str = None
+) -> list[str]:
     """在 [date_lo, date_hi] 训练区间内评估因子，返回通过准入门槛的因子名。
 
     用于滚动回测：每个窗口的因子选择只用该窗口的训练段，绝不碰测试段，
@@ -341,12 +377,12 @@ def format_panel_report(table: pd.DataFrame) -> str:
         lines.append(
             f"{r['factor']:<22}{r['RankIC']:>+9.4f}{r['RankICIR']:>+10.3f}"
             f"{r['RankICIR_ann']:>+8.2f}{r['IC_t']:>+8.2f}{r['多空收益']:>+10.4f}"
-            f"{r['单调性']:>8.2f}{r['换手']:>8.2f}{r['准入']:>6}")
+            f"{r['单调性']:>8.2f}{r['换手']:>8.2f}{r['准入']:>6}"
+        )
     return "\n".join(lines)
 
 
-def _layer_equity(panel: pd.DataFrame, factor: str, target: str,
-                  n_layers: int) -> pd.DataFrame:
+def layer_equity(panel: pd.DataFrame, factor: str, target: str, n_layers: int) -> pd.DataFrame:
     """各层逐日平均收益 -> 累计净值。返回 index=date 的净值 DataFrame（前端复用此数据自行渲染）。"""
     df = panel[["date", factor, target]].dropna(subset=[factor, target]).copy()
     df[factor] = df.groupby("date", group_keys=False)[factor].apply(_winsorize)
@@ -355,13 +391,13 @@ def _layer_equity(panel: pd.DataFrame, factor: str, target: str,
         if g[factor].notna().sum() < n_layers:
             return pd.Series(np.nan, index=g.index)
         try:
-            return pd.qcut(g[factor].rank(method="first"), n_layers,
-                           labels=False, duplicates="drop")
+            return pd.qcut(
+                g[factor].rank(method="first"), n_layers, labels=False, duplicates="drop"
+            )
         except ValueError:
             return pd.Series(np.nan, index=g.index)
 
-    df["layer"] = df.groupby("date", group_keys=False).apply(
-        _assign, include_groups=False)
+    df["layer"] = df.groupby("date", group_keys=False).apply(_assign, include_groups=False)
     df = df.dropna(subset=["layer"])
     # 每日各层平均收益
     daily = df.groupby(["date", "layer"])[target].mean().unstack("layer")
@@ -379,8 +415,10 @@ def select_features(eval_csv: str = None) -> list[str] | None:
     若 CSV 不存在或无通过的因子，返回 None（不做筛选）。
     """
     import os
+
     eval_csv = eval_csv or os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "outputs", "factor_eval.csv")
+        os.path.dirname(os.path.dirname(__file__)), "outputs", "factor_eval.csv"
+    )
     if not os.path.exists(eval_csv):
         return None
     tbl = pd.read_csv(eval_csv)
@@ -395,15 +433,13 @@ def select_features(eval_csv: str = None) -> list[str] | None:
     try:
         from data import load_factor_panel, list_factor_columns
         import config as C
-        # Read one cached parquet bar for column structure without hitting API
+
         import glob
-        cache_files = glob.glob(os.path.join(
-            C.CACHE_DIR, "tushare", "bar_*.parquet"))[:1]
+
+        cache_files = glob.glob(os.path.join(C.CACHE_DIR, "tushare", "bar_*.parquet"))[:1]
         if not cache_files:
             return None
-        sample = pd.read_parquet(cache_files[0]).head(1)
-        # Add dummy columns to mirror what compute_technical_features would produce
-        # Instead: read the factor names directly from the eval CSV ordering,
+        # Read the factor names directly from the eval CSV ordering,
         # match them to C.FEATURE_NAMES by position from the panel column order.
         # The simplest robust approach: the eval CSV lists named factors; we need
         # their position in the feature_NN ordering. Use the panel itself.
@@ -412,14 +448,20 @@ def select_features(eval_csv: str = None) -> list[str] | None:
         factor_order = list_factor_columns(panel)
         # Build name→feature_NN map (same truncation as transform_to_js_format)
         n = C.N_FEATURES
-        name_to_feat = {name: f"feature_{i:02d}"
-                        for i, name in enumerate(factor_order[:n])}
+        name_to_feat = {name: f"feature_{i:02d}" for i, name in enumerate(factor_order[:n])}
         selected = [name_to_feat[f] for f in passed if f in name_to_feat]
         if not selected:
             return None
-        print(f"特征筛选: {len(passed)} 个命名因子通过准入 → "
-              f"{len(selected)} 个 feature_NN 特征")
+        print(
+            f"特征筛选: {len(passed)} 个命名因子通过准入 → " f"{len(selected)} 个 feature_NN 特征"
+        )
         return selected
     except Exception as ex:
         print(f"特征筛选映射失败（{ex}），使用全部特征")
         return None
+
+
+# --- 向后兼容别名（scripts/archive/** 仍引用旧私有名）---
+_windows = windows  # 向后兼容别名
+_daily_rank_ic = daily_rank_ic  # 向后兼容别名
+_layer_equity = layer_equity  # 向后兼容别名

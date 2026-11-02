@@ -6,21 +6,15 @@
 
 ## 1. 环境搭建
 
-### 1.1 依赖管理：uv（推荐）
+### 1.1 依赖管理：uv
 
-项目使用 `uv` 作为 Python 包管理器。如未安装：
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-然后创建虚拟环境并安装依赖：
+项目使用 `uv` 管理 Python 环境（安装见 [README_CN.md](README_CN.md) 快速开始）。
+注意：本仓库是**框架系统而非可安装库**（`pyproject.toml` 中 `tool.uv.package = false`），
+因此安装依赖用 `uv sync`，**不要**用 `uv pip install -e .`：
 
 ```bash
-uv venv
-uv pip install -e .
-# 若需要前端 + 完整模型库
-uv pip install -e ".[full,ui,dev]"
+uv sync --extra dev              # 创建 .venv 并安装核心依赖 + pytest
+uv sync --extra full --extra ui --extra dev   # 完整模型库 + 前端
 ```
 
 所有后续命令默认在虚拟环境中执行：
@@ -34,20 +28,21 @@ python ...
 
 ### 1.2 凭据
 
-Tushare token 放在 `config_credentials.toml`：
+Tushare token 放在 `config_credentials.toml`（gitignored）：
 
 ```toml
 [tushare]
 token = "your_token_here"
 ```
 
-或用环境变量：
+或用环境变量（优先级更高）：
 
 ```bash
 export TUSHARE_TOKEN="your_token_here"
 ```
 
- free-tier token 有接口权限与限速限制，全市场模式基本可行，但基本面/财务/期权链可能受限。详见记忆 `stock-predict-v2-tushare-token-limits`。
+free-tier token 有接口权限与限速限制：全市场日线模式基本可行，但 `daily_basic`
+限速过严、基本面/财务/期权链接口可能受限。
 
 ### 1.3 验证安装
 
@@ -55,6 +50,33 @@ export TUSHARE_TOKEN="your_token_here"
 uv run python -c "import config; print(config.TUSHARE_TOKEN[:4])"
 uv run pytest tests/test_backtest_synthetic.py -v
 ```
+
+### 1.4 架构约定：config 的 env 时序契约
+
+`config.py` 在 **import 时**从环境变量读取全部配置（模块级副作用，约 120 处
+`os.environ.get`）。因此任何"用 env 覆盖配置"的代码都必须**先写 `os.environ`
+再 import 业务模块**——`run_session.py` 与 `pipeline/param_env.py` 依赖这一时序。
+新增配置项时遵循同一模式：在 `config.py` 模块级读取，不要在函数内延迟读。
+
+### 1.5 架构约定：sys.path 引导
+
+本仓库是非包结构：`src/` 下的模块以顶层模块名互相 import（如
+`from walkforward import ...`）。约定如下：
+
+- **入口脚本**（`predict_tomorrow.py`、`run_session.py`、`run_webapp.py`、
+  `scripts/` 下的活脚本）在文件顶部用统一的三行引导块把仓库根与 `src/`
+  加入 `sys.path`：
+
+  ```python
+  _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))  # scripts 子目录需相应上溯
+  sys.path.insert(0, _PROJECT_ROOT)
+  sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src"))
+  ```
+
+- **测试**：`tests/conftest.py` 是测试唯一的引导点，测试文件不得各自改
+  `sys.path`。
+- **库模块**（`src/`、`pipeline/` 内部）不得修改 `sys.path`；路径准备一律
+  由入口完成。
 
 ---
 
@@ -86,7 +108,7 @@ uv run python scripts/run_walkforward.py
 uv run python run_webapp.py
 ```
 
-默认监听 `8050`。创建 backtest/nextday 会话后，session 在独立子进程运行；完成后刷新查看步骤报告。
+默认监听 `8050`。在模型实验室（/models）「新建任务」面板创建研究类会话（walkforward / train / modeleval / factoreval），或在交易台（/）A 卡点「生成次日订单」创建 nextday 会话后，session 在独立子进程运行；运行中任务行显示进度条，完成后刷新查看步骤报告。
 
 ### 2.4 生成次日订单
 
@@ -111,7 +133,6 @@ uv run pytest tests/ -v
 | 测试 | 作用 |
 |---|---|
 | `test_backtest_synthetic.py` | 微观合成数据验证 backtest_daily 引擎正确性 |
-| `test_backtest_periodic.py` | 周期调仓引擎：成本公式与 trade_costs 一致、年化指标口径 |
 | `test_backtest_regression.py` | 真实数据冒烟+守恒断言（非数值基准比对，缓存缺失时 skip） |
 | `test_nextday_cli_consistency.py` | 次日订单路径与回测路径一致性 |
 | `test_sim2real_fixes.py` | 实盘化修正（复权、成本、T+1 等）验证 |
@@ -166,8 +187,10 @@ rm -rf data_cache/dataset_*.parquet
 
 1. 是否用了 `close` 而非 `adj_close` 算目标？
 2. 是否 `EMBARGO_DAYS < FORWARD_WINDOW`？
-3. 是否引入了"每天赚 pos×N日收益"的重叠口径？（旧的每日重叠引擎
-   `run_backtest` 与 `PERIODIC_REBALANCE` 开关已删除，周期调仓是唯一口径）
+3. 是否引入了"每天赚 pos×N日收益"的重叠口径或"向量化权重×日收益"的近似？
+   （旧的每日重叠引擎 `run_backtest`、`PERIODIC_REBALANCE` 开关与周期调仓
+   向量化引擎 `run_backtest_periodic` 均已删除，每日重放 `run_daily_replay`
+   是唯一回测口径）
 4. 是否在小股票池 (49/300) 上跑？
 5. 是否在测试集上选策略/超参？
 6. 是否把未来信息（如次日 open）泄露到特征里？
@@ -219,7 +242,7 @@ uv run ruff check src/ tests/ pipeline/ webapp/ scripts/
 
 见 CLAUDE.md §7.3。必须同时更新：
 
-- `src/walkforward.py` 的 `_train_predict`
+- `src/walkforward.py` 的 `train_predict`
 - `src/ensemble.py` 的 `predict`（如果是新 leg）
 - `config.py` 的 `MODEL_OBJECTIVE` 注释
 - 相关诊断脚本（如 `scripts/diagnostics/diag_linear_vs_gbm.py`）
@@ -232,7 +255,7 @@ uv run ruff check src/ tests/ pipeline/ webapp/ scripts/
 
 1. 在 `webapp/pages/` 创建新模块，暴露 `layout` 与可选 `register(app)`。
 2. 在 `webapp/app.py` 的 `PAGES` 和 `NAV_ITEMS` 注册。
-3. 如需新 session 模式，在 `pipeline/registry.py` 添加 `STEPS` + `PARAM_SCHEMA`。
+3. 如需新 session 模式，在 `pipeline/registry.py` 添加 `STEPS` + `MODE_CATEGORY` + `PARAM_SCHEMA`。
 
 ---
 
@@ -265,7 +288,7 @@ uv run ruff check src/ tests/ pipeline/ webapp/ scripts/
 
 ```bash
 # 安装
-uv venv && uv pip install -e ".[full,ui,dev]"
+uv sync --extra full --extra ui --extra dev
 
 # 测试
 uv run pytest tests/ -v

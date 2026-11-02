@@ -6,6 +6,7 @@ should_retrain 三条件各自触发与不触发、OR 语义、IC 样本不足�
 路径由 tests/conftest.py 统一处理；standalone 运行：
 PYTHONPATH=src:. uv run python tests/test_retrain_trigger.py
 """
+
 from __future__ import annotations
 
 import pandas as pd
@@ -56,8 +57,12 @@ def test_model_age_days():
 
 def _stats(ic_n=30, ic_mean_w=0.03, live_ret=0.04, bench_ret=0.01):
     ic = {"n_ic": ic_n, "ic_mean_w": ic_mean_w, "window": 20, "ics": {}}
-    nav = {"has_nav": live_ret is not None, "window": 20,
-           "live_ret_w": live_ret, "bench_ret_w": bench_ret}
+    nav = {
+        "has_nav": live_ret is not None,
+        "window": 20,
+        "live_ret_w": live_ret,
+        "bench_ret_w": bench_ret,
+    }
     return ic, nav
 
 
@@ -66,8 +71,7 @@ def test_should_retrain_no_champion_and_force():
     ic, nav = _stats()
     fire, reasons = should_retrain(None, ic, nav, panel)
     assert fire and "bootstrap" in reasons[0]
-    fire, reasons = should_retrain(_manifest(train_end="2026-03-30"), ic, nav,
-                                   panel, force=True)
+    fire, reasons = should_retrain(_manifest(train_end="2026-03-30"), ic, nav, panel, force=True)
     assert fire and "强制" in reasons[0]
 
 
@@ -111,7 +115,7 @@ def test_should_retrain_underperformance_and_no_nav_skip():
     fire, _ = should_retrain(m, ic, nav, panel)
     assert not fire
     # 差距在容忍内 → 不触发
-    ic, nav = _stats(live_ret=0.005, bench_ret=0.02)   # gap -1.5% > -3%
+    ic, nav = _stats(live_ret=0.005, bench_ret=0.02)  # gap -1.5% > -3%
     fire, _ = should_retrain(m, ic, nav, panel)
     assert not fire
 

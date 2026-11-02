@@ -4,10 +4,10 @@
 范围，缓存只到 2026-07-01 时静默截断了 7 周数据且 0 次新 API 调用。修复后：
 派生日历明显早于请求 end 时必须回退 trade_cal API。
 """
+
 from __future__ import annotations
 
 import pandas as pd
-import pytest
 
 from data.tushare import TushareConnector
 
@@ -36,7 +36,8 @@ class _FakePro:
 def _write_daily_cache(tmp_path, dates):
     for d in dates:
         pd.DataFrame({"date": [pd.Timestamp(d)]}).to_parquet(
-            tmp_path / f"daily_{d.replace('-', '')}.parquet")
+            tmp_path / f"daily_{d.replace('-', '')}.parquet"
+        )
 
 
 def test_stale_daily_cache_falls_back_to_api(tmp_path):
@@ -69,7 +70,8 @@ def test_poisoned_exact_cache_rebuilt_via_api(tmp_path):
     conn._pro = _FakePro()
     # 模拟污染：文件名声称覆盖到 2026-01-20，内容只到 2026-01-05
     pd.DataFrame({"cal_date": ["20260102", "20260105"]}).to_parquet(
-        tmp_path / "tradecal_20260101_20260120.parquet")
+        tmp_path / "tradecal_20260101_20260120.parquet"
+    )
 
     dates = conn._trade_dates("2026-01-01", "2026-01-20")
 
@@ -86,8 +88,7 @@ def test_tushare_rate_limit_falls_back_to_akshare(tmp_path, monkeypatch):
             raise Exception("抱歉，您访问接口(trade_cal)频率超限(1次/小时)")
 
     days = pd.date_range("2026-01-02", "2026-01-20", freq="B")  # 工作日即可
-    monkeypatch.setattr(ak, "tool_trade_date_hist_sina",
-                        lambda: pd.DataFrame({"trade_date": days}))
+    monkeypatch.setattr(ak, "tool_trade_date_hist_sina", lambda: pd.DataFrame({"trade_date": days}))
 
     conn = _bare_connector(tmp_path)
     conn._pro = _RateLimitedPro()
@@ -98,3 +99,18 @@ def test_tushare_rate_limit_falls_back_to_akshare(tmp_path, monkeypatch):
     # 兜底结果应写缓存，下次不再触发任何 API
     dates2 = conn._trade_dates("2026-01-01", "2026-01-20")
     assert dates2 == dates
+
+
+def test_is_trading_day(tmp_path):
+    """公开的实盘门控：交易日 True、非交易日 False（周日），全程不碰 API。"""
+    conn = _bare_connector(tmp_path)
+    conn._pro = _FakePro()
+    days = pd.date_range("2026-01-01", "2026-01-31", freq="B")  # 工作日即交易日
+    pd.DataFrame({"cal_date": days.strftime("%Y%m%d")}).to_parquet(
+        tmp_path / "tradecal_20260101_20260131.parquet"
+    )
+
+    assert conn.is_trading_day("2026-01-05") is True  # 周一
+    assert conn.is_trading_day("20260105") is True  # YYYYMMDD 同样接受
+    assert conn.is_trading_day("2026-01-04") is False  # 周日
+    assert not conn._pro.calls, "月历缓存覆盖时不应调 API"

@@ -17,6 +17,7 @@ of transforms give it access to non-linear patterns without GBM-level overfittin
 
 All transforms are leak-free: computed per-date from that day's cross-section only.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -141,7 +142,7 @@ def add_factor_interactions(
     if len(rankings) < 2:
         return df
 
-    selected = [f for f, _, _ in rankings[:min(top_n, len(rankings))]]
+    selected = [f for f, _, _ in rankings[: min(top_n, len(rankings))]]
 
     # Pre-compute per-date z-scores
     z_scores = {}

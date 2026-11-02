@@ -17,6 +17,7 @@ Adding a new family:
   2. Import it here and add it to ``FACTORY``.
   3. Add ``USE_<FAMILY>_FACTORS`` to config.py.
 """
+
 from __future__ import annotations
 
 import pandas as pd
@@ -29,6 +30,13 @@ from .alpha158 import compute_alpha158_factors
 from .gtja191 import compute_gtja191_factors
 from .formula_factors import compute_formula_factors, get_factor_library_hash
 
+# 所有内置因子族最长的逐股滚动窗口（交易日）：orthogonal.high_52w_prox 的
+# rolling(252)；gtja191 最深嵌套链 ts_mean(v,150)→ts_corr(...,15) ≈ 164；
+# alpha158/technical ≤ 60。MACD 的 ewm(span=26) 是无限记忆，但截断到 N 天
+# 的暖机误差按 (1-2/27)^N 衰减，N≥292 时相对误差 ~1e-9（实测见
+# tests/test_factor_panel_cache.py），远低于 float32 面板精度。
+# load_factor_panel 的尾部增量重算以此确定原始数据回看窗口。
+MAX_ROLLING_WINDOW = 252
 
 FACTORY: dict[str, tuple] = {
     "technical": (compute_technical_features, "USE_TECHNICAL_FEATURES"),
@@ -56,8 +64,9 @@ def compute_all_factors(df: pd.DataFrame) -> pd.DataFrame:
             if name == "gtja191":
                 subset = getattr(C, "GTJA191_ALPHA_SUBSET", None)
                 if subset:
-                    subset = [f"alpha{x.strip().zfill(3)}"
-                              for x in str(subset).split(",") if x.strip()]
+                    subset = [
+                        f"alpha{x.strip().zfill(3)}" for x in str(subset).split(",") if x.strip()
+                    ]
                 df = fn(df, subset=subset) if subset else fn(df)
             else:
                 df = fn(df)
@@ -72,4 +81,6 @@ __all__ = [
     "compute_alpha158_factors",
     "compute_gtja191_factors",
     "compute_formula_factors",
+    "get_factor_library_hash",
+    "MAX_ROLLING_WINDOW",
 ]

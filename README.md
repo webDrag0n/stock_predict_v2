@@ -1,89 +1,191 @@
 # Stock Prediction, Strategy & Backtest System
 
-An end-to-end system built around the Jane Street Real-Time Market Data
-Forecasting notebook (`jane-street-baseline-lgb-xgb-and-catboost.ipynb`). The
-notebook only trained a model and scored weighted R². This system adds the two
-missing pieces — a **trading strategy** and a **walk-forward backtest** — and
-ties everything into one reproducible pipeline whose objective is to **maximize
-realized return**.
+[中文文档](README_CN.md)
+
+An end-to-end A-share (China) stock prediction / strategy / backtest framework,
+built on real market data from [tushare pro](https://tushare.pro). It grew out of
+the Jane Street Real-Time Market Data Forecasting baseline notebook
+(`jane-street-baseline-lgb-xgb-and-catboost.ipynb`), which only trained a model
+and scored weighted R². This system adds the two missing pieces — a **trading
+strategy** and a **leakage-proof walk-forward backtest** — and ties everything
+into one reproducible pipeline whose objective is to **maximize realized
+return**.
 
 ```
-predict (responder_6)  ->  strategy (positions)  ->  backtest (PnL, risk)
+tushare daily bars (full market, ~5700 ex-ST)  →  technical + fundamental factors
+    →  predict (forward return)  →  strategy (positions)  →  backtest (PnL, risk)
 ```
 
-## Layout
+## Features
 
-| File | Role |
-|------|------|
-| `config.py` | All paths, schema, and tunable parameters in one place |
-| `src/data/` | Data connectors (tushare) + factor engineering + panel loaders |
-| `src/features.py` | Feature matrix extraction, NaN fill (Jane-Street row format) |
-| `src/walkforward.py` | Rolling walk-forward engine + model objective dispatch |
-| `src/ensemble.py` | `IncrementalEnsemble`: daily continued-training + rolling-IC weighting |
-| `src/strategy.py` | Maps predictions to positions: `long_topk`, `tanh`, or `cross_sectional` (dollar-neutral) |
-| `src/backtest.py` | Periodic-rebalance PnL engine + metrics (Sharpe, Sortino, Calmar, max drawdown, hit rate) |
-| `src/backtest_daily.py` | Daily-replay engine: per-day decisions + next-day fill simulation |
-| `predict_tomorrow.py` | CLI: train on data up to today, emit next-day executable orders |
-| `run_webapp.py` | Dash front-end (session-based pipelines) |
-
-> Removed in the phase-5 architecture cleanup: `src/model.py` (leaky purged-CV
-> ensemble) and its CLI `run_pipeline.py`; the one-day-lookahead event engine
-> `src/backtest_event.py`; and the inflated daily-overlap `run_backtest` in
-> `src/backtest.py` (`run_backtest_periodic` is the only backtest path).
+- **Incremental multi-model ensemble** (`src/ensemble.py`): gbm_l2 /
+  gbm_ret_weighted / ic_linear legs, daily continued training (LightGBM
+  `init_model`) with rolling OOS-IC weighting (EMA-smoothed).
+- **Rolling walk-forward engine** (`src/walkforward.py`): embargo-isolated
+  out-of-sample validation sharing the same GBM hyperparameters and
+  cross-sectional normalization as the production ensemble (single source:
+  `walkforward.GBM_PARAMS`).
+- **Strategies** (`src/strategy.py`): `long_topk` (A-share default, long-only,
+  the only practically tradeable one for retail), `tanh`, `cross_sectional`
+  (market-neutral, research reference only).
+- **Backtest engine** (single): daily replay with next-day fill simulation
+  (`src/backtest_daily.py` + `src/trading.py`) — the only backtest engine after
+  the vectorized periodic-rebalance engine was removed. A-share cost model
+  (commission + stamp duty), limit-up/down rules, T+1 and lot constraints,
+  participation cap; walk-forward OOS predictions are replayed through the same
+  engine via a fingerprinted score cache.
+- **Five-layer risk overlay** (`src/risk.py`): single implementation shared by
+  backtest and live paths.
+- **Factor evaluation gate** (`src/factor_eval.py`): IC / RankIC / ICIR / t-stats
+  / layer monotonicity before any factor enters the model; YAML formula factor
+  library in `factor_library/`.
+- **Fundamental factors** (`ep`/`bp`/`sp`/`ln_mv` from akshare, point-in-time
+  aligned via `merge_asof(backward)`).
+- **Web UI** (`run_webapp.py`, Dash): session-based pipelines with per-step
+  reports — research sessions (`walkforward` / `train` / `modeleval` /
+  `factoreval`) launched from the Model Lab "new task" panel, and the
+  production `nextday` order-generation session from the Trading Desk.
+- **Live tooling** (`predict_tomorrow.py`): next-day executable orders, model
+  gating (`models/staging/` promotion), adaptive retraining triggers,
+  backtest-vs-live drift tracking.
 
 ## Quick start
 
+Requires [uv](https://github.com/astral-sh/uv) and Python ≥ 3.10.
+
 ```bash
-uv sync --extra dev                     # 安装依赖（含 pytest；torch 见下）
-uv run python scripts/run_walkforward.py   # rolling walk-forward OOS backtest
-uv run python predict_tomorrow.py          # next-day orders from current holdings
-uv run pytest tests/ -v                    # test suite
+# 1. Install dependencies (creates .venv automatically)
+uv sync --extra dev          # core + pytest
+# optional extras: --extra attn (torch attention leg)
+#                  --extra full (XGBoost / CatBoost)
+#                  --extra ui   (Dash webapp)
+
+# 2. Configure your tushare token in config_credentials.toml (gitignored):
+#    [tushare]
+#    token = "your_token"
+#    (the TUSHARE_TOKEN environment variable takes precedence)
+
+# 3. Run
+uv run python run_webapp.py                  # web UI (recommended)
+uv run python run_webapp.py --debug          # hot reload for development
+                                             # (default mode: restart the process after code changes)
+uv run python scripts/run_walkforward.py     # rolling walk-forward OOS backtest
+uv run python predict_tomorrow.py            # next-day executable orders
+uv run pytest                                # test suite
 ```
 
-Dependencies are declared in `pyproject.toml` (managed by uv; `uv sync` creates
-`.venv` automatically). Optional extras: `--extra attn` for the attention model
-leg (torch), `--extra full` for XGBoost/CatBoost, `--extra ui` for the webapp.
+The default universe is the full market (~5700 ex-ST stocks, fetched per day).
+First run downloads and caches daily bars into `data_cache/tushare/`; later runs
+load in seconds.
 
-## How it works
+All tunables live in `config.py` and can be overridden via environment
+variables for every entry point:
 
-**Prediction.** `responder_6` is a clipped forward return. Models are trained on
-the named factor panel: the rolling walk-forward engine (`src/walkforward.py`,
-research/validation) and the incremental multi-model ensemble
-(`src/ensemble.py`, production daily path) share the same per-date
-cross-sectional normalization and GBM hyperparameters (single source:
-`walkforward.GBM_PARAMS`).
+```bash
+START_DATE=2020-01-01 END_DATE=2024-12-31 FORWARD_WINDOW=5 \
+  uv run python scripts/run_walkforward.py
+```
 
-**Strategy.** A larger predicted return should mean a larger position:
-- `long_topk` — long the top-K% predicted names, equal weight (the only
-  practically tradeable strategy for A-share retail; the default).
-- `tanh` — smooth sizing `tanh(scale·pred)`, clipped to [-1, 1].
-- `cross_sectional` — demean predictions within each `(date_id, time_id)` and
-  size proportional to the demeaned value, normalized to fixed gross exposure.
-  This is a market-neutral long/short book (research reference only).
+**Prediction target.** `responder_6` is the forward `FORWARD_WINDOW`-day return
+(clipped to ±0.5). With `MARKET_NEUTRAL_TARGET=1` (default) the same-day
+cross-sectional mean is subtracted, so the model predicts cross-sectional
+excess return — aligned with ranking strategies like `long_topk`. Turn it off
+for directional strategies like `tanh`.
 
-**Backtest.** `run_backtest_periodic` adopts the strategy weights on a rebalance
-grid (every `REBALANCE_DAYS` dates), holds them in between, and earns the actual
-daily return of held names — each return counted exactly once. The daily-replay
-engine (`src/backtest_daily.py`) goes further: per-day orders via
-`trading.decide_orders`, fills simulated against the next day's OHLC with
-limit-up/down rules, T+1 and lot constraints.
+## Usage
 
-## Outputs (`outputs/`)
+```bash
+# Rolling walk-forward OOS validation (the trusted benchmark)
+uv run python scripts/run_walkforward.py --compare
 
-- `orders_*.csv` — next-day executable orders (from `predict_tomorrow.py`)
-- `walkforward_windows_*.csv` — per-window OOS metrics
-- `walkforward_oos_curve.parquet` — stitched OOS daily curve (plot data)
+# Recommended wide-cross-section config (300 screened names, 20-day window)
+USE_SCREENING=1 UNIVERSE_SIZE=300 FORWARD_WINDOW=20 \
+  uv run python scripts/run_walkforward.py --compare
 
-All charts (walk-forward dashboards, multi-seed robustness, factor layers)
-have moved to the Dash frontend (`run_webapp.py`): use the 滚动Walk-Forward /
-多Seed稳健性 sessions and the backtest session's factor analysis step.
+# Next-day orders / commit fills back to holdings
+uv run python predict_tomorrow.py --capital 1000000
+uv run python predict_tomorrow.py --commit
+
+# Model gating: staging models must beat the champion in dual replay
+uv run python predict_tomorrow.py --no-gate          # skip gating
+uv run python predict_tomorrow.py --promote <id>     # manually promote
+
+# Adaptive retraining & drift tracking
+uv run python predict_tomorrow.py --force-retrain
+uv run python predict_tomorrow.py --tracking-report
+
+# Single-factor evaluation / multi-seed robustness
+# (the factoreval web session is an equivalent entry point for eval_factors)
+uv run python scripts/eval_factors.py
+uv run python scripts/research/multiseed_robust.py
+```
+
+Outputs land in `outputs/` (`orders_*.csv`, session reports). Walk-forward
+results use the canonical `outputs/walkforward/` contract shared by the CLI
+and webapp sessions: `oos_curve.parquet` (stitched OOS equity curve),
+`window_metrics.parquet` (per-window OOS metrics), `oos_bench.parquet`
+(equal-weight benchmark daily returns) and `meta.json` (summary metrics +
+config snapshot). The Model Lab page renders the latest CLI walk-forward
+result directly from this directory. Dashboards live in the web
+UI; PNG chart output has been retired.
+
+## Repository layout
+
+```
+config.py                  # all parameters + credential loading (env-overridable)
+config_credentials.toml    # tushare token (gitignored, never commit)
+predict_tomorrow.py        # CLI: next-day orders from current holdings
+run_session.py             # session executor (spawned by the webapp)
+run_webapp.py              # Dash front-end entry
+
+src/                       # core library (top-level modules, src/ on sys.path)
+  data/                    # connectors (tushare/akshare), factor engineering, panel loaders
+    factors/               # formula factor engine (parser/registry/evaluator)
+  walkforward.py           # rolling walk-forward engine + GBM_PARAMS
+  ensemble.py              # incremental multi-model ensemble
+  strategy.py              # prediction -> positions
+  trading.py               # daily order decisions + fill simulation (backtest & live)
+  risk.py                  # five-layer risk overlay (single implementation)
+  backtest_daily.py        # daily-replay engine (the only backtest engine)
+  factor_eval.py           # single-factor IC/ICIR/layering evaluation
+  measure_alpha.py         # Newey-West alpha significance
+  live.py / live_state.py / live_tracking.py   # live inference, state, drift tracking
+  model_store.py / model_gate.py               # model artifacts + promotion gating
+
+pipeline/                  # session pipeline framework (registry/context/steps)
+webapp/                    # Dash multi-page front-end
+scripts/                   # research CLIs (active vs archive: see scripts/README.md)
+factor_library/            # YAML formula factor library
+tests/                     # pytest suite
+docs/system_architecture.html  # architecture diagram (open in browser)
+```
+
+New data sources: implement the 3 methods of `DataConnector` under `src/data/`
+and register in `src/data/__init__.py`'s `_CONNECTORS`.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [README_CN.md](README_CN.md) | 中文文档（含实测结论与更多细节） |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | Developer guide: tests, debugging, conventions, extension points |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
+| [CLAUDE.md](CLAUDE.md) | Full research conclusions & methodology rules (AI-assistant context, human-readable) |
+| [factor_library/README.md](factor_library/README.md) | Formula factor language |
+| [scripts/README.md](scripts/README.md) | Active vs archived scripts |
+| [docs/system_architecture.html](docs/system_architecture.html) | Architecture diagram |
 
 ## Notes & caveats
 
-- Synthetic results demonstrate the machinery, not a real edge — the generator
-  injects a known low signal-to-noise factor structure. Numbers are only
-  meaningful on the real dataset.
 - This is research/backtest tooling, not investment advice or a live trading
   system. Backtested performance does not guarantee future results.
-- The original notebook is preserved unchanged for the Kaggle inference server;
-  this system reuses its modeling idea but is independent of the Kaggle runtime.
+- A-share T+1 is enforced in the fill layer (`src/trading.py`).
+- Strategy and hyperparameters are fixed in `config.py`; all conclusions are
+  drawn from stitched walk-forward OOS curves only, to avoid data-snooping.
+- The original Kaggle notebook is preserved unchanged; this system reuses its
+  modeling idea but runs independently of the Kaggle runtime.
+
+## License
+
+[MIT](LICENSE) — see the LICENSE file. Replace the copyright holder placeholder
+with your name before publishing.

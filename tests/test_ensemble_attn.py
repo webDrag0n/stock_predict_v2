@@ -7,6 +7,7 @@ torch 是可选依赖（uv sync --extra attn），缺失时整个模块 skip。
 路径由 tests/conftest.py 统一处理；standalone 运行：
 PYTHONPATH=src:. uv run python tests/test_ensemble_attn.py
 """
+
 from __future__ import annotations
 
 import os
@@ -27,14 +28,16 @@ def _make_panel(n_dates: int = 40):
     np.random.seed(42)
     for d in dates:
         for sym in ["600000.SH", "300001.SZ", "000001.SZ"]:
-            rows.append({
-                "date": d,
-                "symbol": sym,
-                C.TARGET: np.random.randn() * 0.02,
-                "feature_00": np.random.randn(),
-                "feature_01": np.random.randn(),
-                "feature_02": np.random.randn(),
-            })
+            rows.append(
+                {
+                    "date": d,
+                    "symbol": sym,
+                    C.TARGET: np.random.randn() * 0.02,
+                    "feature_00": np.random.randn(),
+                    "feature_01": np.random.randn(),
+                    "feature_02": np.random.randn(),
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -48,8 +51,9 @@ def test_ensemble_with_attn():
 
     panel = _make_panel(60)
     feat_cols = ["feature_00", "feature_01", "feature_02"]
-    ens = IncrementalEnsemble(feat_cols, models=("attn", "ic_linear"),
-                              train_window=30, rebuild_days=20, ic_window=5)
+    ens = IncrementalEnsemble(
+        feat_cols, models=("attn", "ic_linear"), train_window=30, rebuild_days=20, ic_window=5
+    )
     latest = panel["date"].max()
     matured = panel[panel["date"] <= panel["date"].unique()[35]]
     info = ens.update(matured, asof_date=latest, force_full=True)

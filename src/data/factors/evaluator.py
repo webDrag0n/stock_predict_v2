@@ -168,9 +168,7 @@ def evaluate_formula(expr: str, context: dict) -> pd.Series:
     try:
         result = eval(code, {"__builtins__": {}}, context)
     except Exception as exc:
-        raise FormulaEvalError(
-            f"公式执行失败: {expr[:80]} — {type(exc).__name__}: {exc}"
-        ) from exc
+        raise FormulaEvalError(f"公式执行失败: {expr[:80]} — {type(exc).__name__}: {exc}") from exc
 
     # 4. Result must be Series-like
     if result is None:
@@ -201,9 +199,7 @@ def evaluate_formula(expr: str, context: dict) -> pd.Series:
     if isinstance(result, pd.Series):
         return result.astype(np.float32)
 
-    raise FormulaEvalError(
-        f"公式返回了不支持的类型 {type(result).__name__}: {expr[:80]}"
-    )
+    raise FormulaEvalError(f"公式返回了不支持的类型 {type(result).__name__}: {expr[:80]}")
 
 
 # ---------------------------------------------------------------------------

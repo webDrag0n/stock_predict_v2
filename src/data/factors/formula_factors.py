@@ -32,7 +32,8 @@ def get_factor_library_hash(library_dir: str | None = None) -> str:
             import config as C
 
             library_dir = getattr(
-                C, "FACTOR_LIBRARY_DIR",
+                C,
+                "FACTOR_LIBRARY_DIR",
                 os.path.join(os.path.expanduser("~"), "factor_library"),
             )
         except Exception:
@@ -89,7 +90,8 @@ def compute_formula_factors(
             import config as C
 
             library_dir = getattr(
-                C, "FACTOR_LIBRARY_DIR",
+                C,
+                "FACTOR_LIBRARY_DIR",
                 os.path.join(os.path.expanduser("~"), "factor_library"),
             )
         except Exception:

@@ -4,6 +4,7 @@
 HOLD_RATIO 控成本。用 20日周期调仓回测(无虚高)逐组合评 净PnL/Sharpe/Calmar/MaxDD。
 逐窗口预测先缓存一次, 各 (topk, hold) 组合复用预测, 只重算持仓+回测(快)。
 """
+
 from __future__ import annotations
 
 import os
@@ -46,26 +47,34 @@ def main() -> None:
 
     # 2) 扫描 (topk, hold)。hold>=topk 才有缓冲意义; hold==topk 关闭缓冲
     topk_grid = [0.05, 0.10, 0.15, 0.20, 0.30]
-    hold_grid = [0.0, 0.10, 0.15]   # 0 = 关闭(hold=topk); 否则 hold=topk+buffer
+    hold_grid = [0.0, 0.10, 0.15]  # 0 = 关闭(hold=topk); 否则 hold=topk+buffer
     rows = []
     orig_topk, orig_hold = C.TOPK_RATIO, C.HOLD_RATIO
     for topk, buf in itertools.product(topk_grid, hold_grid):
         hold = topk if buf == 0.0 else min(topk + buf, 0.6)
         C.TOPK_RATIO, C.HOLD_RATIO = topk, hold
         pos = generate_positions(oos_ids, pred, strategy="long_topk")
-        res = run_backtest_periodic(oos_ids, pred, pos,
-                                    rebalance_days=C.REBALANCE_DAYS,
-                                    pred_in_return_space=True)
+        res = run_backtest_periodic(
+            oos_ids, pred, pos, rebalance_days=C.REBALANCE_DAYS, pred_in_return_space=True
+        )
         m = res["metrics"]
-        rows.append({
-            "topk": topk, "hold": round(hold, 3),
-            "net_pnl": m["total_pnl"], "sharpe": m["sharpe"],
-            "calmar": m["calmar"], "maxdd": m["max_drawdown"],
-            "cost": m["total_cost"], "hit": m["hit_rate"],
-        })
-        print(f"  topk={topk:.2f} hold={hold:.2f}: PnL={m['total_pnl']:+.4f} "
-              f"Sharpe={m['sharpe']:+.2f} Calmar={m['calmar']:+.2f} "
-              f"MaxDD={m['max_drawdown']:+.3f} cost={m['total_cost']:.4f}")
+        rows.append(
+            {
+                "topk": topk,
+                "hold": round(hold, 3),
+                "net_pnl": m["total_pnl"],
+                "sharpe": m["sharpe"],
+                "calmar": m["calmar"],
+                "maxdd": m["max_drawdown"],
+                "cost": m["total_cost"],
+                "hit": m["hit_rate"],
+            }
+        )
+        print(
+            f"  topk={topk:.2f} hold={hold:.2f}: PnL={m['total_pnl']:+.4f} "
+            f"Sharpe={m['sharpe']:+.2f} Calmar={m['calmar']:+.2f} "
+            f"MaxDD={m['max_drawdown']:+.3f} cost={m['total_cost']:.4f}"
+        )
     C.TOPK_RATIO, C.HOLD_RATIO = orig_topk, orig_hold
 
     tbl = pd.DataFrame(rows).sort_values("sharpe", ascending=False)
@@ -74,9 +83,11 @@ def main() -> None:
         print(tbl.to_string(index=False))
     tbl.to_csv(os.path.join(C.OUTPUT_DIR, "optimize_topk_params.csv"), index=False)
     best = tbl.iloc[0]
-    print(f"\n最优: topk={best['topk']:.2f} hold={best['hold']:.2f} "
-          f"| Sharpe={best['sharpe']:+.2f} PnL={best['net_pnl']:+.4f} "
-          f"Calmar={best['calmar']:+.2f}")
+    print(
+        f"\n最优: topk={best['topk']:.2f} hold={best['hold']:.2f} "
+        f"| Sharpe={best['sharpe']:+.2f} PnL={best['net_pnl']:+.4f} "
+        f"Calmar={best['calmar']:+.2f}"
+    )
     print(f"(当前默认: topk={orig_topk} hold={orig_hold})")
     print("-> outputs/optimize_topk_params.csv")
 

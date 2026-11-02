@@ -21,6 +21,7 @@ asof 的【下一交易日】行情。决策→执行天然 1 日滞后，无未
 关键不变量：现金 + 持仓市值 = 总资产，逐日连续（卖出加现金、买入扣现金、各扣成本），
 回测重放每日校验该守恒。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -30,7 +31,7 @@ import pandas as pd
 
 import config as C
 
-LOT = 100   # A股最小交易单位：1 手 = 100 股
+LOT = 100  # A股最小交易单位：1 手 = 100 股
 
 
 # ---------------------------------------------------------------------------
@@ -66,8 +67,9 @@ def trade_costs(notional, side: str, adv=np.inf, params: dict | None = None):
     stamp = notional * stamp_rate if side == "sell" else np.zeros_like(notional)
     ok_adv = np.isfinite(adv) & (adv > 0)
     ratio = np.divide(notional, adv, out=np.zeros_like(notional), where=ok_adv)
-    impact = np.where(ok_adv & (notional > 0) & use_impact,
-                      impact_k * np.sqrt(ratio) * notional, 0.0)
+    impact = np.where(
+        ok_adv & (notional > 0) & use_impact, impact_k * np.sqrt(ratio) * notional, 0.0
+    )
     return comm, stamp, impact
 
 
@@ -80,18 +82,19 @@ class PortfolioState:
     last_price 记录每股最近一次可得的原始价：当日缺价（停牌/跌出横截面）时用它
     兜底估值，不再按 0 计（消除停牌日净值假跌与风控刹车误触）。
     val_factor 是每股累计除权估值因子（由回测侧按 pre_close 链条维护，见
-    backtest_daily._price_map），估值价 = 原始价 × val_factor，消除除权日假性盈亏。
+    backtest_daily.price_map），估值价 = 原始价 × val_factor，消除除权日假性盈亏。
     注意：last_price 假定原始价口径（price_col="close"），不要喂 adj_close。
     t1_locked 记录 T+1 锁定明细：代码 -> (锁定决策日, 当日买入的股数)。锁仓按
     【当日新增股数】粒度——老仓位不受新买入影响（真实 T+1 只锁当日买入部分）。
     """
+
     cash: float
-    holdings: dict[str, int] = field(default_factory=dict)        # 代码 -> 股数
-    cost_basis: dict[str, float] = field(default_factory=dict)    # 代码 -> 建仓均价
-    entry_date: dict[str, object] = field(default_factory=dict)   # 代码 -> 建仓日
-    last_price: dict[str, float] = field(default_factory=dict)    # 代码 -> 最近可得原始价
-    val_factor: dict[str, float] = field(default_factory=dict)    # 代码 -> 累计除权估值因子
-    t1_locked: dict[str, tuple] = field(default_factory=dict)     # 代码 -> (锁定决策日, 锁定股数)
+    holdings: dict[str, int] = field(default_factory=dict)  # 代码 -> 股数
+    cost_basis: dict[str, float] = field(default_factory=dict)  # 代码 -> 建仓均价
+    entry_date: dict[str, object] = field(default_factory=dict)  # 代码 -> 建仓日
+    last_price: dict[str, float] = field(default_factory=dict)  # 代码 -> 最近可得原始价
+    val_factor: dict[str, float] = field(default_factory=dict)  # 代码 -> 累计除权估值因子
+    t1_locked: dict[str, tuple] = field(default_factory=dict)  # 代码 -> (锁定决策日, 锁定股数)
 
     def market_value(self, prices: dict[str, float]) -> float:
         """持仓市值 = Σ 股数 × 估值价（原始价 × val_factor）。
@@ -119,10 +122,15 @@ class PortfolioState:
         return {s for s, sh in self.holdings.items() if sh > 0}
 
     def copy(self) -> "PortfolioState":
-        return PortfolioState(self.cash, dict(self.holdings),
-                              dict(self.cost_basis), dict(self.entry_date),
-                              dict(self.last_price), dict(self.val_factor),
-                              dict(self.t1_locked))
+        return PortfolioState(
+            self.cash,
+            dict(self.holdings),
+            dict(self.cost_basis),
+            dict(self.entry_date),
+            dict(self.last_price),
+            dict(self.val_factor),
+            dict(self.t1_locked),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -143,10 +151,14 @@ def _board_limit_pct(symbol: str, is_st: bool | None = None) -> float:
     return 0.10
 
 
-def detect_board_limit(symbol: str, pct_chg: float | None,
-                       high: float | None, low: float | None,
-                       pre_close: float | None,
-                       is_st: bool | None = None) -> tuple[bool, bool, bool]:
+def detect_board_limit(
+    symbol: str,
+    pct_chg: float | None,
+    high: float | None,
+    low: float | None,
+    pre_close: float | None,
+    is_st: bool | None = None,
+) -> tuple[bool, bool, bool]:
     """判断个股是否涨停/跌停/一字板。
 
     Returns:
@@ -157,7 +169,7 @@ def detect_board_limit(symbol: str, pct_chg: float | None,
     limit_pct = _board_limit_pct(symbol, is_st)
     # 用 pct_chg 优先；没有 pct_chg 时用 pre_close 兜底
     if pct_chg is not None and pct_chg == pct_chg:
-        up = pct_chg >= (limit_pct * 100.0 - 0.5)   # 留 0.5% 容差
+        up = pct_chg >= (limit_pct * 100.0 - 0.5)  # 留 0.5% 容差
         down = pct_chg <= -(limit_pct * 100.0 - 0.5)
     elif pre_close is not None and pre_close > 0 and high is not None and low is not None:
         up = high >= pre_close * (1.0 + limit_pct) * 0.999
@@ -210,9 +222,9 @@ def _col(today: pd.DataFrame, name: str) -> np.ndarray | None:
     return today[name].to_numpy() if name in today.columns else None
 
 
-def _apply_beta_constraint(pool_idx: list[int], beta: np.ndarray,
-                           rank_pct: np.ndarray,
-                           max_portfolio_beta: float) -> list[int]:
+def apply_beta_constraint(
+    pool_idx: list[int], beta: np.ndarray, rank_pct: np.ndarray, max_portfolio_beta: float
+) -> list[int]:
     """Greedy beta constraint: replace highest-beta stocks with lower-beta candidates.
 
     Args:
@@ -262,10 +274,17 @@ def _apply_beta_constraint(pool_idx: list[int], beta: np.ndarray,
     return sorted(pool, key=lambda i: rank_pct[i])
 
 
-def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
-                  params: dict | None = None,
-                  asof_date: object | None = None,
-                  price_col: str = "close") -> pd.DataFrame:
+_apply_beta_constraint = apply_beta_constraint  # 向后兼容别名
+
+
+def decide_orders(
+    state: PortfolioState,
+    today: pd.DataFrame,
+    score: np.ndarray,
+    params: dict | None = None,
+    asof_date: object | None = None,
+    price_col: str = "close",
+) -> pd.DataFrame:
     """单日决策：ML 融合排序分 + 布林带/RSI 择时 → 精确逐笔订单（决策日收盘后）。
 
     Args:
@@ -298,10 +317,10 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
     price_mode = str(p.get("order_price_mode", C.ORDER_PRICE_MODE))
     min_notional = float(p.get("min_notional", C.DAILY_MIN_NOTIONAL))
     gross = float(p.get("gross_leverage", C.GROSS_LEVERAGE))
-    use_beta_constraint = bool(p.get("use_beta_constraint",
-                                     getattr(C, "USE_BETA_CONSTRAINT", False)))
-    max_portfolio_beta = float(p.get("max_portfolio_beta",
-                                      getattr(C, "MAX_PORTFOLIO_BETA", 1.10)))
+    use_beta_constraint = bool(
+        p.get("use_beta_constraint", getattr(C, "USE_BETA_CONSTRAINT", False))
+    )
+    max_portfolio_beta = float(p.get("max_portfolio_beta", getattr(C, "MAX_PORTFOLIO_BETA", 1.10)))
 
     sym = today["symbol"].to_numpy()
     name = _col(today, "name")
@@ -316,9 +335,21 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
     is_st = _col(today, "is_st") if "is_st" in today.columns else None
 
     n = len(today)
-    _EMPTY_COLS = ["symbol", "name", "side", "shares", "limit_price", "ref_close",
-                   "reason", "rank_pct", "bb_pos", "rsi", "blocked", "asof_date"]
-    if n == 0:                       # 持有日（rebalance_every 闸门）→ 无订单
+    _EMPTY_COLS = [
+        "symbol",
+        "name",
+        "side",
+        "shares",
+        "limit_price",
+        "ref_close",
+        "reason",
+        "rank_pct",
+        "bb_pos",
+        "rsi",
+        "blocked",
+        "asof_date",
+    ]
+    if n == 0:  # 持有日（rebalance_every 闸门）→ 无订单
         return pd.DataFrame(columns=_EMPTY_COLS)
     score = np.asarray(score, dtype=np.float64)
     # 当日百分位排名：rank_pct=0 最看好（top），=1 最差。与 live.py 口径一致。
@@ -326,7 +357,7 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
     rank_pct = np.empty(n, dtype=np.float64)
     rank_pct[order] = np.arange(n) / max(n - 1, 1)
 
-    in_pool = rank_pct <= topk            # 候选池（买入资格）
+    in_pool = rank_pct <= topk  # 候选池（买入资格）
     in_hold_band = rank_pct <= hold_ratio  # 持有带（跌出才因衰减卖出）
     held = state.held_symbols()
 
@@ -351,7 +382,7 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
                 return float(bb_lo[i])
             if side == "sell" and bb_up[i] == bb_up[i]:
                 return float(bb_up[i])
-        return float(close[i])   # next_open 模式：占位，撮合时换次日开盘
+        return float(close[i])  # next_open 模式：占位，撮合时换次日开盘
 
     # 辅助：用代码前缀识别的板幅判定替代简单的 limit_flag+pct_chg
     def _limit_flags(i):
@@ -362,8 +393,9 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
         if not bool(limit_flag[i]):
             return False, False
         pc = pct_chg[i] if pct_chg is not None else None
-        up, down, _ = detect_board_limit(sym[i], pc, None, None, None,
-                                         is_st=bool(is_st[i]) if is_st is not None else None)
+        up, down, _ = detect_board_limit(
+            sym[i], pc, None, None, None, is_st=bool(is_st[i]) if is_st is not None else None
+        )
         # limit_flag 只告诉"触及板"，方向由 pct_chg 符号决定
         if pc is not None and pc > 0:
             return up, False
@@ -375,8 +407,7 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
     # ============================================================== 满仓再平衡
     if not use_bb:
         # 目标池：score 最高的 min(max_pos, |in_pool|) 只
-        pool_idx = [i for i in range(n) if in_pool[i]
-                    and close[i] == close[i] and close[i] > 0]
+        pool_idx = [i for i in range(n) if in_pool[i] and close[i] == close[i] and close[i] > 0]
         pool_idx.sort(key=lambda i: rank_pct[i])
         if max_pos > 0:
             pool_idx = pool_idx[:max_pos]
@@ -384,14 +415,26 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
         # Beta 约束：等权组合 beta 过高时，用次优的低 beta 候选替换高 beta 股。
         beta = _col(today, "beta")
         if use_beta_constraint and beta is not None and len(pool_idx) > 0:
-            pool_idx = _apply_beta_constraint(
-                pool_idx, beta, rank_pct, max_portfolio_beta)
+            pool_idx = apply_beta_constraint(pool_idx, beta, rank_pct, max_portfolio_beta)
 
         n_target = len(pool_idx)
         if n_target == 0:
-            return pd.DataFrame(columns=[
-                "symbol", "name", "side", "shares", "limit_price", "ref_close",
-                "reason", "rank_pct", "bb_pos", "rsi", "blocked", "asof_date"])
+            return pd.DataFrame(
+                columns=[
+                    "symbol",
+                    "name",
+                    "side",
+                    "shares",
+                    "limit_price",
+                    "ref_close",
+                    "reason",
+                    "rank_pct",
+                    "bb_pos",
+                    "rsi",
+                    "blocked",
+                    "asof_date",
+                ]
+            )
         # 等权目标金额（受单股权重上限约束），满仓部署
         per_name = min(total_val * gross / n_target, total_val * max_w)
         target_sh = {}
@@ -415,21 +458,47 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
                 lp = state.last_price.get(s_held)
                 if lp is None or lp <= 0:
                     continue
-                rows.append(_row(s_held, None, None, "sell", delta, lp, lp,
-                                 "跌出横截面:清退", np.nan, np.nan, np.nan,
-                                 blocked=False, asof_date=asof_date))
+                rows.append(
+                    _row(
+                        s_held,
+                        None,
+                        None,
+                        "sell",
+                        delta,
+                        lp,
+                        lp,
+                        "跌出横截面:清退",
+                        np.nan,
+                        np.nan,
+                        np.nan,
+                        blocked=False,
+                        asof_date=asof_date,
+                    )
+                )
                 continue
             px = close[i]
             # 碎单过滤只作用于"减仓微调"（tgt>0 的小幅超配）；清仓(tgt==0)永远执行。
             if tgt > 0 and delta * px < min_notional:
-                continue                        # 小幅超配不动（抑制 churn）
+                continue  # 小幅超配不动（抑制 churn）
             reason = "再平衡:清仓出池" if tgt == 0 else "再平衡:减仓"
             _, dn = _limit_flags(i)
-            rows.append(_row(s_held, name, i, "sell", delta, _limit_price(i, "sell"),
-                             px, ("跌停拦截:" + reason) if dn else reason,
-                             rank_pct[i], _bb_pos(i),
-                             rsi[i] if rsi is not None else np.nan,
-                             blocked=dn, asof_date=asof_date))
+            rows.append(
+                _row(
+                    s_held,
+                    name,
+                    i,
+                    "sell",
+                    delta,
+                    _limit_price(i, "sell"),
+                    px,
+                    ("跌停拦截:" + reason) if dn else reason,
+                    rank_pct[i],
+                    _bb_pos(i),
+                    rsi[i] if rsi is not None else np.nan,
+                    blocked=dn,
+                    asof_date=asof_date,
+                )
+            )
         # 2) 买：目标池内新建 + 低配补足
         for i in pool_idx:
             s2 = sym[i]
@@ -445,18 +514,45 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
                 continue
             up, _ = _limit_flags(i)
             reason = "再平衡:建仓" if cur == 0 else "再平衡:加仓"
-            rows.append(_row(s2, name, i, "buy", delta, _limit_price(i, "buy"),
-                             px, ("涨停拦截:" + reason) if up else reason,
-                             rank_pct[i], _bb_pos(i),
-                             rsi[i] if rsi is not None else np.nan,
-                             blocked=up, asof_date=asof_date))
-        orders = pd.DataFrame(rows, columns=[
-            "symbol", "name", "side", "shares", "limit_price", "ref_close",
-            "reason", "rank_pct", "bb_pos", "rsi", "blocked", "asof_date"])
+            rows.append(
+                _row(
+                    s2,
+                    name,
+                    i,
+                    "buy",
+                    delta,
+                    _limit_price(i, "buy"),
+                    px,
+                    ("涨停拦截:" + reason) if up else reason,
+                    rank_pct[i],
+                    _bb_pos(i),
+                    rsi[i] if rsi is not None else np.nan,
+                    blocked=up,
+                    asof_date=asof_date,
+                )
+            )
+        orders = pd.DataFrame(
+            rows,
+            columns=[
+                "symbol",
+                "name",
+                "side",
+                "shares",
+                "limit_price",
+                "ref_close",
+                "reason",
+                "rank_pct",
+                "bb_pos",
+                "rsi",
+                "blocked",
+                "asof_date",
+            ],
+        )
         if len(orders):
             orders["_k"] = orders["side"].map({"sell": 0, "buy": 1})
-            orders = orders.sort_values(["_k", "rank_pct"]).drop(columns="_k") \
-                           .reset_index(drop=True)
+            orders = (
+                orders.sort_values(["_k", "rank_pct"]).drop(columns="_k").reset_index(drop=True)
+            )
         return orders
 
     rows = []
@@ -477,18 +573,50 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
                 reason = "跌出ML持有带"
             elif use_bb and rsi_sell_min and r == r and r >= rsi_sell_min:
                 reason = f"RSI超买({r:.0f})"
-            elif use_bb and bb_up is not None and bb_up[i] == bb_up[i] \
-                    and px >= bb_up[i] * (1.0 - bb_sell_k):
+            elif (
+                use_bb
+                and bb_up is not None
+                and bb_up[i] == bb_up[i]
+                and px >= bb_up[i] * (1.0 - bb_sell_k)
+            ):
                 reason = "触布林上轨"
             if reason:
                 if down_limit:
-                    rows.append(_row(s, name, i, "sell", cur, _limit_price(i, "sell"),
-                                     px, "跌停拦截:" + reason, rank_pct[i], bbp, r,
-                                     blocked=True, asof_date=asof_date))
+                    rows.append(
+                        _row(
+                            s,
+                            name,
+                            i,
+                            "sell",
+                            cur,
+                            _limit_price(i, "sell"),
+                            px,
+                            "跌停拦截:" + reason,
+                            rank_pct[i],
+                            bbp,
+                            r,
+                            blocked=True,
+                            asof_date=asof_date,
+                        )
+                    )
                 else:
-                    rows.append(_row(s, name, i, "sell", cur, _limit_price(i, "sell"),
-                                     px, reason, rank_pct[i], bbp, r,
-                                     blocked=False, asof_date=asof_date))
+                    rows.append(
+                        _row(
+                            s,
+                            name,
+                            i,
+                            "sell",
+                            cur,
+                            _limit_price(i, "sell"),
+                            px,
+                            reason,
+                            rank_pct[i],
+                            bbp,
+                            r,
+                            blocked=False,
+                            asof_date=asof_date,
+                        )
+                    )
             # 否则继续持有，不产生订单
             continue
 
@@ -500,23 +628,51 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
         # 指标择时门控
         if use_bb:
             if rsi_buy_max and r == r and r > rsi_buy_max:
-                continue   # RSI 过热不追
+                continue  # RSI 过热不追
             if bb_lo is not None and bb_lo[i] == bb_lo[i]:
                 if px > bb_lo[i] * (1.0 + bb_buy_k):
-                    continue   # 未回踩到下轨附近，不买（等更好价位）
+                    continue  # 未回踩到下轨附近，不买（等更好价位）
         # 目标股数：目标金额 / 价，向下取整手
         shares = int(np.floor(target_notional / px / LOT) * LOT)
         if shares <= 0 or shares * px < min_notional:
             continue
         reason = "布林下轨回踩" if use_bb else "进入ML候选池"
         if up_limit:
-            rows.append(_row(s, name, i, "buy", shares, _limit_price(i, "buy"),
-                             px, "涨停拦截:" + reason, rank_pct[i], bbp, r,
-                             blocked=True, asof_date=asof_date))
+            rows.append(
+                _row(
+                    s,
+                    name,
+                    i,
+                    "buy",
+                    shares,
+                    _limit_price(i, "buy"),
+                    px,
+                    "涨停拦截:" + reason,
+                    rank_pct[i],
+                    bbp,
+                    r,
+                    blocked=True,
+                    asof_date=asof_date,
+                )
+            )
         else:
-            rows.append(_row(s, name, i, "buy", shares, _limit_price(i, "buy"),
-                             px, reason, rank_pct[i], bbp, r,
-                             blocked=False, asof_date=asof_date))
+            rows.append(
+                _row(
+                    s,
+                    name,
+                    i,
+                    "buy",
+                    shares,
+                    _limit_price(i, "buy"),
+                    px,
+                    reason,
+                    rank_pct[i],
+                    bbp,
+                    r,
+                    blocked=False,
+                    asof_date=asof_date,
+                )
+            )
 
     # 跌出当日横截面的持仓：上面的循环只遍历今日面板里的票，查不到持仓股——
     # 与满仓再平衡分支同样处理：有历史价则按 last_price 发市价清退单，
@@ -528,27 +684,66 @@ def decide_orders(state: PortfolioState, today: pd.DataFrame, score: np.ndarray,
         lp = state.last_price.get(s_held)
         if lp is None or lp <= 0:
             continue
-        rows.append(_row(s_held, None, None, "sell", state.holdings[s_held], lp, lp,
-                         "跌出横截面:清退", np.nan, np.nan, np.nan,
-                         blocked=False, asof_date=asof_date))
+        rows.append(
+            _row(
+                s_held,
+                None,
+                None,
+                "sell",
+                state.holdings[s_held],
+                lp,
+                lp,
+                "跌出横截面:清退",
+                np.nan,
+                np.nan,
+                np.nan,
+                blocked=False,
+                asof_date=asof_date,
+            )
+        )
 
-    cols = ["symbol", "name", "side", "shares", "limit_price", "ref_close",
-            "reason", "rank_pct", "bb_pos", "rsi", "blocked", "asof_date"]
+    cols = [
+        "symbol",
+        "name",
+        "side",
+        "shares",
+        "limit_price",
+        "ref_close",
+        "reason",
+        "rank_pct",
+        "bb_pos",
+        "rsi",
+        "blocked",
+        "asof_date",
+    ]
     orders = pd.DataFrame(rows, columns=cols)
     if len(orders):
         # 卖在前(腾现金)、买在后；组内按排名
         orders["_k"] = orders["side"].map({"sell": 0, "buy": 1})
-        orders = orders.sort_values(["_k", "rank_pct"]).drop(columns="_k") \
-                       .reset_index(drop=True)
+        orders = orders.sort_values(["_k", "rank_pct"]).drop(columns="_k").reset_index(drop=True)
     return orders
 
 
-def _row(sym, name_arr, i, side, shares, limit_price, ref_close, reason,
-         rank_pct, bb_pos, rsi, blocked=False, asof_date=None):
+def _row(
+    sym,
+    name_arr,
+    i,
+    side,
+    shares,
+    limit_price,
+    ref_close,
+    reason,
+    rank_pct,
+    bb_pos,
+    rsi,
+    blocked=False,
+    asof_date=None,
+):
     return {
         "symbol": sym,
         "name": (name_arr[i] if name_arr is not None else sym),
-        "side": side, "shares": int(shares),
+        "side": side,
+        "shares": int(shares),
         "limit_price": round(float(limit_price), 3),
         "ref_close": round(float(ref_close), 3),
         "reason": reason,
@@ -561,9 +756,13 @@ def _row(sym, name_arr, i, side, shares, limit_price, ref_close, reason,
 
 
 # ---------------------------------------------------------------------------
-def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
-                   next_bars: pd.DataFrame, params: dict | None = None,
-                   t1_lock: bool = True) -> dict:
+def simulate_fills(
+    state: PortfolioState,
+    orders: pd.DataFrame,
+    next_bars: pd.DataFrame,
+    params: dict | None = None,
+    t1_lock: bool = True,
+) -> dict:
     """用【次日行情】模拟订单成交，更新 state（原地修改），返回成交明细 + 现金流。
 
     成交判定（A股规则）：
@@ -586,8 +785,7 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
     """
     p = params or {}
     price_mode = str(p.get("order_price_mode", C.ORDER_PRICE_MODE))
-    max_participation = float(p.get("max_participation",
-                                    getattr(C, "MAX_PARTICIPATION", 0.0)))
+    max_participation = float(p.get("max_participation", getattr(C, "MAX_PARTICIPATION", 0.0)))
 
     nb = next_bars.set_index("symbol") if "symbol" in next_bars.columns else next_bars
     has_open = "open" in nb.columns
@@ -612,8 +810,11 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
             fills.append(_fill(o, 0, np.nan, "决策层拦截", filled=False))
             continue
         if want <= 0 or s not in nb.index:
-            fills.append(_fill(o, 0, np.nan, "停牌/无次日行情" if s not in nb.index else "零股数",
-                               filled=False))
+            fills.append(
+                _fill(
+                    o, 0, np.nan, "停牌/无次日行情" if s not in nb.index else "零股数", filled=False
+                )
+            )
             continue
         bar = nb.loc[s]
         nopen = float(bar["open"]) if has_open and bar["open"] == bar["open"] else np.nan
@@ -623,15 +824,23 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
             fills.append(_fill(o, 0, np.nan, "次日无有效开盘价", filled=False))
             continue
 
-        npct = (float(bar["pct_chg"]) if ("pct_chg" in bar.index
-                and bar["pct_chg"] == bar["pct_chg"]) else None)
-        pre_close = (float(bar["pre_close"]) if ("pre_close" in bar.index
-                    and bar["pre_close"] == bar["pre_close"]) else None)
-        is_st = (bool(bar["is_st"]) if "is_st" in bar.index
-                 and bar["is_st"] == bar["is_st"] else None)
+        npct = (
+            float(bar["pct_chg"])
+            if ("pct_chg" in bar.index and bar["pct_chg"] == bar["pct_chg"])
+            else None
+        )
+        pre_close = (
+            float(bar["pre_close"])
+            if ("pre_close" in bar.index and bar["pre_close"] == bar["pre_close"])
+            else None
+        )
+        is_st = (
+            bool(bar["is_st"]) if "is_st" in bar.index and bar["is_st"] == bar["is_st"] else None
+        )
 
         up_board, down_board, one_word = detect_board_limit(
-            s, npct, nhigh, nlow, pre_close, is_st=is_st)
+            s, npct, nhigh, nlow, pre_close, is_st=is_st
+        )
 
         # T+1 锁仓（按当日新增股数粒度）：当日决策买入的部分，同决策日的卖出单
         # 不能动；早于当日买入的老仓位可正常卖。真实 T+1 只锁当日买入的股数。
@@ -651,11 +860,11 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
                 reject = "一字涨停无法买入"
             elif price_mode == "limit_bb":
                 lp = float(o.limit_price)
-                if nlow <= lp:                      # 价区触及买入挂单价
-                    fill_px = min(lp, nopen)        # 跳空低开则以开盘价更优成交
+                if nlow <= lp:  # 价区触及买入挂单价
+                    fill_px = min(lp, nopen)  # 跳空低开则以开盘价更优成交
                 else:
                     reject = "未触及买入挂单价"
-            else:                                    # next_open 市价
+            else:  # next_open 市价
                 fill_px = nopen
         else:  # sell
             if one_word and down_board:
@@ -675,7 +884,11 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
 
         # ---- 买入：参与率上限 → 现金约束（含成本），不足则缩到可买整手 ----
         if side == "buy":
-            adv = float(bar["amount"]) * 1000.0 if has_amt and bar["amount"] == bar["amount"] else np.inf
+            adv = (
+                float(bar["amount"]) * 1000.0
+                if has_amt and bar["amount"] == bar["amount"]
+                else np.inf
+            )
             shares = want
             capped = False
             # 参与率上限：单笔不超过次日成交额的一定比例（冲击模型只计价不限量）
@@ -690,9 +903,15 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
             affordable = int(np.floor(state.cash / per_share_cost / LOT) * LOT)
             shares = min(shares, max(affordable, 0))
             if shares <= 0:
-                fills.append(_fill(o, 0, fill_px,
-                                   "流动性不足(参与率上限)" if capped else "现金不足",
-                                   filled=False))
+                fills.append(
+                    _fill(
+                        o,
+                        0,
+                        fill_px,
+                        "流动性不足(参与率上限)" if capped else "现金不足",
+                        filled=False,
+                    )
+                )
                 continue
             notional = shares * fill_px
             comm, _, impact = trade_costs(notional, "buy", adv, p)
@@ -723,10 +942,19 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
                     state.t1_locked[s] = (asof_str, int(lock[1]) + shares)
                 else:
                     state.t1_locked[s] = (asof_str, shares)
-            tot_comm += comm; tot_impact += impact; buy_notional += notional
-            fills.append(_fill(o, shares, fill_px,
-                               "成交(参与率限量)" if capped else "成交",
-                               filled=True, cost=comm + impact))
+            tot_comm += comm
+            tot_impact += impact
+            buy_notional += notional
+            fills.append(
+                _fill(
+                    o,
+                    shares,
+                    fill_px,
+                    "成交(参与率限量)" if capped else "成交",
+                    filled=True,
+                    cost=comm + impact,
+                )
+            )
         # ---- 卖出 ----
         else:
             prev = state.holdings.get(s, 0)
@@ -735,11 +963,14 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
             if t1_sellable_cap is not None:
                 shares = min(shares, t1_sellable_cap)
             if shares <= 0:
-                status = ("T+1锁仓" if (t1_sellable_cap is not None and prev > 0)
-                          else "无持仓可卖")
+                status = "T+1锁仓" if (t1_sellable_cap is not None and prev > 0) else "无持仓可卖"
                 fills.append(_fill(o, 0, fill_px, status, filled=False))
                 continue
-            adv = float(bar["amount"]) * 1000.0 if has_amt and bar["amount"] == bar["amount"] else np.inf
+            adv = (
+                float(bar["amount"]) * 1000.0
+                if has_amt and bar["amount"] == bar["amount"]
+                else np.inf
+            )
             capped = False
             if max_participation > 0 and np.isfinite(adv) and adv > 0:
                 cap_shares = int(np.floor(max_participation * adv / fill_px / LOT) * LOT)
@@ -764,11 +995,20 @@ def simulate_fills(state: PortfolioState, orders: pd.DataFrame,
                 state.t1_locked.pop(s, None)
             else:
                 state.holdings[s] = new_sh
-            tot_comm += comm; tot_stamp += st; tot_impact += impact
+            tot_comm += comm
+            tot_stamp += st
+            tot_impact += impact
             sell_notional += notional
-            fills.append(_fill(o, shares, fill_px,
-                               "成交(参与率限量)" if capped else "成交",
-                               filled=True, cost=comm + st + impact))
+            fills.append(
+                _fill(
+                    o,
+                    shares,
+                    fill_px,
+                    "成交(参与率限量)" if capped else "成交",
+                    filled=True,
+                    cost=comm + st + impact,
+                )
+            )
 
     fdf = pd.DataFrame(fills)
     n_fill = int(fdf["filled"].sum()) if len(fdf) else 0
@@ -793,8 +1033,13 @@ def estimate_order_cost(orders: pd.DataFrame, params: dict | None = None) -> dic
     次日 ADV 口径的成交价）。真实成交成本由 simulate_fills 用次日价计。
     被拦截(blocked)的订单不计入。"""
     if orders is None or len(orders) == 0:
-        return {"buy_notional": 0.0, "sell_notional": 0.0, "commission": 0.0,
-                "stamp_duty": 0.0, "total": 0.0}
+        return {
+            "buy_notional": 0.0,
+            "sell_notional": 0.0,
+            "commission": 0.0,
+            "stamp_duty": 0.0,
+            "total": 0.0,
+        }
     o = orders[~orders["blocked"]] if "blocked" in orders.columns else orders
     notion = o["shares"].to_numpy(dtype=np.float64) * o["limit_price"].to_numpy(dtype=np.float64)
     is_buy = (o["side"] == "buy").to_numpy()
@@ -804,18 +1049,26 @@ def estimate_order_cost(orders: pd.DataFrame, params: dict | None = None) -> dic
     comm_sell, st_sell, _ = trade_costs(notion[~is_buy], "sell", params=params)
     comm = float(comm_buy.sum() + comm_sell.sum())
     st = float(st_sell.sum())
-    return {"buy_notional": buy, "sell_notional": sell, "commission": comm,
-            "stamp_duty": st, "total": comm + st}
+    return {
+        "buy_notional": buy,
+        "sell_notional": sell,
+        "commission": comm,
+        "stamp_duty": st,
+        "total": comm + st,
+    }
 
 
 def _fill(o, shares, price, status, filled, cost=0.0):
     return {
-        "symbol": o.symbol, "name": getattr(o, "name", o.symbol),
-        "side": o.side, "want_shares": int(o.shares),
+        "symbol": o.symbol,
+        "name": getattr(o, "name", o.symbol),
+        "side": o.side,
+        "want_shares": int(o.shares),
         "fill_shares": int(shares),
         "fill_price": (round(float(price), 3) if price == price else None),
         "notional": (round(float(shares * price), 2) if price == price else 0.0),
         "cost": round(float(cost), 2),
-        "status": status, "filled": bool(filled),
+        "status": status,
+        "filled": bool(filled),
         "reason": getattr(o, "reason", ""),
     }

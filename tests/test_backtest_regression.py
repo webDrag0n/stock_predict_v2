@@ -8,6 +8,7 @@
     成交价真实性由 test_fills_realism.py 的逐笔测试覆盖）；
   - 重放窗口缩到 ~10 个决策日（start_date 截尾），秒级完成。
 """
+
 from __future__ import annotations
 
 import os
@@ -18,18 +19,34 @@ import pytest
 
 import config as C
 
-PANEL_CACHE = os.path.join(os.path.dirname(__file__), "..", "data_cache",
-                           "wholemkt_panel.parquet")
+PANEL_CACHE = os.path.join(os.path.dirname(__file__), "..", "data_cache", "wholemkt_panel.parquet")
 
-FEAT_COLS = ["momentum_5", "momentum_20", "volatility_20", "volume_ma_ratio_20",
-             "hl_pct", "amihud_20", "max_ret_20", "a158_corr5"]
+FEAT_COLS = [
+    "momentum_5",
+    "momentum_20",
+    "volatility_20",
+    "volume_ma_ratio_20",
+    "hl_pct",
+    "amihud_20",
+    "max_ret_20",
+    "a158_corr5",
+]
 
-_LOAD_COLS = (["date", "symbol", "close", "amount", "pct_chg", "return_1d",
-               "rsi_14", "limit_flag", C.TARGET] + FEAT_COLS)
+_LOAD_COLS = [
+    "date",
+    "symbol",
+    "close",
+    "amount",
+    "pct_chg",
+    "return_1d",
+    "rsi_14",
+    "limit_flag",
+    C.TARGET,
+] + FEAT_COLS
 
 N_SYMBOLS = 25
-LOOKBACK_DAYS = 120      # 读盘窗口（自然日）
-REPLAY_DAYS = 15         # 重放窗口（自然日，~10 个决策日）
+LOOKBACK_DAYS = 120  # 读盘窗口（自然日）
+REPLAY_DAYS = 15  # 重放窗口（自然日，~10 个决策日）
 
 
 def _load_tail_panel() -> pd.DataFrame:
@@ -67,11 +84,19 @@ def test_daily_replay_on_cached_panel():
     start = latest - pd.Timedelta(days=REPLAY_DAYS)
 
     res = run_daily_replay(
-        panel, FEAT_COLS,
-        start_date=start.date(), end_date=latest.date(),
-        params={"n_seeds": 1, "rebuild_days": 25, "train_window": 40,
-                "warmup_days": 40, "ic_window": 5,
-                "strict_check": True, "progress": False},
+        panel,
+        FEAT_COLS,
+        start_date=start.date(),
+        end_date=latest.date(),
+        params={
+            "n_seeds": 1,
+            "rebuild_days": 25,
+            "train_window": 40,
+            "warmup_days": 40,
+            "ic_window": 5,
+            "strict_check": True,
+            "progress": False,
+        },
     )
     daily = res["daily"]
     trades = res["trades"]
@@ -80,8 +105,7 @@ def test_daily_replay_on_cached_panel():
     assert 3 <= len(daily) <= REPLAY_DAYS, f"决策日数量异常: {len(daily)}"
     assert np.isfinite(daily["total_value"]).all()
     assert (daily["total_value"] > 0).all()
-    assert np.allclose(daily["total_value"],
-                       daily["cash"] + daily["stock_value"], atol=1.0)
+    assert np.allclose(daily["total_value"], daily["cash"] + daily["stock_value"], atol=1.0)
     assert (daily["cost"] >= 0).all()
     assert (daily["turnover"] >= 0).all()
     assert isinstance(trades, pd.DataFrame)

@@ -11,6 +11,7 @@ regime information for the existing stock predictor. Steps:
 Usage:
     python diag_option_iv.py --underlying 510300.SH --lag 1
 """
+
 from __future__ import annotations
 
 import argparse
@@ -28,7 +29,6 @@ sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src"))
 import config as C
 from data import load_factor_panel, list_factor_columns
 from data.option_features import get_option_iv_features
-from factor_eval import evaluate_factor
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,31 +36,45 @@ def parse_args() -> argparse.Namespace:
         description="ETF option IV regime-feature diagnostic (Black-Scholes MVP)"
     )
     ap.add_argument(
-        "--underlying", type=str, default=C.OPTION_UNDERLYING,
+        "--underlying",
+        type=str,
+        default=C.OPTION_UNDERLYING,
         help="Underlying ETF code (510050.SH / 510300.SH / 510500.SH)",
     )
     ap.add_argument(
-        "--start-date", type=str, default=None,
+        "--start-date",
+        type=str,
+        default=None,
         help="Start date (YYYY-MM-DD); defaults to config START_DATE",
     )
     ap.add_argument(
-        "--end-date", type=str, default=None,
+        "--end-date",
+        type=str,
+        default=None,
         help="End date (YYYY-MM-DD); defaults to config END_DATE",
     )
     ap.add_argument(
-        "--lag", type=int, default=1,
+        "--lag",
+        type=int,
+        default=1,
         help="Trading days to lag option IV (default 1)",
     )
     ap.add_argument(
-        "--regime-factor", type=str, default="opt_vix_like",
+        "--regime-factor",
+        type=str,
+        default="opt_vix_like",
         help="IV feature used to define high/low volatility regimes",
     )
     ap.add_argument(
-        "--symbols-file", type=str, default=None,
+        "--symbols-file",
+        type=str,
+        default=None,
         help="Path to a parquet/CSV with a 'ts_code' column; bypasses universe screening",
     )
     ap.add_argument(
-        "--output-dir", type=str, default=C.OUTPUT_DIR,
+        "--output-dir",
+        type=str,
+        default=C.OUTPUT_DIR,
         help="Directory for CSV outputs",
     )
     return ap.parse_args()
@@ -100,9 +114,7 @@ def merge_iv_features(
 
     # Forward fill IV features up to configured max days.
     if C.OPTION_MAX_FILL_DAYS > 0:
-        merged[iv_cols] = merged.groupby("symbol")[iv_cols].ffill(
-            limit=C.OPTION_MAX_FILL_DAYS
-        )
+        merged[iv_cols] = merged.groupby("symbol")[iv_cols].ffill(limit=C.OPTION_MAX_FILL_DAYS)
     return merged
 
 
@@ -119,45 +131,59 @@ def evaluate_iv_features(panel: pd.DataFrame, iv_cols: list[str]) -> pd.DataFram
         return dispersions)
     """
     rows = []
-    daily = panel.groupby("date").agg(
-        target_mean=(C.TARGET, "mean"),
-        target_std=(C.TARGET, "std"),
-    ).reset_index()
+    daily = (
+        panel.groupby("date")
+        .agg(
+            target_mean=(C.TARGET, "mean"),
+            target_std=(C.TARGET, "std"),
+        )
+        .reset_index()
+    )
 
     for col in iv_cols:
         iv_daily = panel.groupby("date")[col].first().reset_index()
         df = daily.merge(iv_daily, on="date").dropna()
         if len(df) < 10:
-            rows.append({
-                "factor": col, "n_dates": 0, "ts_corr_mkt": np.nan,
-                "ts_corr_disp": np.nan, "rank_ic_mean": np.nan,
-                "rank_icir": np.nan, "ic_t_stat": np.nan,
-            })
+            rows.append(
+                {
+                    "factor": col,
+                    "n_dates": 0,
+                    "ts_corr_mkt": np.nan,
+                    "ts_corr_disp": np.nan,
+                    "rank_ic_mean": np.nan,
+                    "rank_icir": np.nan,
+                    "ic_t_stat": np.nan,
+                }
+            )
             continue
 
         corr_mkt = stats.spearmanr(df[col], df["target_mean"]).correlation
         corr_disp = stats.spearmanr(df[col], df["target_std"]).correlation
 
-        rows.append({
-            "factor": col,
-            "n_dates": len(df),
-            "ts_corr_mkt": corr_mkt,
-            "ts_corr_disp": corr_disp,
-            "rank_ic_mean": np.nan,
-            "rank_icir": np.nan,
-            "ic_t_stat": np.nan,
-        })
+        rows.append(
+            {
+                "factor": col,
+                "n_dates": len(df),
+                "ts_corr_mkt": corr_mkt,
+                "ts_corr_disp": corr_disp,
+                "rank_ic_mean": np.nan,
+                "rank_icir": np.nan,
+                "ic_t_stat": np.nan,
+            }
+        )
     return pd.DataFrame(rows)
 
 
 def _daily_rank_ic(sub: pd.DataFrame, factor: str, target: str) -> pd.Series:
     """Daily cross-sectional Spearman RankIC."""
+
     def _one(g):
         x, y = g[factor], g[target]
         m = x.notna() & y.notna()
         if m.sum() < 5 or x[m].nunique() < 2 or y[m].nunique() < 2:
             return np.nan
         return stats.spearmanr(x[m], y[m]).correlation
+
     return sub.groupby("date", group_keys=False).apply(_one, include_groups=False)
 
 
@@ -204,7 +230,6 @@ def regime_ic_analysis(
 
         grp = ic_df.groupby("regime")["ic"]
         means = grp.mean()
-        stds = grp.std()
         counts = grp.count()
 
         low = ic_df[ic_df["regime"] == "low"]["ic"]
@@ -214,23 +239,24 @@ def regime_ic_analysis(
         if len(low) > 2 and len(high) > 2:
             diff = high.mean() - low.mean()
             pooled_std = np.sqrt(
-                ((len(low) - 1) * low.std(ddof=1) ** 2
-                 + (len(high) - 1) * high.std(ddof=1) ** 2)
+                ((len(low) - 1) * low.std(ddof=1) ** 2 + (len(high) - 1) * high.std(ddof=1) ** 2)
                 / (len(low) + len(high) - 2)
             )
             se = pooled_std * np.sqrt(1 / len(low) + 1 / len(high))
             tstat = diff / se if se > 1e-12 else np.nan
 
-        rows.append({
-            "stock_factor": fac,
-            "ic_low": means.get("low", np.nan),
-            "ic_mid": means.get("mid", np.nan),
-            "ic_high": means.get("high", np.nan),
-            "n_low": counts.get("low", 0),
-            "n_high": counts.get("high", 0),
-            "high_minus_low": diff,
-            "t_stat": tstat,
-        })
+        rows.append(
+            {
+                "stock_factor": fac,
+                "ic_low": means.get("low", np.nan),
+                "ic_mid": means.get("mid", np.nan),
+                "ic_high": means.get("high", np.nan),
+                "n_low": counts.get("low", 0),
+                "n_high": counts.get("high", 0),
+                "high_minus_low": diff,
+                "t_stat": tstat,
+            }
+        )
 
     return pd.DataFrame(rows).sort_values("t_stat", key=abs, ascending=False)
 
@@ -253,9 +279,11 @@ def main() -> None:
         keep_price=True,
     )
     stock_factors = list_factor_columns(panel)
-    print(f"   面板: {len(panel):,} 行, {panel['symbol'].nunique()} 只股票, "
-          f"{len(stock_factors)} 个命名因子, "
-          f"{panel['date'].nunique()} 个交易日")
+    print(
+        f"   面板: {len(panel):,} 行, {panel['symbol'].nunique()} 只股票, "
+        f"{len(stock_factors)} 个命名因子, "
+        f"{panel['date'].nunique()} 个交易日"
+    )
 
     # 2. Fetch option IV features.
     print(f"\n2) 获取 {args.underlying} 期权隐含波动率特征...")
@@ -281,9 +309,7 @@ def main() -> None:
     # 4. Single-factor evaluation.
     print("\n4) 单因子评估 (macro IV 特征: 与日均等权 target / target 横截面离散度的时序秩相关)...")
     eval_table = evaluate_iv_features(merged, iv_cols)
-    print(eval_table[[
-        "factor", "n_dates", "ts_corr_mkt", "ts_corr_disp"
-    ]].to_string(index=False))
+    print(eval_table[["factor", "n_dates", "ts_corr_mkt", "ts_corr_disp"]].to_string(index=False))
     eval_path = os.path.join(args.output_dir, "diag_option_iv_eval.csv")
     eval_table.to_csv(eval_path, index=False)
     print(f"   -> {eval_path}")
@@ -292,8 +318,13 @@ def main() -> None:
     print(f"\n5) Regime 分析 (按 {args.regime_factor} 分高/中/低三组)...")
     # Use a representative subset of stock factors for regime comparison.
     regime_candidates = [
-        "momentum_20", "momentum_5", "volatility_20", "turnover_rate",
-        "rsi_14", "price_to_ma_20", "macd_diff",
+        "momentum_20",
+        "momentum_5",
+        "volatility_20",
+        "turnover_rate",
+        "rsi_14",
+        "price_to_ma_20",
+        "macd_diff",
     ]
     regime_factors = [f for f in regime_candidates if f in stock_factors]
     regime_table = regime_ic_analysis(
@@ -316,17 +347,21 @@ def main() -> None:
     print("=" * 70)
     if not eval_table.empty and eval_table["ts_corr_mkt"].notna().any():
         best = eval_table.loc[eval_table["ts_corr_mkt"].abs().idxmax()]
-        print(f"与日均等权收益相关性最强的 IV 因子: {best['factor']} | "
-              f"ts_corr_mkt={best['ts_corr_mkt']:+.4f} | "
-              f"ts_corr_disp={best['ts_corr_disp']:+.4f}")
+        print(
+            f"与日均等权收益相关性最强的 IV 因子: {best['factor']} | "
+            f"ts_corr_mkt={best['ts_corr_mkt']:+.4f} | "
+            f"ts_corr_disp={best['ts_corr_disp']:+.4f}"
+        )
     else:
         print("无可用的 IV 因子时序相关指标")
     if not regime_table.empty:
         top_reg = regime_table.iloc[0]
-        print(f"Regime 效应最大因子: {top_reg['stock_factor']} | "
-              f"高IV IC={top_reg['ic_high']:+.4f} | "
-              f"低IV IC={top_reg['ic_low']:+.4f} | "
-              f"差={top_reg['high_minus_low']:+.4f} (t={top_reg['t_stat']:+.2f})")
+        print(
+            f"Regime 效应最大因子: {top_reg['stock_factor']} | "
+            f"高IV IC={top_reg['ic_high']:+.4f} | "
+            f"低IV IC={top_reg['ic_low']:+.4f} | "
+            f"差={top_reg['high_minus_low']:+.4f} (t={top_reg['t_stat']:+.2f})"
+        )
     print("=" * 70)
 
 

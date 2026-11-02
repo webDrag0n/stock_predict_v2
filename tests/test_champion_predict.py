@@ -6,7 +6,10 @@ train_end_date/promotion 不变）；pred_hist 定权状态跨"运行"连续。
 路径由 tests/conftest.py 统一处理；standalone 运行：
 PYTHONPATH=src:. uv run python tests/test_champion_predict.py
 """
+
 from __future__ import annotations
+
+import os
 
 import numpy as np
 import pandas as pd
@@ -18,8 +21,14 @@ from ensemble import IncrementalEnsemble
 from live import champion_predict_latest, predict_latest_with_ens
 
 FEATS = ["feature_00", "feature_01"]
-PARAMS = {"ensemble_models": "gbm_l2,ic_linear", "n_seeds": 1, "incr_trees": 5,
-          "rebuild_days": 10, "train_window": 30, "ic_window": 5}
+PARAMS = {
+    "ensemble_models": "gbm_l2,ic_linear",
+    "n_seeds": 1,
+    "incr_trees": 5,
+    "rebuild_days": 10,
+    "train_window": 30,
+    "ic_window": 5,
+}
 N_SYMS = 6
 
 
@@ -30,19 +39,29 @@ def _make_panel(n_dates: int = 70) -> pd.DataFrame:
     for d in dates:
         for i in range(N_SYMS):
             f0, f1 = rng.randn(), rng.randn()
-            rows.append({
-                "date": d, "symbol": f"S{i:03d}",
-                "feature_00": f0, "feature_01": f1,
-                C.TARGET: 0.01 * f0 + 0.005 * rng.randn(),
-                C.WEIGHT: 1.0,
-            })
+            rows.append(
+                {
+                    "date": d,
+                    "symbol": f"S{i:03d}",
+                    "feature_00": f0,
+                    "feature_01": f1,
+                    C.TARGET: 0.01 * f0 + 0.005 * rng.randn(),
+                    C.WEIGHT: 1.0,
+                }
+            )
     return pd.DataFrame(rows)
 
 
 def _trained_ens(panel: pd.DataFrame) -> IncrementalEnsemble:
-    ens = IncrementalEnsemble(FEATS, models=("gbm_l2", "ic_linear"),
-                              n_seeds=1, incr_trees=5, rebuild_days=10,
-                              train_window=30, ic_window=5)
+    ens = IncrementalEnsemble(
+        FEATS,
+        models=("gbm_l2", "ic_linear"),
+        n_seeds=1,
+        incr_trees=5,
+        rebuild_days=10,
+        train_window=30,
+        ic_window=5,
+    )
     ens.update(panel.dropna(subset=[C.TARGET]), force_full=True)
     return ens
 
@@ -55,8 +74,7 @@ def model_dir(tmp_path, monkeypatch):
 
 def _make_champion(panel, ens):
     sdir, manifest = model_store.stage_candidate(ens, FEATS, PARAMS)
-    model_store.promote(manifest["model_id"],
-                        promotion_record={"reason": "t", "decided_at": "d0"})
+    model_store.promote(manifest["model_id"], promotion_record={"reason": "t", "decided_at": "d0"})
     return manifest
 
 
@@ -88,10 +106,15 @@ def test_artifact_saved_back_with_fresh_weights(model_dir):
     rows = []
     for d in dates[:2]:
         for s in panel[panel["date"] == d]["symbol"]:
-            rows.append({"date": str(pd.Timestamp(d).date()), "symbol": s,
-                         "score": rng.randn(),
-                         "pred_gbm_l2": rng.randn(),
-                         "pred_ic_linear": rng.randn()})
+            rows.append(
+                {
+                    "date": str(pd.Timestamp(d).date()),
+                    "symbol": s,
+                    "score": rng.randn(),
+                    "pred_gbm_l2": rng.randn(),
+                    "pred_ic_linear": rng.randn(),
+                }
+            )
     pred_hist = pd.DataFrame(rows)
 
     today, info = champion_predict_latest(panel, pred_hist=pred_hist)
@@ -111,8 +134,9 @@ def test_artifact_saved_back_with_fresh_weights(model_dir):
     today2, info2 = champion_predict_latest(panel, pred_hist=pred_hist)
     loaded2 = model_store.load_champion()
     ens3, _ = loaded2
-    assert {k: list(v) for k, v in ens3._ic_hist.items()} == \
-        {k: list(v) for k, v in ens2._ic_hist.items()}, "重复打分导致 IC 队列漂移"
+    assert {k: list(v) for k, v in ens3._ic_hist.items()} == {
+        k: list(v) for k, v in ens2._ic_hist.items()
+    }, "重复打分导致 IC 队列漂移"
 
 
 def test_champion_predict_requires_champion(model_dir):
@@ -120,6 +144,34 @@ def test_champion_predict_requires_champion(model_dir):
     panel = _make_panel()
     with pytest.raises(ValueError, match="champion"):
         champion_predict_latest(panel, pred_hist=None)
+
+
+def test_gated_frozen_path_emits_progress(model_dir):
+    """run_gated_prediction 未触发重训的冻结分支：progress_cb 收到带
+    message 的进度事件（回归：_emit 第 4 个位置参数曾 TypeError 杀死会话）。"""
+    from live import run_gated_prediction
+
+    panel = _make_panel()
+    ens = _trained_ens(panel)
+    _make_champion(panel, ens)
+
+    events = []
+
+    def cb(phase, current, total, message="", **extras):
+        events.append((phase, message))
+
+    res = run_gated_prediction(
+        panel,
+        FEATS,
+        ensemble_params=dict(PARAMS),
+        adaptive=True,
+        gate_on=False,
+        risk_state_path=os.path.join(model_dir, "risk_state.json"),
+        progress_cb=cb,
+        log=None,
+    )
+    assert res["action"] == "frozen" and not res["fired"]
+    assert any("冻结" in ph for ph, _ in events)
 
 
 if __name__ == "__main__":

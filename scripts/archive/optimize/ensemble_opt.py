@@ -12,6 +12,7 @@ Compares, at cost level L0 (comm+stamp) and L4 (full real friction):
   - rank-ensemble (mean of per-date pctile ranks → one combined predictor)
   - mean-ensemble (mean of raw predictions)
 """
+
 from __future__ import annotations
 
 import os
@@ -25,20 +26,20 @@ sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src"))
 sys.path.insert(0, os.path.join(_PROJECT_ROOT, "scripts", "research"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from realistic_cost import (_load_oos, _positions_long_topk, _backtest,
-                            _metrics, SEEDS, TOPK, REBAL)
+from realistic_cost import _load_oos, _positions_long_topk, _backtest, _metrics, SEEDS, TOPK, REBAL
+
 
 def _build_ensemble(raw: list[pd.DataFrame], how: str) -> pd.DataFrame:
     """Combine seeds into one OOS frame. `how`='rank' averages per-date pctile
     ranks of prediction; 'mean' averages raw predictions. Grid is identical
     across seeds (verified), so we align by row order after a common sort."""
     base = raw[0].sort_values(["date", "symbol"]).reset_index(drop=True)
-    carry = ["date", "symbol", "responder_6", "return_1d",
-             "limit_flag", "pct_chg", "amount"]
+    carry = ["date", "symbol", "responder_6", "return_1d", "limit_flag", "pct_chg", "amount"]
     out = base[[c for c in carry if c in base.columns]].copy()
     if how == "mean":
-        preds = np.mean([df.sort_values(["date", "symbol"])
-                         ["prediction"].to_numpy() for df in raw], axis=0)
+        preds = np.mean(
+            [df.sort_values(["date", "symbol"])["prediction"].to_numpy() for df in raw], axis=0
+        )
         out["prediction"] = preds
         return out
     # rank: per-date percentile rank each seed, then average the ranks
@@ -53,8 +54,10 @@ def _build_ensemble(raw: list[pd.DataFrame], how: str) -> pd.DataFrame:
 
 
 def main() -> None:
-    print(f"Seed-rank ensemble 优化 | ret_weighted 全市场 | topk={TOPK} "
-          f"rebal={REBAL}d | seeds={list(SEEDS)}\n")
+    print(
+        f"Seed-rank ensemble 优化 | ret_weighted 全市场 | topk={TOPK} "
+        f"rebal={REBAL}d | seeds={list(SEEDS)}\n"
+    )
     raw = [_load_oos(s) for s in SEEDS]
 
     variants: dict[str, pd.DataFrame] = {f"seed{s}": r for s, r in zip(SEEDS, raw)}
@@ -68,9 +71,11 @@ def main() -> None:
         for name, p in pos.items():
             m = _backtest(p, lvl)
             rows.append({"variant": name, "level": f"L{lvl}", **m})
-            print(f"L{lvl} {name:9s} α={m['alpha_ann']*100:+6.2f}% "
-                  f"NW-t={m['nw_t']:+.2f} Sharpe={m['sharpe']:+.2f} "
-                  f"累计={m['cum']*100:+6.1f}% MaxDD={m['maxdd']*100:.1f}%")
+            print(
+                f"L{lvl} {name:9s} α={m['alpha_ann']*100:+6.2f}% "
+                f"NW-t={m['nw_t']:+.2f} Sharpe={m['sharpe']:+.2f} "
+                f"累计={m['cum']*100:+6.1f}% MaxDD={m['maxdd']*100:.1f}%"
+            )
         # seed-mean-of-curves at this level (current reporting convention)
         series = [_backtest(pos[f"seed{s}"], lvl, return_series=True) for s in SEEDS]
         net = np.mean([s["net_series"] for s in series], axis=0)
@@ -78,9 +83,11 @@ def main() -> None:
         dates = series[0]["dates"]
         m = _metrics(net, bench, dates, {"comm": 0, "impact": 0, "spread": 0})
         rows.append({"variant": "seed_meancurve", "level": f"L{lvl}", **m})
-        print(f"L{lvl} {'meancurve':9s} α={m['alpha_ann']*100:+6.2f}% "
-              f"NW-t={m['nw_t']:+.2f} Sharpe={m['sharpe']:+.2f} "
-              f"累计={m['cum']*100:+6.1f}% MaxDD={m['maxdd']*100:.1f}%")
+        print(
+            f"L{lvl} {'meancurve':9s} α={m['alpha_ann']*100:+6.2f}% "
+            f"NW-t={m['nw_t']:+.2f} Sharpe={m['sharpe']:+.2f} "
+            f"累计={m['cum']*100:+6.1f}% MaxDD={m['maxdd']*100:.1f}%"
+        )
         print()
 
     out = pd.DataFrame(rows)

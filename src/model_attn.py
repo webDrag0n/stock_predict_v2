@@ -10,7 +10,7 @@ GBM / 线性 / lambdarank 都已试过（见 optimize_accuracy.py），OOS IC �
 结构
 ----
   per-date 截面（一天的全部股票当作一个【集合】，非序列 → 无位置编码）：
-    factor z-score (99维, 按日截面，复用 walkforward._cross_sectional_norm，防泄露)
+    factor z-score (99维, 按日截面，复用 walkforward.cross_sectional_norm，防泄露)
       → Linear 投影到 d_model
       → N × TransformerEncoder(self-attention over stocks in the day)
       → Linear → 每股一个标量分
@@ -20,12 +20,13 @@ GBM / 线性 / lambdarank 都已试过（见 optimize_accuracy.py），OOS IC �
 防泄露
 ------
 - 训练只用 train 段；test 段只前向、不回传。
-- 截面 z-score 每天只用当日自身横截面（_cross_sectional_norm 已保证）。
+- 截面 z-score 每天只用当日自身横截面（cross_sectional_norm 已保证）。
 - 目标 = C.TARGET（与 GBM 同口径）→ 精度可直接对照。
 
-签名与 walkforward._train_predict 的各 leg 一致：attn_predict(train, test, feat_cols)
+签名与 walkforward.train_predict 的各 leg 一致：attn_predict(train, test, feat_cols)
 返回与 test 行对齐的预测分（排序空间）。CPU 无 GPU 时自动降级（慢，仅供冒烟）。
 """
+
 from __future__ import annotations
 
 import os
@@ -33,13 +34,14 @@ import numpy as np
 import pandas as pd
 
 import config as C
-from walkforward import _cross_sectional_norm
+from walkforward import cross_sectional_norm
 
 # torch 是可选依赖（pyproject 的 attn extra：uv sync --extra attn）。
 # 缺失时本模块仍可 import（ensemble/walkforward 不会崩），attn leg 由调用方
 # 按 TORCH_AVAILABLE 判定为不可用并优雅降级；直接调用入口函数则报清晰错误。
 try:
     import torch
+
     TORCH_AVAILABLE = True
 except ImportError:
     torch = None
@@ -48,8 +50,7 @@ except ImportError:
 
 def _require_torch():
     if not TORCH_AVAILABLE:
-        raise ImportError(
-            "attn leg 需要 torch（可选依赖）。安装：uv sync --extra attn")
+        raise ImportError("attn leg 需要 torch（可选依赖）。安装：uv sync --extra attn")
 
 
 def _device():
@@ -57,29 +58,31 @@ def _device():
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _build_model(n_feat: int, d_model: int, n_heads: int, n_layers: int,
-                 dropout: float):
-    import torch
+def _build_model(n_feat: int, d_model: int, n_heads: int, n_layers: int, dropout: float):
     import torch.nn as nn
 
     class CrossSectionalAttn(nn.Module):
         """一天的股票集合 → 每股一个排序分。批维=1天，序列维=当日股票数。"""
+
         def __init__(self):
             super().__init__()
-            self.inp = nn.Sequential(
-                nn.Linear(n_feat, d_model), nn.GELU(), nn.LayerNorm(d_model))
+            self.inp = nn.Sequential(nn.Linear(n_feat, d_model), nn.GELU(), nn.LayerNorm(d_model))
             layer = nn.TransformerEncoderLayer(
-                d_model=d_model, nhead=n_heads, dim_feedforward=d_model * 2,
-                dropout=dropout, batch_first=True, activation="gelu")
+                d_model=d_model,
+                nhead=n_heads,
+                dim_feedforward=d_model * 2,
+                dropout=dropout,
+                batch_first=True,
+                activation="gelu",
+            )
             self.enc = nn.TransformerEncoder(layer, num_layers=n_layers)
-            self.head = nn.Sequential(
-                nn.LayerNorm(d_model), nn.Linear(d_model, 1))
+            self.head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, 1))
 
         def forward(self, x, key_padding_mask=None):
             # x: (B=1, S_stocks, n_feat)
             h = self.inp(x)
             h = self.enc(h, src_key_padding_mask=key_padding_mask)
-            return self.head(h).squeeze(-1)        # (1, S)
+            return self.head(h).squeeze(-1)  # (1, S)
 
     return CrossSectionalAttn()
 
@@ -90,6 +93,7 @@ def _ic_loss(pred, target, eps=1e-6):
     用标准化后的 Pearson 相关近似 RankIC（可微）；最大化相关 = 最小化 1−corr。
     """
     import torch
+
     p = pred - pred.mean()
     t = target - target.mean()
     denom = torch.sqrt((p * p).sum() * (t * t).sum()) + eps
@@ -108,12 +112,12 @@ def _by_date(dates, uniq):
     return idx
 
 
-def fit_attn(train: pd.DataFrame, feat_cols: list[str],
-             params: dict | None = None):
+def fit_attn(train: pd.DataFrame, feat_cols: list[str], params: dict | None = None):
     """训练截面注意力，返回 (model, cfg)。供 IncrementalEnsemble 在全量重建时调用，
     之后 predict_attn 复用同一 model（训练贵、预测廉，必须分离）。"""
     _require_torch()
     import torch
+
     p = dict(params or {})
     d_model = int(p.get("d_model", os.environ.get("ATTN_DMODEL", "128")))
     n_heads = int(p.get("n_heads", os.environ.get("ATTN_HEADS", "4")))
@@ -125,9 +129,10 @@ def fit_attn(train: pd.DataFrame, feat_cols: list[str],
     patience = int(p.get("patience", os.environ.get("ATTN_PATIENCE", "8")))
     seed = int(p.get("seed", C.RANDOM_STATE))
     dev = _device()
-    torch.manual_seed(seed); np.random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
-    Xtr_all, _ = _cross_sectional_norm(train, feat_cols)
+    Xtr_all, _ = cross_sectional_norm(train, feat_cols)
     ytr_all = train[C.TARGET].to_numpy(np.float64)
     tr_dates = train["date"].to_numpy()
     uniq_tr = np.sort(pd.unique(tr_dates))
@@ -136,9 +141,11 @@ def fit_attn(train: pd.DataFrame, feat_cols: list[str],
     n_val = max(int(len(uniq_tr) * 0.15), 1)
     emb = int(getattr(C, "EMBARGO_DAYS", 20))
     if len(uniq_tr) > n_val + emb + 5:
-        fit_dates = uniq_tr[: -(n_val + emb)]; val_dates = uniq_tr[-n_val:]
+        fit_dates = uniq_tr[: -(n_val + emb)]
+        val_dates = uniq_tr[-n_val:]
     else:
-        fit_dates = uniq_tr; val_dates = uniq_tr[-n_val:]
+        fit_dates = uniq_tr
+        val_dates = uniq_tr[-n_val:]
 
     model = _build_model(len(feat_cols), d_model, n_heads, n_layers, dropout).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
@@ -147,7 +154,8 @@ def fit_attn(train: pd.DataFrame, feat_cols: list[str],
         ii = tr_idx[d]
         if len(ii) < 10:
             return None
-        X = Xtr_all[ii]; y = ytr_all[ii]
+        X = Xtr_all[ii]
+        y = ytr_all[ii]
         ok = np.isfinite(y)
         if ok.sum() < 10:
             return None
@@ -170,8 +178,11 @@ def fit_attn(train: pd.DataFrame, feat_cols: list[str],
             opt.step()
         model.eval()
         with torch.no_grad():
-            ics = [1.0 - float(_ic_loss(model(t[0]).squeeze(0), t[1]))
-                   for d in val_dates if (t := _day(d)) is not None]
+            ics = [
+                1.0 - float(_ic_loss(model(t[0]).squeeze(0), t[1]))
+                for d in val_dates
+                if (t := _day(d)) is not None
+            ]
             val_ic = float(np.mean(ics)) if ics else -1e9
         if val_ic > best_val + 1e-5:
             best_val, bad = val_ic, 0
@@ -190,24 +201,24 @@ def predict_attn(model_cfg, test: pd.DataFrame, feat_cols: list[str]) -> np.ndar
     """用已训练 model 对 test 预测（每天一个截面前向）。返回与 test 行对齐的分。"""
     _require_torch()
     import torch
+
     model, cfg = model_cfg
     dev = cfg["dev"]
-    Xte_all, _ = _cross_sectional_norm(test, feat_cols)
+    Xte_all, _ = cross_sectional_norm(test, feat_cols)
     te_dates = test["date"].to_numpy()
     out = np.zeros(len(test), dtype=np.float64)
     te_idx = _by_date(te_dates, np.sort(pd.unique(te_dates)))
     model.eval()
     with torch.no_grad():
         for d, ii in te_idx.items():
-            xt = torch.as_tensor(Xte_all[ii], dtype=torch.float32,
-                                 device=dev).unsqueeze(0)
+            xt = torch.as_tensor(Xte_all[ii], dtype=torch.float32, device=dev).unsqueeze(0)
             out[ii] = model(xt).squeeze(0).cpu().numpy()
     return out
 
 
-def attn_predict(train: pd.DataFrame, test: pd.DataFrame,
-                 feat_cols: list[str], params: dict | None = None) -> np.ndarray:
+def attn_predict(
+    train: pd.DataFrame, test: pd.DataFrame, feat_cols: list[str], params: dict | None = None
+) -> np.ndarray:
     """walkforward 便捷封装：训练 + 预测一步到位（与各 leg 签名一致）。"""
     mc = fit_attn(train, feat_cols, params)
     return predict_attn(mc, test, feat_cols)
-

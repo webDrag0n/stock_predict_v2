@@ -25,13 +25,15 @@
   在 date 当天前瞻 FORWARD_WINDOW 天，只有 asof 走到 date+FORWARD_WINDOW 才已知）。
   调用方（backtest_daily / live）负责传入已切好的成熟训练帧。
 - 定权用的 IC 也只在【已成熟】的历史预测日上计算，绝不偷看未成熟标签。
-- 截面归一化（_cross_sectional_norm）每天只用当日自身横截面，逐项无泄露。
+- 截面归一化（cross_sectional_norm）每天只用当日自身横截面，逐项无泄露。
 
 复用 walkforward 的截面归一化、ic_linear、size-neutral 与超参，保证与已验证回测
 同分布。
 """
+
 from __future__ import annotations
 
+import logging
 from collections import deque
 
 import numpy as np
@@ -40,11 +42,18 @@ import lightgbm as lgb
 
 import config as C
 
+logger = logging.getLogger(__name__)
+
 # 复用 walkforward 的、已验证的处理函数，保证同分布；GBM 超参唯一真相源也在
 # walkforward（GBM_PARAMS，sklearn 命名），这里经 GBM_PARAMS_NATIVE 映射成
 # 低层 lgb.train 命名以支持 init_model 续训，两处不再各自手工维护。
-from walkforward import (_cross_sectional_norm, _linear_fit, _linear_score,
-                         _per_date_rank, GBM_PARAMS_NATIVE)
+from walkforward import (
+    cross_sectional_norm,
+    linear_fit,
+    linear_score,
+    per_date_rank,
+    GBM_PARAMS_NATIVE,
+)
 
 _GBM_PARAMS = GBM_PARAMS_NATIVE
 
@@ -54,8 +63,34 @@ def _n_threads(n_rows: int) -> int:
     数据集会空转数分钟）。全市场全量重建（百万行）用满核；小增量按 ~每核 2 万行
     粗略分配，至少 1、至多机器核数。"""
     import os as _os
+
     ncpu = _os.cpu_count() or 4
     return int(max(1, min(ncpu, n_rows // 20000 + 1)))
+
+
+def _release_allocator_cache() -> None:
+    """把各分配器缓存的空闲页归还 OS（不改变任何活对象）。
+
+    GBM 全量训练 / 截面归一化之后，glibc arena 与 pyarrow mimalloc 池里会滞留
+    数 GB 已释放但未归还的页（实测全市场训练后 RSS 比活对象高 ~5GB），
+    直接抬高后续 ic_linear 拟合阶段的峰值。失败静默（非 glibc/无 pyarrow）。
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+    try:
+        import pyarrow as pa
+
+        pa.default_memory_pool().release_unused()
+    except Exception:
+        pass
+
 
 # 默认模型集合：两类 GBM（可续训）+ 线性（每次轻量重算）
 DEFAULT_MODELS = ("gbm_l2", "gbm_ret_weighted", "ic_linear")
@@ -66,8 +101,7 @@ def _ret_weighted_sample_w(train: pd.DataFrame) -> np.ndarray:
 
     叠加已有的 inverse-vol/recency 权重（若存在）。仅用训练帧自身的前瞻收益排名，
     无泄露。"""
-    rnk = (train.groupby("date", group_keys=False)[C.TARGET]
-                .rank(pct=True)).to_numpy()
+    rnk = (train.groupby("date", group_keys=False)[C.TARGET].rank(pct=True)).to_numpy()
     w = 0.2 + np.nan_to_num(rnk, nan=0.5)
     if C.WEIGHT in train:
         w = w * train[C.WEIGHT].to_numpy(dtype=np.float64)
@@ -90,10 +124,16 @@ class IncrementalEnsemble:
             ens.observe(t, today, preds)                           # 存预测供日后定权
     """
 
-    def __init__(self, feat_cols: list[str], models: tuple[str, ...] = None,
-                 n_seeds: int = None, incr_trees: int = None,
-                 rebuild_days: int = None, train_window: int = None,
-                 ic_window: int = None):
+    def __init__(
+        self,
+        feat_cols: list[str],
+        models: tuple[str, ...] = None,
+        n_seeds: int = None,
+        incr_trees: int = None,
+        rebuild_days: int = None,
+        train_window: int = None,
+        ic_window: int = None,
+    ):
         self.feat_cols = list(feat_cols)
         # 模型清单优先级：显式参数 > config.ENSEMBLE_MODELS（env 覆盖在 config
         # import 时读取，单一来源）> 内置默认。
@@ -105,28 +145,31 @@ class IncrementalEnsemble:
         # 剔除该 leg 并警告一次，而非等训练时才在 fit_attn 里炸 ImportError。
         if "attn" in self.models:
             from model_attn import TORCH_AVAILABLE
+
             if not TORCH_AVAILABLE:
-                print("[ensemble] 警告: 未安装 torch，attn leg 已剔除"
-                      "（安装：uv sync --extra attn）")
+                logger.warning(
+                    "[ensemble] 警告: 未安装 torch，attn leg 已剔除"
+                    "（安装：uv sync --extra attn）"
+                )
                 self.models = tuple(m for m in self.models if m != "attn")
                 if not self.models:
-                    print("[ensemble] 警告: 剔除 attn 后无可用模型，退回默认集合 "
-                          f"{DEFAULT_MODELS}")
+                    logger.warning(
+                        "[ensemble] 警告: 剔除 attn 后无可用模型，退回默认集合 " f"{DEFAULT_MODELS}"
+                    )
                     self.models = DEFAULT_MODELS
         self.n_seeds = int(n_seeds if n_seeds is not None else C.ENSEMBLE_N_SEEDS)
         self.incr_trees = int(incr_trees if incr_trees is not None else C.INCR_TREES)
-        self.rebuild_days = int(rebuild_days if rebuild_days is not None
-                                else C.REBUILD_DAYS)
-        self.train_window = int(train_window if train_window is not None
-                                else C.TRAIN_WINDOW)
+        self.rebuild_days = int(rebuild_days if rebuild_days is not None else C.REBUILD_DAYS)
+        self.train_window = int(train_window if train_window is not None else C.TRAIN_WINDOW)
         self.ic_window = int(ic_window if ic_window is not None else C.IC_WINDOW)
 
         # 各 GBM 模型的 booster 列表（多 seed），ic_linear 不持 booster
         self._boosters: dict[str, list[lgb.Booster]] = {
-            m: [] for m in self.models if m.startswith("gbm")}
-        self._attn_model = None      # attn leg：全量重建时训练，期间复用
+            m: [] for m in self.models if m.startswith("gbm")
+        }
+        self._attn_model = None  # attn leg：全量重建时训练，期间复用
         self._updates_since_rebuild = 0
-        self._last_trained_date = None      # 已续训到的最新成熟标签日（防重复 boost）
+        self._last_trained_date = None  # 已续训到的最新成熟标签日（防重复 boost）
         self._last_train_frame: pd.DataFrame | None = None  # 供 ic_linear 取训练帧
         # ic_linear 训练侧缓存（因子集 + IC 权重 + NL/IX 变换列选择）：按
         # REBUILD_DAYS 节奏刷新（全量重建时置 None），每日续训期间复用，
@@ -135,42 +178,60 @@ class IncrementalEnsemble:
         self._linear_fit_date = None
 
         # 滚动 IC 定权：每个模型一个尾部 IC 队列；预测历史供日后成熟时打分
-        self._ic_hist: dict[str, deque] = {
-            m: deque(maxlen=self.ic_window) for m in self.models}
-        self.weights: dict[str, float] = {m: 1.0 / len(self.models)
-                                          for m in self.models}
+        self._ic_hist: dict[str, deque] = {m: deque(maxlen=self.ic_window) for m in self.models}
+        self.weights: dict[str, float] = {m: 1.0 / len(self.models) for m in self.models}
         # 是否已有过一次【数据驱动】的定权（EMA 平滑只对之后的更新生效，
         # 避免首次定权被初始等权稀释——如实盘路径只 refresh 一次）。
         self._w_initialized = False
         self._pred_hist: dict[object, pd.DataFrame] = {}  # date -> [symbol×model preds]
         self._scored_dates: set = set()
 
+    def _fit_linear_now(self, win: pd.DataFrame) -> None:
+        """全量重建后立即拟合 ic_linear 训练侧状态（原为 predict 时惰性拟合）。
+
+        拟合只依赖 win（同日同帧，结果与惰性路径一致）；用毕即弃训练帧，
+        避免 _last_train_frame（全市场窗口帧，GB 级）常驻到 predict。
+        拟合前归还分配器缓存页：GBM 训练滞留的空闲页会叠加进拟合期峰值。"""
+        _release_allocator_cache()
+        self._linear_state = linear_fit(win, self.feat_cols)
+        self._linear_fit_date = win["date"].max()
+        self._last_train_frame = None
+        _release_allocator_cache()
+
     # ------------------------------------------------------------------ train
-    def update(self, train_frame: pd.DataFrame, asof_date=None,
-               force_full: bool = False) -> dict:
+    def update(self, train_frame: pd.DataFrame, asof_date=None, force_full: bool = False) -> dict:
         """续训（或周期全量重建）各 GBM。train_frame 必须只含【已成熟标签】行。
 
-        返回 {model: n_trees} 诊断信息。ic_linear 不在此训练：其训练侧状态
-        （IC 权重等）在 predict 时按需拟合并缓存，随全量重建一起刷新。"""
-        train = train_frame.dropna(subset=[C.TARGET])
+        返回 {model: n_trees} 诊断信息。ic_linear 训练侧状态（IC 权重等）随
+        全量重建一起刷新（重建时立即重拟合；每日续训期间复用缓存）。"""
+        # 无 NaN 标签时免拷贝（全市场成熟帧为 GB 级，dropna 会整体复制一份）
+        if train_frame[C.TARGET].isna().any():
+            train = train_frame.dropna(subset=[C.TARGET])
+        else:
+            train = train_frame
         if train.empty:
             return {}
         # 尾部 TRAIN_WINDOW 天用于全量重建 / 线性 IC 权重
         dates = np.sort(train["date"].unique())
-        win_dates = set(dates[-self.train_window:].tolist())
-        win = train[train["date"].isin(win_dates)]
-        self._last_train_frame = win
+        if len(dates) > self.train_window:
+            win_dates = set(dates[-self.train_window :].tolist())
+            win = train[train["date"].isin(win_dates)]
+        else:
+            win = train  # 已在窗口内（实盘调用方已按尾部窗口预裁剪），免拷贝
 
         # 显式判空：无 gbm 腿时 self._boosters 为空 dict，all() 空集为 True
         # 会导致每天都走全量重建分支（空转），所以这里要求非空。
-        do_full = (force_full or self._updates_since_rebuild >= self.rebuild_days
-                   or (bool(self._boosters)
-                       and all(len(self._boosters[m]) == 0 for m in self._boosters)))
+        do_full = (
+            force_full
+            or self._updates_since_rebuild >= self.rebuild_days
+            or (bool(self._boosters) and all(len(self._boosters[m]) == 0 for m in self._boosters))
+        )
         info = {}
         # attn leg：仅在全量重建时（重）训练（神经网不做增量），期间复用模型。
         if "attn" in self.models and (do_full or self._attn_model is None):
             try:
                 from model_attn import fit_attn
+
                 self._attn_model = fit_attn(win, self.feat_cols)
                 info["attn"] = "fit"
             except Exception as e:
@@ -181,7 +242,11 @@ class IncrementalEnsemble:
                 info[m] = f"full×{len(self._boosters[m])}"
             self._updates_since_rebuild = 0
             self._last_trained_date = dates[-1]
-            self._linear_state = None        # 训练分布已重置，IC 权重缓存失效
+            if "ic_linear" in self.models:
+                self._fit_linear_now(win)
+            else:
+                self._linear_state = None  # 训练分布已重置，IC 权重缓存失效
+                self._last_train_frame = None
             return info
 
         # 增量：只在【上次续训之后新成熟】的日期上续树（绝不重复 boost 同一批行，
@@ -190,6 +255,10 @@ class IncrementalEnsemble:
             new_dates = dates
         else:
             new_dates = dates[dates > self._last_trained_date]
+        # _last_train_frame 仅供 ic_linear 在缓存失效时惰性重拟合（见 predict）；
+        # 缓存有效时保留它只会让 GB 级窗口帧常驻，故按需保留。
+        if self._linear_state is None and "ic_linear" in self.models:
+            self._last_train_frame = win
         if len(new_dates) == 0:
             self._updates_since_rebuild += 1
             return {m: "no-new" for m in self._boosters}
@@ -197,15 +266,18 @@ class IncrementalEnsemble:
         # 两次重建之间总树数硬上限 FULL_TREES×2，超限提前触发全量重建，
         # 防止增量漂移无界累积。
         n_boost = self.incr_trees * len(new_dates)
-        cur_trees = max((b.num_trees() for bl in self._boosters.values() for b in bl),
-                        default=0)
+        cur_trees = max((b.num_trees() for bl in self._boosters.values() for b in bl), default=0)
         if cur_trees > 0 and cur_trees + n_boost > C.FULL_TREES * 2:
             for m in self._boosters:
                 self._boosters[m] = self._fit_full(win, m)
                 info[m] = f"full×{len(self._boosters[m])}(tree-cap)"
             self._updates_since_rebuild = 0
             self._last_trained_date = dates[-1]
-            self._linear_state = None
+            if "ic_linear" in self.models:
+                self._fit_linear_now(win)
+            else:
+                self._linear_state = None
+                self._last_train_frame = None
             return info
         incr = train[train["date"].isin(set(new_dates.tolist()))]
         for m in self._boosters:
@@ -215,8 +287,11 @@ class IncrementalEnsemble:
         self._last_trained_date = dates[-1]
         return info
 
-    def _make_dataset(self, frame: pd.DataFrame, model: str) -> lgb.Dataset:
-        X, _ = _cross_sectional_norm(frame, self.feat_cols)
+    def _make_xyw(
+        self, frame: pd.DataFrame, model: str
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+        """截面归一化特征 + 标签 + 样本权重（_make_dataset 与 _fit_full 共用）。"""
+        X, _ = cross_sectional_norm(frame, self.feat_cols)
         y = frame[C.TARGET].to_numpy(dtype=np.float64)
         if model == "gbm_ret_weighted":
             w = _ret_weighted_sample_w(frame)
@@ -224,45 +299,108 @@ class IncrementalEnsemble:
             w = frame[C.WEIGHT].to_numpy(dtype=np.float64)
         else:
             w = None
+        return X, y, w
+
+    def _make_dataset(
+        self, frame: pd.DataFrame, model: str, reference: lgb.Dataset | None = None
+    ) -> lgb.Dataset:
+        X, y, w = self._make_xyw(frame, model)
         # free_raw_data 保持默认 True：construct 后释放原始 X（全市场训练帧
         # ~2.7GB/腿）。续训经由 lgb.train(init_model=booster) 在新 Dataset 上进行，
         # 不需要旧 Dataset 的原始数据（已实测验证）。
-        return lgb.Dataset(X, label=y, weight=w)
+        return lgb.Dataset(X, label=y, weight=w, reference=reference)
 
     def _fit_full(self, frame: pd.DataFrame, model: str) -> list[lgb.Booster]:
-        """全量重建：在尾部 TRAIN_WINDOW 帧上从零训练 n_seeds 个 booster。"""
+        """全量重建：在尾部 TRAIN_WINDOW 帧上从零训练 n_seeds 个 booster。
+
+        切尾部 15% 交易日作验证集（与拟合段之间隔 EMBARGO_DAYS 防标签重叠，
+        同 walkforward.gbm_l2_predict 的切法），early_stopping(50) 封顶
+        FULL_TREES 棵树——数据上无增益时提前停，树数可少于 FULL_TREES
+        （下游预测/续训/state_dict 均按 booster 实际树数处理，无固定树数假设）；
+        历史太短切不出验证集时退回固定 FULL_TREES。
+
+        内存：截面归一化/标签/权重对整个 frame 只算一次，fit/val 用按日
+        连续的前缀/后缀【视图】切片（归一化与样本权重均逐日自包含，整帧
+        计算后按行切与先切再算逐位等价），避免 fit/val 两份 DataFrame 拷贝
+        与两次归一化（全市场窗口下省 ~4GB 峰值）。"""
         n_full = C.FULL_TREES
         nt = _n_threads(len(frame))
         # _make_dataset 含逐日截面归一化，开销不小：各 seed 共享同一份 Dataset
         # （仅 seed/bagging_seed 不同），不再每 seed 重复归一化。
-        ds = self._make_dataset(frame, model)
+        dates = np.sort(frame["date"].unique())
+        n_val = max(int(len(dates) * 0.15), 1)
+        if len(dates) > n_val + C.EMBARGO_DAYS + 5:
+            # 视图切片要求同日行连续；调用方面板均按 date 排序，病态输入才排序
+            if not frame["date"].is_monotonic_increasing:
+                frame = frame.sort_values("date", kind="mergesort")
+            X, y, w = self._make_xyw(frame, model)
+            d = frame["date"].to_numpy()
+            i_fit = int(np.searchsorted(d, dates[-(n_val + C.EMBARGO_DAYS)]))
+            i_val = int(np.searchsorted(d, dates[-n_val]))
+            ds = lgb.Dataset(
+                X[:i_fit], label=y[:i_fit], weight=w[:i_fit] if w is not None else None
+            )
+            val_ds = lgb.Dataset(
+                X[i_val:],
+                label=y[i_val:],
+                weight=w[i_val:] if w is not None else None,
+                reference=ds,
+            )
+        else:
+            ds = self._make_dataset(frame, model)
+            val_ds = None
         boosters = []
         for s in range(self.n_seeds):
-            params = dict(_GBM_PARAMS, seed=C.RANDOM_STATE + s,
-                          bagging_seed=C.RANDOM_STATE + s, num_threads=nt)
+            params = dict(
+                _GBM_PARAMS,
+                seed=C.RANDOM_STATE + s,
+                bagging_seed=C.RANDOM_STATE + s,
+                num_threads=nt,
+            )
+            callbacks = [lgb.early_stopping(50, verbose=False)] if val_ds is not None else None
             # keep_training_booster=False：booster 不持有训练 Dataset 引用，
             # 否则 3 腿各自的全量 Dataset（binned+raw，数 GB）会被常驻保留。
             # 续训用 lgb.train(init_model=bst) 不需要旧训练数据（已实测）。
-            bst = lgb.train(params, ds, num_boost_round=n_full,
-                            keep_training_booster=False)
+            bst = lgb.train(
+                params,
+                ds,
+                num_boost_round=n_full,
+                valid_sets=[val_ds] if val_ds is not None else None,
+                callbacks=callbacks,
+                keep_training_booster=False,
+            )
             boosters.append(bst)
+        # 腿间归还分配器缓存：上一腿的 X/分箱数据已随 Dataset 释放引用，
+        # 但空闲页滞留 glibc/arrow 池，会叠加进下一腿（或 ic_linear）的峰值
+        del ds, val_ds
+        _release_allocator_cache()
         return boosters
 
-    def _fit_incremental(self, frame: pd.DataFrame, model: str,
-                         num_boost_round: int) -> list[lgb.Booster]:
+    def _fit_incremental(
+        self, frame: pd.DataFrame, model: str, num_boost_round: int
+    ) -> list[lgb.Booster]:
         """续训：在新成熟行上接着昨日 booster 再长 num_boost_round 棵树
         （= INCR_TREES × 新成熟天数，由 update 计算）。"""
         prev = self._boosters.get(model) or []
         if frame.empty or not prev:
             return prev or self._fit_full(frame, model)
         nt = _n_threads(len(frame))
-        ds = self._make_dataset(frame, model)   # 各 seed 共享，见 _fit_full
+        ds = self._make_dataset(frame, model)  # 各 seed 共享，见 _fit_full
         boosters = []
         for s, base in enumerate(prev):
-            params = dict(_GBM_PARAMS, seed=C.RANDOM_STATE + s,
-                          bagging_seed=C.RANDOM_STATE + s, num_threads=nt)
-            bst = lgb.train(params, ds, num_boost_round=num_boost_round,
-                            init_model=base, keep_training_booster=False)
+            params = dict(
+                _GBM_PARAMS,
+                seed=C.RANDOM_STATE + s,
+                bagging_seed=C.RANDOM_STATE + s,
+                num_threads=nt,
+            )
+            bst = lgb.train(
+                params,
+                ds,
+                num_boost_round=num_boost_round,
+                init_model=base,
+                keep_training_booster=False,
+            )
             boosters.append(bst)
         return boosters
 
@@ -278,9 +416,8 @@ class IncrementalEnsemble:
                     out[m] = np.zeros(len(test_frame))
                     continue
                 if Xte is None:
-                    Xte, _ = _cross_sectional_norm(test_frame, self.feat_cols)
-                preds = [np.asarray(b.predict(Xte), dtype=np.float64).ravel()
-                         for b in boosters]
+                    Xte, _ = cross_sectional_norm(test_frame, self.feat_cols)
+                preds = [np.asarray(b.predict(Xte), dtype=np.float64).ravel() for b in boosters]
                 out[m] = np.mean(preds, axis=0)
             elif m == "ic_linear":
                 # 训练侧状态（因子集 + IC 权重 + NL/IX 变换列选择）按
@@ -294,15 +431,15 @@ class IncrementalEnsemble:
                     out[m] = np.zeros(len(test_frame))
                 else:
                     if self._linear_state is None:
-                        self._linear_state = _linear_fit(self._last_train_frame,
-                                                         self.feat_cols)
+                        self._linear_state = linear_fit(self._last_train_frame, self.feat_cols)
                         self._linear_fit_date = self._last_train_frame["date"].max()
-                    out[m] = _linear_score(test_frame, self._linear_state)
+                    out[m] = linear_score(test_frame, self._linear_state)
             elif m == "attn":
                 if self._attn_model is None:
                     out[m] = np.zeros(len(test_frame))
                 else:
                     from model_attn import predict_attn
+
                     out[m] = predict_attn(self._attn_model, test_frame, self.feat_cols)
             else:
                 out[m] = np.zeros(len(test_frame))
@@ -317,12 +454,11 @@ class IncrementalEnsemble:
             w = max(self.weights.get(m, 0.0), 0.0)
             if w <= 0:
                 continue
-            score += (w / total_w) * _per_date_rank(p, dates)
+            score += (w / total_w) * per_date_rank(p, dates)
         return score
 
     # ------------------------------------------------------- weight bookkeeping
-    def observe(self, date, test_frame: pd.DataFrame,
-                preds: dict[str, np.ndarray]) -> None:
+    def observe(self, date, test_frame: pd.DataFrame, preds: dict[str, np.ndarray]) -> None:
         """存下某交易日各模型的预测（按 symbol 索引），供其标签成熟后打分定权。"""
         df = pd.DataFrame({"symbol": test_frame["symbol"].to_numpy()})
         for m, p in preds.items():
@@ -337,11 +473,11 @@ class IncrementalEnsemble:
         作为该模型在 d 的日度 IC，推入尾部 IC_WINDOW 队列。权重 = 尾部 IC 均值
         截断 ≥0 后归一；全为非正则等权。无泄露：只用已成熟标签。"""
         from scipy import stats
+
         fw = getattr(C, "FORWARD_WINDOW", 20)
         # 哪些历史预测日已成熟且没打过分
         mature_cut = self._date_minus(panel, asof_date, fw)
-        pend = [d for d in self._pred_hist
-                if d not in self._scored_dates and d <= mature_cut]
+        pend = [d for d in self._pred_hist if d not in self._scored_dates and d <= mature_cut]
         if not pend:
             self._recompute_weights()
             return self.weights
@@ -360,7 +496,7 @@ class IncrementalEnsemble:
                 if m not in joined.columns or joined[m].nunique() < 2:
                     continue
                 ic = stats.spearmanr(joined[m], joined["_y"]).correlation
-                if ic == ic:                       # not NaN
+                if ic == ic:  # not NaN
                     self._ic_hist[m].append(float(ic))
             self._scored_dates.add(d)
             # 控内存：打过分的预测可丢弃
@@ -393,8 +529,9 @@ class IncrementalEnsemble:
         hl = float(C.IC_WEIGHT_EMA_HALFLIFE)
         if hl > 0 and self._w_initialized:
             a = 1.0 - 0.5 ** (1.0 / hl)
-            self.weights = {m: (1.0 - a) * self.weights.get(m, 0.0) + a * target[m]
-                            for m in self.models}
+            self.weights = {
+                m: (1.0 - a) * self.weights.get(m, 0.0) + a * target[m] for m in self.models
+            }
         else:
             self.weights = target
         if data_driven:
@@ -410,8 +547,10 @@ class IncrementalEnsemble:
 
     def ic_means(self) -> dict[str, float]:
         """当前各模型尾部 IC 均值（诊断/展示用）。"""
-        return {m: (float(np.mean(self._ic_hist[m])) if self._ic_hist[m] else float("nan"))
-                for m in self.models}
+        return {
+            m: (float(np.mean(self._ic_hist[m])) if self._ic_hist[m] else float("nan"))
+            for m in self.models
+        }
 
     # ------------------------------------------------------------- serialize
     def state_dict(self) -> dict:
@@ -427,6 +566,7 @@ class IncrementalEnsemble:
         if self._attn_model is not None:
             import io
             import torch
+
             buf = io.BytesIO()
             torch.save(self._attn_model, buf)
             attn_bytes = buf.getvalue()
@@ -437,8 +577,7 @@ class IncrementalEnsemble:
             "rebuild_days": self.rebuild_days,
             "train_window": self.train_window,
             "ic_window": self.ic_window,
-            "boosters": {m: [b.model_to_string() for b in bl]
-                         for m, bl in self._boosters.items()},
+            "boosters": {m: [b.model_to_string() for b in bl] for m, bl in self._boosters.items()},
             "attn": attn_bytes,
             "linear_state": self._linear_state,
             "linear_fit_date": self._linear_fit_date,
@@ -451,38 +590,42 @@ class IncrementalEnsemble:
         }
 
     @classmethod
-    def from_state_dict(cls, state: dict, feat_cols: list[str]
-                        ) -> "IncrementalEnsemble":
+    def from_state_dict(cls, state: dict, feat_cols: list[str]) -> "IncrementalEnsemble":
         """从 state_dict() 快照重建集成（权重/IC 队列/booster 全部恢复）。
 
         恢复后 predict/combine 与快照前逐位一致（同一批 booster）；update 可
         继续增量续训（_last_trained_date 已恢复，不会重复 boost）。attn 腿在
         无 torch 环境下跳过（predict 对该腿出 0 分，与 __init__ 降级一致）。
         """
-        ens = cls(feat_cols, models=state["models"], n_seeds=state["n_seeds"],
-                  incr_trees=state["incr_trees"],
-                  rebuild_days=state["rebuild_days"],
-                  train_window=state["train_window"],
-                  ic_window=state["ic_window"])
+        ens = cls(
+            feat_cols,
+            models=state["models"],
+            n_seeds=state["n_seeds"],
+            incr_trees=state["incr_trees"],
+            rebuild_days=state["rebuild_days"],
+            train_window=state["train_window"],
+            ic_window=state["ic_window"],
+        )
         ens._boosters = {
-            m: [lgb.Booster(model_str=s) for s in bl]
-            for m, bl in state["boosters"].items()}
+            m: [lgb.Booster(model_str=s) for s in bl] for m, bl in state["boosters"].items()
+        }
         if state.get("attn") is not None:
             try:
                 import io
                 import torch
-                ens._attn_model = torch.load(io.BytesIO(state["attn"]),
-                                             weights_only=False)
+
+                ens._attn_model = torch.load(io.BytesIO(state["attn"]), weights_only=False)
             except ImportError:
-                print("[ensemble] 警告: 快照含 attn 腿但当前环境无 torch，"
-                      "该腿已跳过（predict 出 0 分）")
+                logger.warning(
+                    "[ensemble] 警告: 快照含 attn 腿但当前环境无 torch，"
+                    "该腿已跳过（predict 出 0 分）"
+                )
         ens._linear_state = state["linear_state"]
         ens._linear_fit_date = state["linear_fit_date"]
         ens._updates_since_rebuild = state["updates_since_rebuild"]
         ens._last_trained_date = state["last_trained_date"]
         ens.weights = dict(state["weights"])
-        ens._ic_hist = {m: deque(h, maxlen=ens.ic_window)
-                        for m, h in state["ic_hist"].items()}
+        ens._ic_hist = {m: deque(h, maxlen=ens.ic_window) for m, h in state["ic_hist"].items()}
         ens._w_initialized = state["w_initialized"]
         ens._scored_dates = set(state["scored_dates"])
         return ens

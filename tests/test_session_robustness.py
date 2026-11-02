@@ -4,8 +4,10 @@
 · pipeline.context._jsonable 处理 pd.Timestamp / np.datetime64（含 NaT）
 · reconcile_on_startup 把 pid 已死的 running 会话标记 failed
 
-webapp.sessions 是纯 stdlib 模块（不依赖 dash），可在无 UI 环境下直接测。
+调度核心在 pipeline/scheduler.py（纯 stdlib，不依赖 dash），可在无 UI 环境下
+直接测；webapp.sessions 只是它的薄 re-export，monkeypatch 须打在 scheduler 上。
 """
+
 from __future__ import annotations
 
 import json
@@ -16,13 +18,23 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from pipeline import scheduler
 from pipeline.context import _jsonable
 from webapp import sessions
 
 
+def test_webapp_sessions_is_thin_reexport():
+    """webapp.sessions 与 pipeline.scheduler 必须是同一批函数对象（调度独立化）。"""
+    assert sessions.reconcile_on_startup is scheduler.reconcile_on_startup
+    assert sessions.create is scheduler.create
+    assert sessions.tick is scheduler.tick
+    assert sessions.valid_sid is scheduler.valid_sid
+
+
 # --- sid 路径穿越 ------------------------------------------------------------
-@pytest.mark.parametrize("bad", ["../etc", "..", "a/b", "a\\b", "", "a b", "a.b",
-                                 "../../outputs", None, 123])
+@pytest.mark.parametrize(
+    "bad", ["../etc", "..", "a/b", "a\\b", "", "a b", "a.b", "../../outputs", None, 123]
+)
 def test_valid_sid_rejects_traversal(bad):
     assert sessions.valid_sid(bad) is False
 
@@ -69,14 +81,23 @@ def _mk_session(tmp_path, sid, meta: dict) -> None:
 
 
 def test_reconcile_marks_dead_running_failed(tmp_path, monkeypatch):
-    monkeypatch.setattr(sessions, "SESSIONS_DIR", str(tmp_path))
+    monkeypatch.setattr(scheduler, "SESSIONS_DIR", str(tmp_path))
     pid = _dead_pid()
-    _mk_session(tmp_path, "backtest_zombie_1", {
-        "id": "backtest_zombie_1", "mode": "backtest", "status": "running",
-        "created": time.time() - 100, "started": time.time() - 90,
-        "finished": 0.0, "current_step": 1, "pid": pid,
-        "steps": [{"step": "data_import", "title": "数据导入", "status": "done"}],
-    })
+    _mk_session(
+        tmp_path,
+        "backtest_zombie_1",
+        {
+            "id": "backtest_zombie_1",
+            "mode": "backtest",
+            "status": "running",
+            "created": time.time() - 100,
+            "started": time.time() - 90,
+            "finished": 0.0,
+            "current_step": 1,
+            "pid": pid,
+            "steps": [{"step": "data_import", "title": "数据导入", "status": "done"}],
+        },
+    )
     n = sessions.reconcile_on_startup()
     assert n == 1
     meta = sessions.get("backtest_zombie_1")
@@ -86,18 +107,36 @@ def test_reconcile_marks_dead_running_failed(tmp_path, monkeypatch):
 
 
 def test_reconcile_keeps_alive_running(tmp_path, monkeypatch):
-    monkeypatch.setattr(sessions, "SESSIONS_DIR", str(tmp_path))
-    _mk_session(tmp_path, "backtest_alive_1", {
-        "id": "backtest_alive_1", "mode": "backtest", "status": "running",
-        "created": time.time(), "started": time.time(), "finished": 0.0,
-        "current_step": 0, "pid": 1,      # init 进程必然存在
-        "steps": [],
-    })
-    _mk_session(tmp_path, "backtest_done_1", {
-        "id": "backtest_done_1", "mode": "backtest", "status": "done",
-        "created": time.time(), "started": time.time(), "finished": time.time(),
-        "current_step": 4, "steps": [],
-    })
+    monkeypatch.setattr(scheduler, "SESSIONS_DIR", str(tmp_path))
+    _mk_session(
+        tmp_path,
+        "backtest_alive_1",
+        {
+            "id": "backtest_alive_1",
+            "mode": "backtest",
+            "status": "running",
+            "created": time.time(),
+            "started": time.time(),
+            "finished": 0.0,
+            "current_step": 0,
+            "pid": 1,  # init 进程必然存在
+            "steps": [],
+        },
+    )
+    _mk_session(
+        tmp_path,
+        "backtest_done_1",
+        {
+            "id": "backtest_done_1",
+            "mode": "backtest",
+            "status": "done",
+            "created": time.time(),
+            "started": time.time(),
+            "finished": time.time(),
+            "current_step": 4,
+            "steps": [],
+        },
+    )
     assert sessions.reconcile_on_startup() == 0
     assert sessions.get("backtest_alive_1")["status"] == "running"
     assert sessions.get("backtest_done_1")["status"] == "done"

@@ -11,6 +11,7 @@
   - 单调性(层序与层收益的秩相关)
 全部用 walkforward 锁定的预测器逐窗口 OOS 预测,严格防泄露。
 """
+
 from __future__ import annotations
 
 import os
@@ -26,24 +27,26 @@ sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src"))
 
 import config as C
 from data import load_factor_panel, list_factor_columns
-from walkforward import _train_predict
-from factor_eval import _windows
+from walkforward import train_predict
+from factor_eval import windows
 
 
 def main() -> None:
     n_layers = int(os.environ.get("DECILE_N", "10"))
     os.makedirs(C.OUTPUT_DIR, exist_ok=True)
-    print(f"加载面板... 预测器={C.MODEL_OBJECTIVE} "
-          f"size_neutral={getattr(C,'LINEAR_SIZE_NEUTRAL',True)} | 分{n_layers}层")
+    print(
+        f"加载面板... 预测器={C.MODEL_OBJECTIVE} "
+        f"size_neutral={getattr(C,'LINEAR_SIZE_NEUTRAL',True)} | 分{n_layers}层"
+    )
     panel = load_factor_panel(keep_price=True)
     factors = list_factor_columns(panel)
     dates = np.sort(panel["date"].unique())
 
     oos = []
-    for win_id, tr, te in _windows(dates):
+    for win_id, tr, te in windows(dates):
         train = panel[panel["date"].isin(tr)]
         test = panel[panel["date"].isin(te)].copy()
-        test["prediction"] = _train_predict(train, test, factors)
+        test["prediction"] = train_predict(train, test, factors)
         oos.append(test[["date", "symbol", "prediction", C.TARGET]])
     oos = pd.concat(oos, ignore_index=True)
 
@@ -51,10 +54,11 @@ def main() -> None:
     def _assign(g):
         if g["prediction"].notna().sum() < n_layers:
             return pd.Series(np.nan, index=g.index)
-        return pd.qcut(g["prediction"].rank(method="first"), n_layers,
-                       labels=False, duplicates="drop")
-    oos["layer"] = oos.groupby("date", group_keys=False).apply(
-        _assign, include_groups=False)
+        return pd.qcut(
+            g["prediction"].rank(method="first"), n_layers, labels=False, duplicates="drop"
+        )
+
+    oos["layer"] = oos.groupby("date", group_keys=False).apply(_assign, include_groups=False)
 
     valid = oos.dropna(subset=["layer", C.TARGET])
     layer_ret = valid.groupby("layer")[C.TARGET].mean().reindex(range(n_layers))
@@ -75,8 +79,10 @@ def main() -> None:
     topk = int(os.environ.get("TOPK_LAYERS", str(max(1, n_layers // 5))))  # 顶部~20%
     top_layers = list(range(n_layers - topk, n_layers))
     top_ret = valid[valid["layer"].isin(top_layers)][C.TARGET].mean()
-    print(f"\nlong_topk 视角: 顶部 {topk}/{n_layers} 层(≈top-{100*topk//n_layers}%) "
-          f"平均未来收益={top_ret:+.5f}  超额={top_ret-overall:+.5f}")
+    print(
+        f"\nlong_topk 视角: 顶部 {topk}/{n_layers} 层(≈top-{100*topk//n_layers}%) "
+        f"平均未来收益={top_ret:+.5f}  超额={top_ret-overall:+.5f}"
+    )
 
     vv = layer_ret.dropna()
     mono = stats.spearmanr(vv.index, vv.values).correlation if len(vv) >= 3 else np.nan
@@ -85,18 +91,28 @@ def main() -> None:
     # 诊断结论
     print("\n--- 结论 ---")
     if top - overall <= 0:
-        print("⚠ 顶层不跑赢全体 → edge 不在头部。long_topk(只做多top)结构上吃不到,"
-              "  alpha 多在'避开底层'(空头侧),散户 long-only 无法收割。")
+        print(
+            "⚠ 顶层不跑赢全体 → edge 不在头部。long_topk(只做多top)结构上吃不到,"
+            "  alpha 多在'避开底层'(空头侧),散户 long-only 无法收割。"
+        )
         if bot - overall < (top - overall):
-            print("  底层显著跑输 → 信号有效但偏空头。可行方向: 多空策略(研究)/"
-                  "  反向用作'排雷'剔除底层后再等权,而非追顶层。")
+            print(
+                "  底层显著跑输 → 信号有效但偏空头。可行方向: 多空策略(研究)/"
+                "  反向用作'排雷'剔除底层后再等权,而非追顶层。"
+            )
     else:
-        print("✓ 顶层跑赢全体 → edge 在头部,long_topk 可收割。下一步调 TOPK_RATIO/"
-              "  换手缓冲/调仓频率放大净值即可。")
+        print(
+            "✓ 顶层跑赢全体 → edge 在头部,long_topk 可收割。下一步调 TOPK_RATIO/"
+            "  换手缓冲/调仓频率放大净值即可。"
+        )
 
-    pd.DataFrame({"layer": range(n_layers), "future_ret": layer_ret.values,
-                  "excess": (layer_ret - overall).values}).to_csv(
-        os.path.join(C.OUTPUT_DIR, "decile_returns.csv"), index=False)
+    pd.DataFrame(
+        {
+            "layer": range(n_layers),
+            "future_ret": layer_ret.values,
+            "excess": (layer_ret - overall).values,
+        }
+    ).to_csv(os.path.join(C.OUTPUT_DIR, "decile_returns.csv"), index=False)
     print("-> outputs/decile_returns.csv")
 
 

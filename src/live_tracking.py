@@ -13,6 +13,7 @@
 IC 维度，并在告警里醒目提示。重训触发（retrain_trigger）消费本模块的指标；
 本模块只做采集/汇总/告警，不做决策。
 """
+
 from __future__ import annotations
 
 import json
@@ -31,8 +32,9 @@ _REPORT_FILE = "tracking_report.json"
 # ---------------------------------------------------------------------------
 # 指标采集
 # ---------------------------------------------------------------------------
-def matured_ic_stats(panel: pd.DataFrame, pred_hist: pd.DataFrame,
-                     window: int | None = None) -> dict:
+def matured_ic_stats(
+    panel: pd.DataFrame, pred_hist: pd.DataFrame, window: int | None = None
+) -> dict:
     """截至面板最新日的活体 OOS IC 统计（成熟口径与 IC 降仓层一致）。"""
     window = int(window or getattr(C, "RETRAIN_IC_WINDOW", 20))
     ics: dict = {}
@@ -51,18 +53,25 @@ def matured_ic_stats(panel: pd.DataFrame, pred_hist: pd.DataFrame,
     }
 
 
-def nav_stats(risk_state_path: str, panel: pd.DataFrame,
-              window: int | None = None) -> dict:
+def nav_stats(risk_state_path: str, panel: pd.DataFrame, window: int | None = None) -> dict:
     """实盘净值表现（尾部 window 日）：收益/Sharpe/回撤 + 等权基准对齐。
 
     净值来自 live_risk_state.json 的 dates/total_values（由 account.csv 真实
     现金驱动）；不足 2 个净值点视为无净值（has_nav=False），全部指标 None。
     """
     window = int(window or getattr(C, "RETRAIN_UNDERPERF_DAYS", 20))
-    out = {"has_nav": False, "n_nav": 0, "window": window,
-           "total_value": None, "live_ret_1d": None, "bench_ret_1d": None,
-           "live_ret_w": None, "bench_ret_w": None, "sharpe_w": None,
-           "max_dd_w": None}
+    out = {
+        "has_nav": False,
+        "n_nav": 0,
+        "window": window,
+        "total_value": None,
+        "live_ret_1d": None,
+        "bench_ret_1d": None,
+        "live_ret_w": None,
+        "bench_ret_w": None,
+        "sharpe_w": None,
+        "max_dd_w": None,
+    }
     state = load_risk_state(risk_state_path)
     tvs = [float(v) for v in state.total_values]
     dts = [str(d) for d in state.dates]
@@ -78,8 +87,11 @@ def nav_stats(risk_state_path: str, panel: pd.DataFrame,
 
     # 基准：全市场等权日收益，对齐到净值日期
     bench = None
-    ret_col = ("return_1d" if "return_1d" in panel.columns
-               else ("pct_chg" if "pct_chg" in panel.columns else None))
+    ret_col = (
+        "return_1d"
+        if "return_1d" in panel.columns
+        else ("pct_chg" if "pct_chg" in panel.columns else None)
+    )
     if ret_col is not None and len(panel):
         bser = panel.groupby("date")[ret_col].mean()
         if ret_col == "pct_chg":
@@ -91,12 +103,11 @@ def nav_stats(risk_state_path: str, panel: pd.DataFrame,
     rw = rets.iloc[-window:]
     if len(rw) >= 2:
         out["live_ret_w"] = float((1.0 + rw).prod() - 1.0)
-        out["sharpe_w"] = (float(rw.mean() / rw.std() * np.sqrt(252))
-                           if rw.std() > 1e-12 else 0.0)
+        out["sharpe_w"] = float(rw.mean() / rw.std() * np.sqrt(252)) if rw.std() > 1e-12 else 0.0
         cum = (1.0 + rw).cumprod()
         out["max_dd_w"] = float(((cum - cum.cummax()) / cum.cummax()).min())
         if bench is not None:
-            bw = bench.iloc[-len(rw):]
+            bw = bench.iloc[-len(rw) :]
             out["bench_ret_w"] = float((1.0 + bw).prod() - 1.0)
     return out
 
@@ -105,14 +116,12 @@ def nav_stats(risk_state_path: str, panel: pd.DataFrame,
 # 每日快照（append-only parquet，同日覆盖）
 # ---------------------------------------------------------------------------
 def snapshot_path(tracking_dir: str | None = None) -> str:
-    d = tracking_dir or getattr(C, "TRACKING_DIR",
-                                os.path.join(C.OUTPUT_DIR, "tracking"))
+    d = tracking_dir or getattr(C, "TRACKING_DIR", os.path.join(C.OUTPUT_DIR, "tracking"))
     return os.path.join(d, _SNAPSHOT_FILE)
 
 
 def report_path(tracking_dir: str | None = None) -> str:
-    d = tracking_dir or getattr(C, "TRACKING_DIR",
-                                os.path.join(C.OUTPUT_DIR, "tracking"))
+    d = tracking_dir or getattr(C, "TRACKING_DIR", os.path.join(C.OUTPUT_DIR, "tracking"))
     return os.path.join(d, _REPORT_FILE)
 
 
@@ -123,14 +132,19 @@ def load_daily(tracking_dir: str | None = None) -> pd.DataFrame:
     try:
         return pd.read_parquet(path)
     except Exception as e:
-        print(f"[警告] 跟踪快照 {path} 读取失败（{type(e).__name__}: {e}），"
-              "按空历史处理。")
+        print(f"[警告] 跟踪快照 {path} 读取失败（{type(e).__name__}: {e}），" "按空历史处理。")
         return pd.DataFrame()
 
 
-def append_daily_snapshot(date: object, model_id: str, action: str,
-                          n_pred: int, ic_stats: dict, nav: dict,
-                          tracking_dir: str | None = None) -> pd.DataFrame:
+def append_daily_snapshot(
+    date: object,
+    model_id: str,
+    action: str,
+    n_pred: int,
+    ic_stats: dict,
+    nav: dict,
+    tracking_dir: str | None = None,
+) -> pd.DataFrame:
     """追加当日快照行（同日重跑覆盖）。返回更新后的全表。"""
     row = {
         "date": str(pd.Timestamp(date).date()),
@@ -158,8 +172,9 @@ def append_daily_snapshot(date: object, model_id: str, action: str,
 # ---------------------------------------------------------------------------
 # 汇总报告 + 告警
 # ---------------------------------------------------------------------------
-def compute_report(champion_manifest: dict | None, ic_stats: dict,
-                   nav: dict, panel: pd.DataFrame | None = None) -> dict:
+def compute_report(
+    champion_manifest: dict | None, ic_stats: dict, nav: dict, panel: pd.DataFrame | None = None
+) -> dict:
     """回测预期 vs 实盘实际的分层报告（含 divergence 与 alerts）。"""
     champion_manifest = champion_manifest or {}
     promo = champion_manifest.get("promotion") or {}
@@ -180,50 +195,66 @@ def compute_report(champion_manifest: dict | None, ic_stats: dict,
     }
     divergence = {
         # 回测预期 Sharpe（晋升评估窗口）vs 实盘近窗口 Sharpe（有净值时）
-        "sharpe_gap": (live["sharpe_w"] - bt_metrics["sharpe"]
-                       if live["sharpe_w"] is not None
-                       and bt_metrics.get("sharpe") is not None else None),
-        "ret_gap_vs_bench": (live["live_ret_w"] - live["bench_ret_w"]
-                             if live["live_ret_w"] is not None
-                             and live["bench_ret_w"] is not None else None),
+        "sharpe_gap": (
+            live["sharpe_w"] - bt_metrics["sharpe"]
+            if live["sharpe_w"] is not None and bt_metrics.get("sharpe") is not None
+            else None
+        ),
+        "ret_gap_vs_bench": (
+            live["live_ret_w"] - live["bench_ret_w"]
+            if live["live_ret_w"] is not None and live["bench_ret_w"] is not None
+            else None
+        ),
     }
 
     alerts = []
     w = ic_stats.get("window", 20)
     min_samples = int(getattr(C, "RETRAIN_IC_MIN_SAMPLES", 10))
     ic_min = float(getattr(C, "RETRAIN_IC_MIN", 0.0))
-    if (ic_stats.get("n_ic", 0) >= min_samples
-            and ic_stats.get("ic_mean_w") is not None
-            and ic_stats["ic_mean_w"] < ic_min):
-        alerts.append(f"活体 IC 退化：尾部{w}日 OOS IC 均值 "
-                      f"{ic_stats['ic_mean_w']:+.4f} < {ic_min:+.4f}"
-                      f"（{ic_stats['n_ic']} 个成熟样本）")
+    if (
+        ic_stats.get("n_ic", 0) >= min_samples
+        and ic_stats.get("ic_mean_w") is not None
+        and ic_stats["ic_mean_w"] < ic_min
+    ):
+        alerts.append(
+            f"活体 IC 退化：尾部{w}日 OOS IC 均值 "
+            f"{ic_stats['ic_mean_w']:+.4f} < {ic_min:+.4f}"
+            f"（{ic_stats['n_ic']} 个成熟样本）"
+        )
     margin = float(getattr(C, "RETRAIN_UNDERPERF_MARGIN", 0.03))
-    if (divergence["ret_gap_vs_bench"] is not None
-            and divergence["ret_gap_vs_bench"] < -margin):
-        alerts.append(f"实盘落后基准：{nav.get('window', 20)} 日实盘 "
-                      f"{live['live_ret_w']:+.1%} vs 基准 "
-                      f"{live['bench_ret_w']:+.1%}"
-                      f"（差距 {divergence['ret_gap_vs_bench']:+.1%}，"
-                      f"容忍 {-margin:.1%}）")
-    if (live["sharpe_w"] is not None and live["sharpe_w"] < 0
-            and bt_metrics.get("sharpe") is not None
-            and bt_metrics["sharpe"] > 0.5):
-        alerts.append(f"回测实盘方向背离：晋升回测 Sharpe "
-                      f"{bt_metrics['sharpe']:+.2f}，实盘近{nav.get('window', 20)}日 "
-                      f"Sharpe {live['sharpe_w']:+.2f}——回测可能过拟合或分布漂移")
+    if divergence["ret_gap_vs_bench"] is not None and divergence["ret_gap_vs_bench"] < -margin:
+        alerts.append(
+            f"实盘落后基准：{nav.get('window', 20)} 日实盘 "
+            f"{live['live_ret_w']:+.1%} vs 基准 "
+            f"{live['bench_ret_w']:+.1%}"
+            f"（差距 {divergence['ret_gap_vs_bench']:+.1%}，"
+            f"容忍 {-margin:.1%}）"
+        )
+    if (
+        live["sharpe_w"] is not None
+        and live["sharpe_w"] < 0
+        and bt_metrics.get("sharpe") is not None
+        and bt_metrics["sharpe"] > 0.5
+    ):
+        alerts.append(
+            f"回测实盘方向背离：晋升回测 Sharpe "
+            f"{bt_metrics['sharpe']:+.2f}，实盘近{nav.get('window', 20)}日 "
+            f"Sharpe {live['sharpe_w']:+.2f}——回测可能过拟合或分布漂移"
+        )
     if not nav.get("has_nav"):
-        alerts.append("无真实净值（account.csv 未维护 cash 列）：净值维度跟踪"
-                      "与收益类告警未启用，仅跟踪 IC 维度")
+        alerts.append(
+            "无真实净值（account.csv 未维护 cash 列）：净值维度跟踪"
+            "与收益类告警未启用，仅跟踪 IC 维度"
+        )
 
     age = None
     if panel is not None and len(panel):
         from retrain_trigger import model_age_days
+
         age = model_age_days(champion_manifest, panel)
     max_age = int(getattr(C, "MAX_MODEL_AGE_DAYS", 60))
     if age is not None and age > max_age * 0.8:
-        alerts.append(f"模型临近超龄：已 {age} 个交易日未重训"
-                      f"（{max_age} 天强制重训）")
+        alerts.append(f"模型临近超龄：已 {age} 个交易日未重训" f"（{max_age} 天强制重训）")
 
     return {
         "generated_at": pd.Timestamp.now().isoformat(timespec="seconds"),
@@ -257,12 +288,18 @@ def print_summary(report: dict) -> None:
     ch, lv = report["champion"], report["live"]
     age = ch.get("age_days")
     ic = lv.get("ic_mean_w")
-    print("[跟踪] champion={mid}（年龄 {age} 天）· 活体 IC{w}日均值 {ic}".format(
-        mid=ch.get("model_id"), age=age if age is not None else "?",
-        w=lv.get("ic_window") or "",
-        ic=f"{ic:+.4f}" if ic is not None else "样本不足"))
+    print(
+        "[跟踪] champion={mid}（年龄 {age} 天）· 活体 IC{w}日均值 {ic}".format(
+            mid=ch.get("model_id"),
+            age=age if age is not None else "?",
+            w=lv.get("ic_window") or "",
+            ic=f"{ic:+.4f}" if ic is not None else "样本不足",
+        )
+    )
     if lv.get("has_nav") and lv.get("live_ret_w") is not None:
-        print(f"[跟踪] 近{lv.get('window', 20)}日实盘 {lv['live_ret_w']:+.1%} "
-              f"vs 基准 {lv['bench_ret_w']:+.1%} · Sharpe {lv['sharpe_w']:+.2f}")
+        print(
+            f"[跟踪] 近{lv.get('window', 20)}日实盘 {lv['live_ret_w']:+.1%} "
+            f"vs 基准 {lv['bench_ret_w']:+.1%} · Sharpe {lv['sharpe_w']:+.2f}"
+        )
     for a in report["alerts"]:
         print(f"[跟踪·告警] {a}")

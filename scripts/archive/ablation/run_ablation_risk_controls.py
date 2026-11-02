@@ -6,6 +6,7 @@ backtest_daily's dynamic topk/beta logic directly. For a fully realistic
 comparison, use run_daily_replay with the params; this script gives a faster
 first-pass signal on the strategy impact.
 """
+
 from __future__ import annotations
 
 import os
@@ -60,8 +61,9 @@ def main():
             os.environ[k] = v
             setattr(C, k, v == "1")
         try:
-            res = run_walkforward(panel, factors, select_features=False,
-                                  strategy="long_topk", verbose=True)
+            res = run_walkforward(
+                panel, factors, select_features=False, strategy="long_topk", verbose=True
+            )
             row = {"variant": name, **_extract(res)}
         except Exception as e:
             print(f"FAILED: {e}")

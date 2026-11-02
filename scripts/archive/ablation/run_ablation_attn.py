@@ -3,6 +3,7 @@
 Runs walk-forward twice with the same data: once with default ensemble legs and
 once with attn added. Compares OOS alpha metrics.
 """
+
 from __future__ import annotations
 
 import os
@@ -54,8 +55,9 @@ def main():
         os.environ["ENSEMBLE_MODELS"] = legs
         C.ENSEMBLE_MODELS = legs
         try:
-            res = run_walkforward(panel, factors, select_features=False,
-                                  strategy="long_topk", verbose=True)
+            res = run_walkforward(
+                panel, factors, select_features=False, strategy="long_topk", verbose=True
+            )
             row = {"variant": name, "legs": legs, **_extract(res)}
         except Exception as e:
             print(f"FAILED: {e}")

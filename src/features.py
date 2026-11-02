@@ -1,4 +1,5 @@
 """Feature handling: selection, NaN filling, optional cross-sectional normalization."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -7,8 +8,9 @@ import pandas as pd
 import config as C
 
 
-def get_feature_matrix(df: pd.DataFrame, fill: float = 0.0,
-                       feature_cols: list[str] | None = None) -> np.ndarray:
+def get_feature_matrix(
+    df: pd.DataFrame, fill: float = 0.0, feature_cols: list[str] | None = None
+) -> np.ndarray:
     """Extract the feature block as float32, filling NaNs with `fill`.
 
     feature_cols: optional subset of C.FEATURE_NAMES to use (for factor-selected
@@ -21,4 +23,3 @@ def get_feature_matrix(df: pd.DataFrame, fill: float = 0.0,
     if fill is not None:
         np.nan_to_num(X, copy=False, nan=fill)
     return X
-

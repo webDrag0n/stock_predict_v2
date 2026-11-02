@@ -12,8 +12,10 @@ which returns a daily DataFrame with columns like
     opt_iv_term_1m3m, opt_iv_skew_25d, opt_vix_like,
     opt_iv_chg_5d, opt_iv_chg_20d, opt_iv_rank_60d
 """
+
 from __future__ import annotations
 
+import logging
 import os
 import time
 from datetime import datetime, timedelta
@@ -25,6 +27,8 @@ from scipy import stats
 from scipy.optimize import brentq
 
 import config as C
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +47,9 @@ def _tushare_call(func, *args, retries: int = 3, **kwargs):
             msg = str(e)
             if "频率超限" in msg or "timeout" in msg.lower() or "timed out" in msg.lower():
                 wait = 60 * (attempt + 1)
-                print(f"  tushare rate limit / timeout: sleeping {wait}s before retry {attempt + 1}/{retries}")
+                logger.warning(
+                    f"  tushare rate limit / timeout: sleeping {wait}s before retry {attempt + 1}/{retries}"
+                )
                 time.sleep(wait)
             else:
                 raise
@@ -54,7 +60,7 @@ def _tushare_call(func, *args, retries: int = 3, **kwargs):
 # Underlying ETF -> option-name matching
 # ---------------------------------------------------------------------------
 UNDERLYING_NAME_PATTERNS = {
-    "510050.SH": "50ETF",   # 华夏上证50ETF
+    "510050.SH": "50ETF",  # 华夏上证50ETF
     "510300.SH": "300ETF",  # 华泰柏瑞沪深300ETF
     "510500.SH": "500ETF",  # 南方中证500ETF
 }
@@ -130,7 +136,7 @@ def black_scholes_price(
     T = np.clip(T, 1e-9, None)
     sigma = np.clip(sigma, 1e-9, None)
 
-    d1 = (np.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d1 = (np.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
 
     Nd1 = stats.norm.cdf(d1)
@@ -159,8 +165,12 @@ def _bs_price_scalar(S, K, T, r, q, sigma, opt_type) -> float:
     """Scalar wrapper for root finding."""
     return float(
         black_scholes_price(
-            np.array([S]), np.array([K]), np.array([T]),
-            np.array([r]), np.array([q]), np.array([sigma]),
+            np.array([S]),
+            np.array([K]),
+            np.array([T]),
+            np.array([r]),
+            np.array([q]),
+            np.array([sigma]),
             np.array([opt_type]),
         )[0]
     )
@@ -238,7 +248,9 @@ def fetch_option_chain(
         cached = pd.read_parquet(cache)
         # Simple heuristic: if cached range covers requested range, reuse.
         if "delist_date" in cached.columns:
-            cached["delist_date_dt"] = pd.to_datetime(cached["delist_date"], format="%Y%m%d", errors="coerce")
+            cached["delist_date_dt"] = pd.to_datetime(
+                cached["delist_date"], format="%Y%m%d", errors="coerce"
+            )
             req_end = pd.to_datetime(_fmt(end_date), format="%Y%m%d")
             if cached["delist_date_dt"].max() >= req_end:
                 return cached.drop(columns=["delist_date_dt"])
@@ -463,7 +475,9 @@ def compute_option_iv_features(
             if not call_candidates.empty:
                 call_candidates = call_candidates.copy()
                 call_candidates["moneyness"] = call_candidates["exercise_price"] / S
-                best = call_candidates.iloc[(call_candidates["moneyness"] - 1.05).abs().argsort()[:1]]
+                best = call_candidates.iloc[
+                    (call_candidates["moneyness"] - 1.05).abs().argsort()[:1]
+                ]
                 call_iv = best["iv"].mean()
             return put_iv, call_iv
 
@@ -480,25 +494,25 @@ def compute_option_iv_features(
             # Simple variance interpolation to 30 calendar days (~30/365 years).
             T30 = 30 / 365.0
             if T1 < T30 < T2:
-                var1 = atm_mean_near ** 2
-                var2 = atm_mean_next ** 2
-                vix_like = np.sqrt(
-                    (T1 * var1 * (T2 - T30) + T2 * var2 * (T30 - T1)) / (T2 - T1)
-                )
+                var1 = atm_mean_near**2
+                var2 = atm_mean_next**2
+                vix_like = np.sqrt((T1 * var1 * (T2 - T30) + T2 * var2 * (T30 - T1)) / (T2 - T1))
             else:
                 vix_like = atm_mean_near
         else:
             vix_like = atm_mean_near
 
-        records.append({
-            "date": td,
-            "opt_iv_atm_mean": atm_mean_near,
-            "opt_iv_atm_call": call_iv_near,
-            "opt_iv_atm_put": put_iv_near,
-            "opt_iv_term_1m3m": term_spread,
-            "opt_iv_skew_25d": skew,
-            "opt_vix_like": vix_like if not np.isnan(vix_like) else atm_mean_near,
-        })
+        records.append(
+            {
+                "date": td,
+                "opt_iv_atm_mean": atm_mean_near,
+                "opt_iv_atm_call": call_iv_near,
+                "opt_iv_atm_put": put_iv_near,
+                "opt_iv_term_1m3m": term_spread,
+                "opt_iv_skew_25d": skew,
+                "opt_vix_like": vix_like if not np.isnan(vix_like) else atm_mean_near,
+            }
+        )
 
     if not records:
         return pd.DataFrame()
@@ -508,8 +522,10 @@ def compute_option_iv_features(
     # Changes and ranks.
     out["opt_iv_chg_5d"] = out["opt_iv_atm_mean"].pct_change(5)
     out["opt_iv_chg_20d"] = out["opt_iv_atm_mean"].pct_change(20)
-    out["opt_iv_rank_60d"] = out["opt_iv_atm_mean"].rolling(60, min_periods=20).apply(
-        lambda s: s.rank(pct=True).iloc[-1], raw=False
+    out["opt_iv_rank_60d"] = (
+        out["opt_iv_atm_mean"]
+        .rolling(60, min_periods=20)
+        .apply(lambda s: s.rank(pct=True).iloc[-1], raw=False)
     )
     return out
 
@@ -527,6 +543,7 @@ _QVIX_FUNC_MAP = {
 def _get_trade_dates_akshare(start_date: str, end_date: str) -> list[str]:
     """Return trading dates in [start, end] using akshare calendar."""
     import akshare as ak
+
     cal = ak.tool_trade_date_hist_sina()
     cal["trade_date"] = pd.to_datetime(cal["trade_date"])
     start = pd.to_datetime(_fmt(start_date), format="%Y%m%d")
@@ -548,10 +565,10 @@ def fetch_option_iv_from_akshare(
     avoids the tushare option API rate limits entirely.
     """
     import akshare as ak
+
     if underlying not in _QVIX_FUNC_MAP:
         raise ValueError(
-            f"akshare QVIX not available for {underlying}; "
-            f"supported: {list(_QVIX_FUNC_MAP)}"
+            f"akshare QVIX not available for {underlying}; " f"supported: {list(_QVIX_FUNC_MAP)}"
         )
 
     func = getattr(ak, _QVIX_FUNC_MAP[underlying])
@@ -580,15 +597,26 @@ def fetch_option_iv_from_akshare(
     df = df.sort_values("date").reset_index(drop=True)
     df["opt_iv_chg_5d"] = df["opt_iv_atm_mean"].pct_change(5)
     df["opt_iv_chg_20d"] = df["opt_iv_atm_mean"].pct_change(20)
-    df["opt_iv_rank_60d"] = df["opt_iv_atm_mean"].rolling(60, min_periods=20).apply(
-        lambda s: s.rank(pct=True).iloc[-1], raw=False
+    df["opt_iv_rank_60d"] = (
+        df["opt_iv_atm_mean"]
+        .rolling(60, min_periods=20)
+        .apply(lambda s: s.rank(pct=True).iloc[-1], raw=False)
     )
 
-    return df[[
-        "date", "opt_iv_atm_mean", "opt_iv_atm_call", "opt_iv_atm_put",
-        "opt_iv_term_1m3m", "opt_iv_skew_25d", "opt_vix_like",
-        "opt_iv_chg_5d", "opt_iv_chg_20d", "opt_iv_rank_60d",
-    ]]
+    return df[
+        [
+            "date",
+            "opt_iv_atm_mean",
+            "opt_iv_atm_call",
+            "opt_iv_atm_put",
+            "opt_iv_term_1m3m",
+            "opt_iv_skew_25d",
+            "opt_vix_like",
+            "opt_iv_chg_5d",
+            "opt_iv_chg_20d",
+            "opt_iv_rank_60d",
+        ]
+    ]
 
 
 def _apply_lag(features: pd.DataFrame, trade_dates: list[str], lag: int) -> pd.DataFrame:
@@ -599,9 +627,7 @@ def _apply_lag(features: pd.DataFrame, trade_dates: list[str], lag: int) -> pd.D
     date_to_idx = {d: i for i, d in enumerate(date_list)}
     features = features.copy()
     features["date_str"] = features["date"].dt.strftime("%Y%m%d")
-    features["new_idx"] = features["date_str"].map(
-        lambda d: date_to_idx.get(d, -1) + lag
-    )
+    features["new_idx"] = features["date_str"].map(lambda d: date_to_idx.get(d, -1) + lag)
     features = features[features["new_idx"] < len(date_list)].copy()
     features["date"] = features["new_idx"].map(
         lambda i: pd.to_datetime(date_list[i], format="%Y%m%d")
@@ -629,8 +655,7 @@ def get_option_iv_features(
     """
     if underlying not in UNDERLYING_NAME_PATTERNS:
         raise ValueError(
-            f"underlying {underlying} not in supported list: "
-            f"{list(UNDERLYING_NAME_PATTERNS)}"
+            f"underlying {underlying} not in supported list: " f"{list(UNDERLYING_NAME_PATTERNS)}"
         )
 
     start = start_date or C.START_DATE
@@ -654,6 +679,7 @@ def get_option_iv_features(
         trade_dates = _get_trade_dates_akshare(start, end)
     elif source == "tushare":
         import tushare as ts
+
         token = C.TUSHARE_TOKEN
         if not token:
             raise RuntimeError("TUSHARE_TOKEN not configured")
@@ -688,8 +714,11 @@ def get_option_iv_features(
             raise RuntimeError("No underlying ETF prices returned.")
 
         features = compute_option_iv_features(
-            chain, daily, underlying_prices,
-            r=C.OPTION_RISK_FREE, q=C.OPTION_DIV_YIELD,
+            chain,
+            daily,
+            underlying_prices,
+            r=C.OPTION_RISK_FREE,
+            q=C.OPTION_DIV_YIELD,
         )
     else:
         raise ValueError(f"Unknown OPTION_SOURCE: {source}; use 'tushare' or 'akshare'")

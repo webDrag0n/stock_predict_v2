@@ -5,6 +5,7 @@
   1.4 config._validate 的 embargo 硬断言（含 multi_* 目标的最长 horizon）；
   1.5 list_factor_columns 按 responder_fw_ 前缀排除多 horizon 标签。
 """
+
 from __future__ import annotations
 
 import pandas as pd
@@ -34,8 +35,7 @@ def test_non_annual_report_lag_62_days():
     period_dt = pd.to_datetime(period, format="%Y%m%d")
     avail = _announcement_dates(period, period_dt)
     expected = period_dt + pd.Timedelta(days=62)
-    pd.testing.assert_series_equal(
-        avail.reset_index(drop=True), expected.reset_index(drop=True))
+    pd.testing.assert_series_equal(avail.reset_index(drop=True), expected.reset_index(drop=True))
 
 
 # --------------------------------------------------------------------------
@@ -67,16 +67,18 @@ def test_validate_passes_with_current_config():
 # --------------------------------------------------------------------------
 def test_list_factor_columns_excludes_any_responder_fw():
     """任意 horizon 的 responder_fw_* 标签都不得混入特征（含未硬编码的 42）。"""
-    panel = pd.DataFrame({
-        "date": ["2024-01-02"],
-        "symbol": ["000001.SZ"],
-        "responder_6": [0.01],
-        "responder_fw_5": [0.01],
-        "responder_fw_42": [0.01],   # 不在旧硬编码名单里的 horizon
-        "weight": [1.0],
-        "close": [10.0],
-        "real_factor": [0.5],
-    })
+    panel = pd.DataFrame(
+        {
+            "date": ["2024-01-02"],
+            "symbol": ["000001.SZ"],
+            "responder_6": [0.01],
+            "responder_fw_5": [0.01],
+            "responder_fw_42": [0.01],  # 不在旧硬编码名单里的 horizon
+            "weight": [1.0],
+            "close": [10.0],
+            "real_factor": [0.5],
+        }
+    )
     cols = list_factor_columns(panel)
     assert cols == ["real_factor"]
 
@@ -90,12 +92,14 @@ def test_walkforward_engine_rejects_short_embargo(monkeypatch):
     from walkforward import run_walkforward
 
     monkeypatch.setattr(C, "EMBARGO_DAYS", C.FORWARD_WINDOW - 1)
-    panel = pd.DataFrame({
-        "date": pd.to_datetime(["2024-01-02", "2024-01-02"]),
-        "symbol": ["000001.SZ", "600000.SH"],
-        "f0": [0.1, 0.2],
-        C.TARGET: [0.01, -0.01],
-    })
+    panel = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+            "symbol": ["000001.SZ", "600000.SH"],
+            "f0": [0.1, 0.2],
+            C.TARGET: [0.01, -0.01],
+        }
+    )
     with pytest.raises(AssertionError, match="前视泄露"):
         run_walkforward(panel, ["f0"], verbose=False)
 
@@ -103,25 +107,36 @@ def test_walkforward_engine_rejects_short_embargo(monkeypatch):
 def _make_trade_panel(n_dates: int = 80) -> pd.DataFrame:
     """与 test_backtest_synthetic 同款的两股小面板（含撮合所需交易列）。"""
     import numpy as np
+
     dates = pd.date_range("2026-05-01", periods=n_dates, freq="B")
     rows = []
     rng = np.random.RandomState(42)
     for d in dates:
         for sym in ["600000.SH", "300001.SZ"]:
             close = 10.0 + rng.randn() * 0.5
-            rows.append({
-                "date": d, "symbol": sym, "close": close, "adj_close": close,
-                "open": close * (1 + rng.randn() * 0.01),
-                "high": close * 1.02, "low": close * 0.98,
-                "amount": 10000.0,
-                "pre_close": close * (1 + rng.randn() * 0.01),
-                "pct_chg": rng.randn() * 2.0, "limit_flag": 0,
-                "return_1d": rng.randn() * 0.02,
-                "bb_upper_20": close * 1.05, "bb_lower_20": close * 0.95,
-                "rsi_14": 50.0,
-                C.TARGET: rng.randn() * 0.02, C.WEIGHT: 1.0,
-                "feature_00": rng.randn(), "feature_01": rng.randn(),
-            })
+            rows.append(
+                {
+                    "date": d,
+                    "symbol": sym,
+                    "close": close,
+                    "adj_close": close,
+                    "open": close * (1 + rng.randn() * 0.01),
+                    "high": close * 1.02,
+                    "low": close * 0.98,
+                    "amount": 10000.0,
+                    "pre_close": close * (1 + rng.randn() * 0.01),
+                    "pct_chg": rng.randn() * 2.0,
+                    "limit_flag": 0,
+                    "return_1d": rng.randn() * 0.02,
+                    "bb_upper_20": close * 1.05,
+                    "bb_lower_20": close * 0.95,
+                    "rsi_14": 50.0,
+                    C.TARGET: rng.randn() * 0.02,
+                    C.WEIGHT: 1.0,
+                    "feature_00": rng.randn(),
+                    "feature_01": rng.randn(),
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -136,9 +151,16 @@ def test_daily_replay_immature_labels_do_not_change_scores():
 
     panel = _make_trade_panel(80)
     feats = ["feature_00", "feature_01"]
-    params = {"n_seeds": 1, "rebuild_days": 20, "train_window": 20,
-              "ic_window": 5, "warmup_days": 20, "strict_check": True,
-              "progress": False, "collect_scores": True}
+    params = {
+        "n_seeds": 1,
+        "rebuild_days": 20,
+        "train_window": 20,
+        "ic_window": 5,
+        "warmup_days": 20,
+        "strict_check": True,
+        "progress": False,
+        "collect_scores": True,
+    }
 
     res1 = run_daily_replay(panel, feats, params=dict(params))
 
@@ -154,5 +176,5 @@ def test_daily_replay_immature_labels_do_not_change_scores():
         assert set(sc1[d]) == set(sc2[d])
         for sym, v in sc1[d].items():
             assert v == pytest.approx(sc2[d][sym], rel=1e-9, abs=1e-12), (
-                f"未来标签泄露：{pd.Timestamp(d).date()} {sym} 分数 "
-                f"{v} → {sc2[d][sym]}")
+                f"未来标签泄露：{pd.Timestamp(d).date()} {sym} 分数 " f"{v} → {sc2[d][sym]}"
+            )

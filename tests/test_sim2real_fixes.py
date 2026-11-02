@@ -4,11 +4,11 @@ Avoids slow data loading by mocking the panel / ensemble path.
 路径由 tests/conftest.py 统一处理；standalone 运行：
 PYTHONPATH=src:. uv run python tests/test_sim2real_fixes.py
 """
+
 from __future__ import annotations
 
 import os
 import tempfile
-import json
 
 import numpy as np
 import pandas as pd
@@ -16,39 +16,43 @@ import pandas as pd
 import config as C
 from trading import PortfolioState, decide_orders, simulate_fills, detect_board_limit
 from live import make_orders_from_state
-from live_state import RiskState, load_risk_state, save_risk_state, compute_risk_scale
+from live_state import RiskState, load_risk_state, save_risk_state
 
 
 def _make_today():
     codes = ["600519", "300001", "688001", "000001", "000333"]
     symbols = [f"{c}.SH" if i % 2 == 0 else f"{c}.SZ" for i, c in enumerate(codes)]
-    return pd.DataFrame({
-        "symbol": symbols,
-        "name": ["MT", "CY", "KC", "PA", "MD"],
-        "close": [100.0, 50.0, 80.0, 15.0, 30.0],
-        "adj_close": [100.0, 50.0, 80.0, 15.0, 30.0],
-        "bb_upper_20": [110.0, 55.0, 88.0, 16.5, 33.0],
-        "bb_lower_20": [90.0, 45.0, 72.0, 13.5, 27.0],
-        "rsi_14": [50.0, 40.0, 60.0, 55.0, 45.0],
-        "limit_flag": [0, 1, 0, 0, 1],
-        "pct_chg": [0.0, 19.8, 0.0, 0.0, -9.9],
-        "date": pd.to_datetime(["2026-07-09"] * 5),
-    })
+    return pd.DataFrame(
+        {
+            "symbol": symbols,
+            "name": ["MT", "CY", "KC", "PA", "MD"],
+            "close": [100.0, 50.0, 80.0, 15.0, 30.0],
+            "adj_close": [100.0, 50.0, 80.0, 15.0, 30.0],
+            "bb_upper_20": [110.0, 55.0, 88.0, 16.5, 33.0],
+            "bb_lower_20": [90.0, 45.0, 72.0, 13.5, 27.0],
+            "rsi_14": [50.0, 40.0, 60.0, 55.0, 45.0],
+            "limit_flag": [0, 1, 0, 0, 1],
+            "pct_chg": [0.0, 19.8, 0.0, 0.0, -9.9],
+            "date": pd.to_datetime(["2026-07-09"] * 5),
+        }
+    )
 
 
 def _make_next_bars():
     codes = ["600519", "300001", "688001", "000001", "000333"]
     symbols = [f"{c}.SH" if i % 2 == 0 else f"{c}.SZ" for i, c in enumerate(codes)]
-    return pd.DataFrame({
-        "symbol": symbols,
-        "open": [101.0, 51.0, 81.0, 15.2, 30.3],
-        "high": [102.0, 51.0, 82.0, 15.5, 30.3],  # 300001 high==low 模拟一字涨停
-        "low": [100.0, 51.0, 80.0, 15.0, 30.3],
-        "close": [101.5, 51.0, 81.5, 15.3, 30.3],
-        "amount": [10000.0] * 5,
-        "pre_close": [100.0, 50.0, 80.0, 15.0, 30.0],
-        "pct_chg": [1.5, 20.0, 1.875, 2.0, 1.0],
-    })
+    return pd.DataFrame(
+        {
+            "symbol": symbols,
+            "open": [101.0, 51.0, 81.0, 15.2, 30.3],
+            "high": [102.0, 51.0, 82.0, 15.5, 30.3],  # 300001 high==low 模拟一字涨停
+            "low": [100.0, 51.0, 80.0, 15.0, 30.3],
+            "close": [101.5, 51.0, 81.5, 15.3, 30.3],
+            "amount": [10000.0] * 5,
+            "pre_close": [100.0, 50.0, 80.0, 15.0, 30.0],
+            "pct_chg": [1.5, 20.0, 1.875, 2.0, 1.0],
+        }
+    )
 
 
 def test_detect_board_limit():
@@ -67,10 +71,16 @@ def test_decide_orders_price_col():
     score = np.array([1.0, 0.8, 0.6, 0.4, 0.2])
     state = PortfolioState(cash=1_000_000)
 
-    orders_close = decide_orders(state.copy(), today, score, params={"topk": 0.4, "use_bb_timing": False},
-                                 price_col="close")
-    orders_adj = decide_orders(state.copy(), today, score, params={"topk": 0.4, "use_bb_timing": False},
-                               price_col="adj_close")
+    orders_close = decide_orders(
+        state.copy(), today, score, params={"topk": 0.4, "use_bb_timing": False}, price_col="close"
+    )
+    orders_adj = decide_orders(
+        state.copy(),
+        today,
+        score,
+        params={"topk": 0.4, "use_bb_timing": False},
+        price_col="adj_close",
+    )
     # adj_close 更高 → 目标股数更少
     assert orders_adj["shares"].sum() < orders_close["shares"].sum()
     print("✓ decide_orders price_col")
@@ -83,16 +93,33 @@ def test_simulate_fills_t1_lock():
 
     # 场景：昨日空仓，今日决策买入 600519，同时系统错误地想卖出 600519
     state = PortfolioState(cash=1_000_000)
-    buy_orders = decide_orders(state, today, score, params={"topk": 0.4, "use_bb_timing": False},
-                               asof_date=asof, price_col="close")
+    buy_orders = decide_orders(
+        state,
+        today,
+        score,
+        params={"topk": 0.4, "use_bb_timing": False},
+        asof_date=asof,
+        price_col="close",
+    )
     # 手动构造一个同日的卖出单（模拟 bug/同日重复决策）
-    sell_order = pd.DataFrame([{
-        "symbol": "600519.SH", "name": "MT", "side": "sell", "shares": 100,
-        "limit_price": 100.0, "ref_close": 100.0, "reason": "test",
-        "rank_pct": 0.0, "bb_pos": 0.5, "rsi": 50.0, "blocked": False,
-        "asof_date": asof,
-    }])
-    orders = pd.concat([buy_orders, sell_order], ignore_index=True)
+    sell_order = pd.DataFrame(
+        [
+            {
+                "symbol": "600519.SH",
+                "name": "MT",
+                "side": "sell",
+                "shares": 100,
+                "limit_price": 100.0,
+                "ref_close": 100.0,
+                "reason": "test",
+                "rank_pct": 0.0,
+                "bb_pos": 0.5,
+                "rsi": 50.0,
+                "blocked": False,
+                "asof_date": asof,
+            }
+        ]
+    )
     next_bars = _make_next_bars()
 
     # 先执行买入，让 state 有持仓且 entry_date=asof
@@ -111,12 +138,24 @@ def test_simulate_fills_t1_lock():
 def test_board_limit_in_fill():
     today = _make_today()
     # 300001.SZ 一字涨停，不应成交买入
-    orders = pd.DataFrame([{
-        "symbol": "300001.SZ", "name": "CY", "side": "buy", "shares": 100,
-        "limit_price": 50.0, "ref_close": 50.0, "reason": "test",
-        "rank_pct": 0.0, "bb_pos": 0.5, "rsi": 50.0, "blocked": False,
-        "asof_date": today["date"].max(),
-    }])
+    orders = pd.DataFrame(
+        [
+            {
+                "symbol": "300001.SZ",
+                "name": "CY",
+                "side": "buy",
+                "shares": 100,
+                "limit_price": 50.0,
+                "ref_close": 50.0,
+                "reason": "test",
+                "rank_pct": 0.0,
+                "bb_pos": 0.5,
+                "rsi": 50.0,
+                "blocked": False,
+                "asof_date": today["date"].max(),
+            }
+        ]
+    )
     next_bars = _make_next_bars()
     state = PortfolioState(cash=1_000_000)
     res = simulate_fills(state, orders, next_bars)
@@ -139,20 +178,33 @@ def test_make_orders_risk_state():
 
         # 提供真实现金 → 真实总估值入账（vol/dd 两层由此驱动）
         orders = make_orders_from_state(
-            today, score, {}, 1_000_000,
+            today,
+            score,
+            {},
+            1_000_000,
             params={"topk": 0.4, "use_bb_timing": False},
-            price_col="close", risk_state_path=rpath, cash=1_000_000.0)
+            price_col="close",
+            risk_state_path=rpath,
+            cash=1_000_000.0,
+        )
+        assert isinstance(orders, pd.DataFrame)
         loaded = load_risk_state(rpath)
         assert loaded.last_update == "2026-07-09"
         assert len(loaded.total_values) == 9
 
         # 不提供现金 → 跳过 vol/dd 状态更新（不喂固定 capital 假净值）
         orders2 = make_orders_from_state(
-            today, score, {}, 1_000_000,
+            today,
+            score,
+            {},
+            1_000_000,
             params={"topk": 0.4, "use_bb_timing": False},
-            price_col="close", risk_state_path=rpath)
+            price_col="close",
+            risk_state_path=rpath,
+        )
+        assert isinstance(orders2, pd.DataFrame)
         loaded2 = load_risk_state(rpath)
-        assert len(loaded2.total_values) == 9      # 未追加假净值
+        assert len(loaded2.total_values) == 9  # 未追加假净值
         assert loaded2.last_update == "2026-07-09"
         print("✓ make_orders_from_state risk state")
 
@@ -174,8 +226,12 @@ def test_predict_tomorrow_unit(monkeypatch):
         today["score"] = np.linspace(1.0, 0.1, len(today))
         today["prediction"] = today["score"]
         today["rank_pct"] = today["score"].rank(ascending=False, pct=True)
-        info = {"weights": {"gbm_l2": 1.0}, "ic_means": {"gbm_l2": 0.02},
-                "models": ["gbm_l2"], "latest_date": today["date"].max()}
+        info = {
+            "weights": {"gbm_l2": 1.0},
+            "ic_means": {"gbm_l2": 0.02},
+            "models": ["gbm_l2"],
+            "latest_date": today["date"].max(),
+        }
         return today, info
 
     monkeypatch.setattr(pt, "load_factor_panel", _fake_load)

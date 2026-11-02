@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>前端重设计 · A股量化交易系统工作台</title>
+<style>
+:root{
+  --bg:#0d1117; --bg2:#161b22; --bg3:#1c2330; --line:#2d3748;
+  --fg:#e6edf3; --dim:#9aa7b8; --dim2:#6b7889;
+  --accent:#4cc2ff; --accent2:#7ee787; --warn:#ffa657; --danger:#ff7b72;
+  --purple:#d2a8ff; --pink:#ff9ecf; --gold:#f2cc60;
+  --mono:"SF Mono",Consolas,"Courier New",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;scroll-padding-top:20px}
+body{background:var(--bg);color:var(--fg);font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;line-height:1.75;font-size:15px}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.layout{display:flex;max-width:1500px;margin:0 auto}
+nav#toc{position:sticky;top:0;height:100vh;overflow-y:auto;width:250px;flex:none;
+  padding:28px 16px;border-right:1px solid var(--line);background:var(--bg2)}
+nav#toc h2{font-size:13px;color:var(--dim);letter-spacing:2px;margin-bottom:14px}
+nav#toc a{display:block;color:var(--dim);font-size:13.5px;padding:6px 10px;border-radius:6px;
+  border-left:2px solid transparent;transition:all .15s}
+nav#toc a:hover{color:var(--fg);background:var(--bg3);text-decoration:none}
+main{flex:1;min-width:0;padding:40px 48px 120px}
+section{margin-bottom:80px}
+@media(max-width:980px){nav#toc{display:none}main{padding:24px}}
+h1{font-size:32px;line-height:1.3;margin-bottom:8px}
+h2{font-size:24px;margin-bottom:6px;padding-top:8px;display:flex;align-items:center;gap:10px}
+h2 .num{font-family:var(--mono);font-size:14px;color:var(--accent);background:rgba(76,194,255,.1);
+  border:1px solid rgba(76,194,255,.3);border-radius:6px;padding:2px 9px}
+h3{font-size:17px;margin:28px 0 10px;color:var(--accent)}
+h4{font-size:15px;margin:18px 0 6px;color:var(--purple)}
+.sub{color:var(--dim);font-size:14px;margin-bottom:24px}
+p{margin:10px 0}
+strong{color:#fff}
+code{font-family:var(--mono);font-size:12.5px;background:var(--bg3);border:1px solid var(--line);
+  border-radius:4px;padding:1px 6px;color:var(--accent2)}
+pre{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:16px 18px;
+  overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.7;margin:14px 0}
+pre .cm{color:var(--dim2)}
+ul,ol{margin:10px 0 10px 24px}
+li{margin:5px 0}
+table{border-collapse:collapse;width:100%;margin:16px 0;font-size:13.5px}
+th,td{border:1px solid var(--line);padding:8px 12px;text-align:left;vertical-align:top}
+th{background:var(--bg3);color:var(--accent);font-weight:600}
+tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+.hero{background:linear-gradient(135deg,#0d2137 0%,#131c2e 55%,#1a1330 100%);
+  border:1px solid var(--line);border-radius:16px;padding:44px 44px 36px;margin-bottom:60px;
+  position:relative;overflow:hidden}
+.hero h1{font-size:36px}
+.hero .tags{margin-top:18px;display:flex;gap:10px;flex-wrap:wrap}
+.tag{font-size:12.5px;padding:4px 12px;border-radius:20px;border:1px solid var(--line);color:var(--dim)}
+.tag.hi{color:var(--accent2);border-color:rgba(126,231,135,.4)}
+.callout{border-left:3px solid var(--accent);background:rgba(76,194,255,.06);
+  padding:12px 18px;border-radius:0 8px 8px 0;margin:16px 0}
+.callout.warn{border-color:var(--warn);background:rgba(255,166,87,.07)}
+.callout.danger{border-color:var(--danger);background:rgba(255,123,114,.07)}
+.callout.ok{border-color:var(--accent2);background:rgba(126,231,135,.06)}
+.wire{background:var(--bg2);border:1px solid var(--line);border-radius:12px;
+  padding:18px;margin:16px 0;font-family:var(--mono);font-size:12px;line-height:1.9}
+.wire .row{display:flex;gap:10px;margin-bottom:10px}
+.wire .box{border:1px dashed var(--dim2);border-radius:8px;padding:10px 12px;
+  color:var(--dim);flex:1;text-align:center;min-height:38px;display:flex;
+  align-items:center;justify-content:center;text-align:center}
+.wire .box.b2{flex:2}.wire .box.b3{flex:3}
+.wire .box.hi{border-color:var(--accent);color:var(--accent)}
+.wire .box.ok{border-color:var(--accent2);color:var(--accent2)}
+.kpi-strip{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0}
+.kpi{background:var(--bg2);border:1px solid var(--line);border-radius:10px;
+  padding:12px 18px;min-width:150px}
+.kpi .v{font-size:22px;font-family:var(--mono);color:var(--accent2)}
+.kpi .l{font-size:12px;color:var(--dim)}
+.pill{display:inline-block;font-size:11.5px;padding:1px 9px;border-radius:12px;
+  font-family:var(--mono);vertical-align:middle}
+.pill.p0{background:rgba(255,123,114,.15);color:var(--danger)}
+.pill.p1{background:rgba(255,166,87,.15);color:var(--warn)}
+.pill.p2{background:rgba(76,194,255,.12);color:var(--accent)}
+.pill.done{background:rgba(126,231,135,.12);color:var(--accent2)}
+.flow{display:flex;align-items:stretch;gap:0;margin:16px 0;flex-wrap:wrap}
+.flow .step{background:var(--bg3);border:1px solid var(--line);border-radius:10px;
+  padding:10px 14px;font-size:13px;flex:1;min-width:130px;text-align:center}
+.flow .arr{display:flex;align-items:center;color:var(--dim2);padding:0 8px;font-size:18px}
+small{color:var(--dim2)}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav id="toc">
+  <h2>目录</h2>
+  <a href="#s0">0. 设计目标</a>
+  <a href="#s1">1. 设计原则</a>
+  <a href="#s2">2. 信息架构</a>
+  <a href="#s3">3. 页面一 · 交易台</a>
+  <a href="#s4">4. 页面二 · 模型实验室</a>
+  <a href="#s5">5. 页面三 · 因子工作台</a>
+  <a href="#s6">6. 页面四 · 行情观察</a>
+  <a href="#s7">7. 横切 · 会话引擎契约</a>
+  <a href="#s8">8. 空态与异常态</a>
+  <a href="#s9">9. 技术方案与迁移</a>
+  <a href="#s10">10. 非目标</a>
+</nav>
+<main>
+
+<div class="hero">
+  <h1>前端重设计：量化交易工作台</h1>
+  <p class="sub" style="font-size:15px;margin-top:10px">
+    围绕三个日常动作重构信息架构：<strong>定明天怎么交易</strong>、<strong>训练和验证模型</strong>、<strong>研发因子</strong>。
+    一切以磁盘上的产物契约为数据源，重计算走会话子进程，前端只做呈现与调度。
+  </p>
+  <div class="tags">
+    <span class="tag hi">Dash + dbc 延续</span>
+    <span class="tag hi">step-report 自描述契约</span>
+    <span class="tag">版本 v2.0 · 2026-10</span>
+    <span class="tag">配套 daily_run.sh / predict_tomorrow.py</span>
+  </div>
+</div>
+
+<section id="s0">
+<h2><span class="num">0</span>设计目标</h2>
+<p class="sub">把「一个能跑研究的仪表盘」升级为「一个能支撑每日实盘决策的工作台」。</p>
+<table>
+  <tr><th>需求</th><th>现状问题</th><th>设计应答</th></tr>
+  <tr>
+    <td><strong>① 制定次日仓位与交易策略</strong></td>
+    <td>订单 CSV、持仓、风控状态散落在 outputs/，无统一视图；nextday 会话产物与 CLI 产物两处割裂</td>
+    <td><strong>交易台</strong>作为首页：订单执行单 + 目标仓位 + 风控状态灯 + 账户净值 + 偏差告警，一屏看完今晚要做什么</td>
+  </tr>
+  <tr>
+    <td><strong>② 训练新模型并回测</strong></td>
+    <td>会话列表平铺四种模式，champion/staging 门控状态不可见；回测结果与模型身份无关联</td>
+    <td><strong>模型实验室</strong>：任务列表按「模型身份」组织，champion/staging 卡片置顶，回测结果挂在产生它的配方指纹下</td>
+  </tr>
+  <tr>
+    <td><strong>③ 因子研发并回测，看清每个因子的特征和贡献</strong></td>
+    <td>Factor Lab 只有两张静态 CSV 图；因子定义（YAML）与评估结果分离；无单因子下钻；无「因子在模型里的贡献」视角</td>
+    <td><strong>因子工作台</strong>：因子库总览 → 单因子详情（定义/IC 衰减/分层/换手/相关簇/模型内贡献）→ 公式编辑器 → 一键评估回测的完整闭环</td>
+  </tr>
+</table>
+<div class="callout">
+  <strong>一以贯之的量化直觉：</strong>这个系统的实证结论是「选股 alpha 温和（年化 ~+15%，NW-t&lt;2）、风控层贡献 Sharpe +0.98、边际集中在排序头部」。
+  因此前端的第一公民不是「收益曲线多漂亮」，而是<strong>信号健康度</strong>（IC 衰减、窗口占比、头部超额）与<strong>风控状态</strong>（暴露、回撤刹车、IC 降仓）——
+  把它们放在每个页面最显眼的位置，防止使用者被单条净值曲线误导。
+</div>
+</section>
+
+<section id="s1">
+<h2><span class="num">1</span>设计原则</h2>
+<ul>
+  <li><strong>产物契约驱动</strong>：前端只读 <code>outputs/</code>、<code>data_cache/</code>、<code>models/</code>、<code>factor_library/</code> 的 JSON/parquet/YAML 契约，不在请求路径上做计算。所有重活（训练/回测/评估）封装为会话子进程，落盘自描述 step report。</li>
+  <li><strong>CLI ≡ 前端</strong>：CLI 跑出的 canonical 产物（<code>outputs/walkforward/</code>、<code>orders_*.csv</code>）前端原样展示；前端发起的会话与 CLI 产物同构同路径。同一份结果，两个入口。</li>
+  <li><strong>先问「信不信」，再问「赚没赚」</strong>：每个汇总指标旁边必须有它的可信度上下文——窗口数为正占比、NW-t、OOS 长度、种子离散度。</li>
+  <li><strong>泄露防线可视化</strong>：因子评估一律标注「仅用训练段」；任何展示未来函数嫌疑的数据（如未成熟 IC）用醒目的「未成熟」水印标识。</li>
+  <li><strong>空态即教程</strong>：产物不存在时（如实盘未跑过），页面显示「如何生成它」的一条命令，而非空白或报错。</li>
+</ul>
+</section>
+
+<section id="s2">
+<h2><span class="num">2</span>信息架构</h2>
+<pre>┌────────────────────────────────────────────────────────────────┐
+│ 顶栏：系统状态灯（数据新鲜度 · champion 模型年龄 · 调度并发）      │
+├──────────┬─────────────────────────────────────────────────────┤
+│          │  /            交易台 Trading Desk        ← 默认首页    │
+│  侧边栏   │  /models      模型实验室 Model Lab                   │
+│          │  /models/&lt;id&gt;  模型详情（配方 + 全部验证记录）         │
+│          │  /factors     因子工作台 Factor Workbench             │
+│          │  /factors/&lt;id&gt; 因子详情（特征 × 贡献）                │
+│          │  /factors/new 公式因子编辑器                           │
+│          │  /market      行情观察（保留现有）                      │
+│          │  /runs/&lt;id&gt;    会话详情（通用 step-report 渲染）       │
+└──────────┴─────────────────────────────────────────────────────┘</pre>
+<table>
+  <tr><th>路由</th><th>页面</th><th>回答的问题</th><th>对应需求</th></tr>
+  <tr><td><code>/</code></td><td>交易台</td><td>明天开盘我做什么？仓位多重？风控现在让我开多少仓？</td><td>需求①</td></tr>
+  <tr><td><code>/models</code></td><td>模型实验室</td><td>线上用的是哪个模型？新配方值得晋升吗？回测可信吗？</td><td>需求②</td></tr>
+  <tr><td><code>/factors</code></td><td>因子工作台</td><td>哪个因子有效/失效/冗余？我新写的因子能打吗？</td><td>需求③</td></tr>
+  <tr><td><code>/market</code></td><td>行情观察</td><td>市场今天什么状态？（辅助决策，保留现有实现）</td><td>横切</td></tr>
+  <tr><td><code>/runs/&lt;id&gt;</code></td><td>会话详情</td><td>这次训练/回测/评估跑成什么样？（通用渲染器，不变）</td><td>横切</td></tr>
+</table>
+<p>原 <code>/</code>（会话列表）与 <code>/session/&lt;id&gt;</code> 的能力被拆分吸收：「发起任务」进模型实验室与因子工作台各自的上下文入口，「任务记录」进模型实验室的 Runs 面板，通用渲染进 <code>/runs/&lt;id&gt;</code>。原 Factor Lab 整体升级为因子工作台。</p>
+</section>
+
+<section id="s3">
+<h2><span class="num">3</span>页面一 · 交易台（<code>/</code>）</h2>
+<p class="sub">需求①：次日仓位与交易策略。设计取向——像一张「开盘前执行单」，不是仪表盘。</p>
+
+<h3>3.1 布局线框</h3>
+<div class="wire">
+  <div class="row">
+    <div class="box hi">A. 今日操作卡：订单数 · 预计成交 · 风控总开关状态<br>「生成订单」按钮（→ nextday 会话）</div>
+    <div class="box hi">B. 风控五层状态灯<br>vol目标 / 回撤刹车 / IC降仓 / IV降仓 / 择时</div>
+    <div class="box">C. 账户快照<br>现金 · 持仓市值 · 净值 · 当日盈亏</div>
+  </div>
+  <div class="row">
+    <div class="box b2 ok">D. 明日订单执行单（卖单区在上 / 买单区在下，红绿分色，可勾选标记已执行）</div>
+    <div class="box">E. 目标仓位饼图/条形<br>vs 当前持仓 diff</div>
+  </div>
+  <div class="row">
+    <div class="box b2">F. 净值与偏差：实盘净值 vs 回测预期带（tracking_report.json）+ 偏差告警</div>
+    <div class="box">G. 持仓明细表：symbol/股数/成本/现价/浮盈/持有天数/当前排名分位</div>
+  </div>
+  <div class="row">
+    <div class="box">H. 执行闭环提示：成交确认 → ./daily_run.sh commit → account.csv 维护提醒</div>
+  </div>
+</div>
+
+<h3>3.2 组件 × 数据契约映射</h3>
+<table>
+  <tr><th>组件</th><th>数据源（契约）</th><th>关键字段</th><th>空态</th></tr>
+  <tr><td>A. 今日操作卡</td><td><code>outputs/orders_*.csv</code>（取日期最新一份）+ 会话状态</td><td>side/shares/limit_price/blocked</td><td>显示「运行 daily_run.sh 生成今晚订单」+ 一键发起 nextday 会话</td></tr>
+  <tr><td>B. 风控状态灯</td><td><code>outputs/live_risk_state.json</code></td><td>dates/total_values/ic_queue → 现算五层各自的乘数与触发原因</td><td>「风控未初始化：提供 account.csv 后启用 vol/回撤层」</td></tr>
+  <tr><td>C. 账户快照</td><td><code>outputs/account.csv</code> + <code>holdings.csv</code> + 最新收盘价</td><td>cash、shares×close</td><td>引导创建 account.csv（给出 csv 模板）</td></tr>
+  <tr><td>D. 订单执行单</td><td>同 A</td><td>卖单在前买单在后；<code>blocked</code> 标灰并注原因（涨跌停/流动性）</td><td>同 A</td></tr>
+  <tr><td>E. 目标仓位</td><td>orders + holdings 联立</td><td>目标权重 = 买单金额/总市值</td><td>—</td></tr>
+  <tr><td>F. 净值与偏差</td><td><code>outputs/tracking/live_daily.parquet</code> + <code>tracking_report.json</code></td><td>实盘 IC vs 预期、净值 divergence、alerts 列表</td><td>「跟踪在首次 commit 后自动开始积累」</td></tr>
+  <tr><td>G. 持仓明细</td><td><code>holdings.csv</code> + 最新日 panel 的 prediction 排名</td><td>ref_close/entry_date/当前 rank_pct（跌出持有带的高亮）</td><td>「当前空仓」</td></tr>
+</table>
+
+<h3>3.3 风控状态灯的细节（本系统的实证核心）</h3>
+<p>五层各渲染一个灯：🟢 未触发 / 🟡 部分降仓 / 🔴 强约束，旁边直接标注当前乘数与原因，例如：</p>
+<pre>vol目标   🟡 ×0.62   20日实现波动 24% &gt; 目标 15%
+回撤刹车  🟢 ×1.00   当前回撤 -3.1%（阈值 -20%）
+IC 降仓   🔴 ×0.20   近20日 OOS IC = -0.031 衰入负区
+IV 降仓   🟢 ×1.00   opt_vix_like 处于中三分位</pre>
+<div class="callout warn">
+  <strong>为什么放这么显眼：</strong>对照实验（<code>outputs/ablations/walkforward_riskoff</code>）证明风控全关时 Sharpe 从 +2.48 掉到 +1.50、回撤翻倍。
+  交易台必须让使用者一眼看到「今晚的风控乘数」，这是小本金账户最重要的数字。
+</div>
+
+<h3>3.4 每日交互闭环</h3>
+<div class="flow">
+  <div class="step">18:10<br>cron/手动打开交易台</div><div class="arr">→</div>
+  <div class="step">看风控灯 + 偏差告警<br>（异常则先查因）</div><div class="arr">→</div>
+  <div class="step">点「生成订单」<br>（nextday 会话或读 CLI 产物）</div><div class="arr">→</div>
+  <div class="step">次日 9:25 按执行单下单<br>（逐条勾选）</div><div class="arr">→</div>
+  <div class="step">晚间 commit + 维护现金<br>净值曲线自动延长</div>
+</div>
+<p>「生成订单」按钮的行为：若 <code>outputs/orders_&lt;今日&gt;.csv</code> 已存在且数据日期 = 今天 → 直接展示（幂等）；否则发起 nextday 会话并跳转到 <code>/runs/&lt;id&gt;</code> 看进度。</p>
+</section>
+
+<section id="s4">
+<h2><span class="num">4</span>页面二 · 模型实验室（<code>/models</code>）</h2>
+<p class="sub">需求②：训练新模型并回测。设计取向——以「模型身份」为主线，回测是模型的验证记录，不是孤立任务。</p>
+
+<h3>4.1 布局线框</h3>
+<div class="wire">
+  <div class="row">
+    <div class="box ok">A. Champion 卡片：model_id · 配方摘要 · 最近评估 Sharpe/MaxDD · 「上次验证」时间</div>
+    <div class="box hi">B. Staging 候选列表：各候选 vs champion 的双回放对比结论（晋升/留档/拒绝 + 原因）</div>
+  </div>
+  <div class="row">
+    <div class="box b2">C. 验证历史时间线：每次 walkforward / backtest / robustness 会话的 Sharpe 点图<br>（同一配方指纹的点连成线 → 看出同一模型的衰减）</div>
+    <div class="box">D. 「新建任务」面板：<br>walkforward / backtest / robustness / nextday 四模式参数表单</div>
+  </div>
+  <div class="row">
+    <div class="box b3">E. Runs 任务表：状态徽章 · 进度 · 耗时 · 产物链接 · 删除<br>（吸收原会话列表，加 CLI 产物行：canonical walkforward 作为特殊 run 置顶）</div>
+  </div>
+</div>
+
+<h3>4.2 Champion / Staging 卡片（门控可视化）</h3>
+<table>
+  <tr><th>字段</th><th>来源</th><th>说明</th></tr>
+  <tr><td>model_id / created_at</td><td><code>models/champion/manifest.json</code></td><td>日期+12位配方指纹</td></tr>
+  <tr><td>配方摘要</td><td>manifest.config_snapshot</td><td>feat_cols 数 / fw / ensemble_models / train_window 等，可展开全量 JSON</td></tr>
+  <tr><td>最近评估</td><td><code>staging/&lt;id&gt;/evaluation.json</code>（晋升时归档）+ tracking</td><td>双回放 Sharpe、回撤差</td></tr>
+  <tr><td>模型年龄</td><td>manifest.created_at vs 交易日历</td><td>超 <code>MAX_MODEL_AGE_DAYS</code> 亮黄灯（自适应重训的硬上限）</td></tr>
+</table>
+<p>Staging 卡片额外提供两个操作：<strong>人工晋升</strong>（调 <code>predict_tomorrow.py --promote &lt;id&gt;</code> 等价接口）与<strong>拒绝归档</strong>。每次操作写审计记录。</p>
+
+<h3>4.3 验证历史时间线（防自欺的关键组件）</h3>
+<p>把每次验证会话的 (generated_at, Sharpe) 打点，按 <strong>配方指纹</strong> 分组连线。用途：</p>
+<ul>
+  <li>同一配方 Sharpe 逐次下滑 = 信号衰减的直观证据（比单次数字更有说服力）；</li>
+  <li>±0.4 的同配置随机波动带用半透明色带标出，防止把噪声当改进；</li>
+  <li>每个点可点击 → 跳 <code>/runs/&lt;id&gt;</code> 看完整 step report。</li>
+</ul>
+
+<h3>4.4 新建任务面板</h3>
+<p>复用 <code>pipeline/registry.py::PARAM_SCHEMA</code> 动态渲染（现状能力保留），但加两处强化：</p>
+<ul>
+  <li><strong>成本预告</strong>：每个模式标注预期耗时（walkforward 全市场 ≈ 5h / robustness 3 seeds ≈ 15h / nextday ≈ 分钟级）与 CPU 占用，防止误触长任务；</li>
+  <li><strong>参数diff预览</strong>：提交前显示「本次参数 vs 当前 champion 配方」的差异清单，让实验意图显式化。</li>
+</ul>
+<div class="callout">
+  <strong>门禁指标前置：</strong>walkforward 完成后，报告头部固定渲染三枚「可信度徽章」——正 Sharpe 窗口占比（&lt;60% 亮红）、PredIC 为正占比（&lt;50% 亮红）、NW-t（&lt;2.0 亮黄）。
+  规则与 CLI 的 <code>meta.json</code> 新字段 <code>sharpe_pos_ratio / predic_pos_ratio</code> 完全一致。
+</div>
+</section>
+
+<section id="s5">
+<h2><span class="num">5</span>页面三 · 因子工作台（<code>/factors</code>）</h2>
+<p class="sub">需求③：因子研发 + 回测，且「清晰看到每个因子的特征和贡献」。这是三页中信息密度最高的，分三级：库总览 → 单因子详情 → 研发编辑器。</p>
+
+<h3>5.1 因子库总览（<code>/factors</code>）</h3>
+<div class="wire">
+  <div class="row">
+    <div class="box hi">A. 筛选条：类别（动量/反转/量价/价值/北向/公式库）· 准入状态 · 启用状态 · 搜索</div>
+    <div class="box">B. 「运行全量评估」按钮（→ eval 会话，产出 factor_eval.csv）</div>
+  </div>
+  <div class="row">
+    <div class="box b3">C. 因子主表（见下）</div>
+  </div>
+  <div class="row">
+    <div class="box b2">D. 冗余簇热图（diag_factor_corr.csv，|corr|≥0.8 聚簇标框）</div>
+    <div class="box">E. 模型 vs 最强单因子（diag_model_vs_factor.csv）：模型是否真有增量</div>
+  </div>
+</div>
+<p>主表每行一个因子，列设计直接对应「特征与贡献」：</p>
+<table>
+  <tr><th>列</th><th>内容</th><th>来源</th></tr>
+  <tr><td>因子</td><td>id + 中文名 + 类别徽章</td><td><code>factor_library/*.yaml</code> / 原生族注册表</td></tr>
+  <tr><td>RankIC / ICIR</td><td>评估期均值，ICIR 着色（绿 &gt;0.3 / 红 &lt;0）</td><td><code>outputs/factor_eval.csv</code></td></tr>
+  <tr><td>IC_t / 准入</td><td>t 统计量 + 通过/未通过徽章（GATE_IC_T=2.0 等）</td><td>同上</td></tr>
+  <tr><td>多空收益 / 单调性</td><td>5 层分层 Top-Bottom、层间单调性比例</td><td>同上</td></tr>
+  <tr><td>换手率</td><td>top 组日换手（成本敏感度的直接代理）</td><td>同上</td></tr>
+  <tr><td>近期衰减</td><td>逐窗口 RankIC 迷你 sparkline（w0..wN）</td><td><code>outputs/diag_factor_ic_decay.csv</code></td></tr>
+  <tr><td>模型内贡献</td><td>champion 集成中的滚动 IC 权重 / GBM 重要性分位</td><td><code>models/champion/manifest.json</code> + ensemble state</td></tr>
+  <tr><td>冗余</td><td>|corr|≥0.8 的簇标签（如「与 turnover_rate 同簇」）</td><td><code>diag_factor_corr.csv</code></td></tr>
+</table>
+
+<h3>5.2 单因子详情（<code>/factors/&lt;id&gt;</code>）——「特征 × 贡献」的完整答卷</h3>
+<div class="wire">
+  <div class="row">
+    <div class="box hi">头部：因子名 · 类别 · 公式（DSL 源码语法高亮）· expected_sign · 版本/作者<br>操作：「重评估此因子」「加入/移出 LINEAR_FACTORS 建议」</div>
+  </div>
+  <div class="row">
+    <div class="box">P1. IC 衰减曲线：逐窗口 RankIC 柱状 + 滚动 IC 线<br><small>回答：它还活着吗？</small></div>
+    <div class="box">P2. 5 层分层净值曲线<br><small>回答：单调吗？头部还是尾部赚钱？</small></div>
+  </div>
+  <div class="row">
+    <div class="box">P3. IC 分布直方图 + 正 IC 占比<br><small>回答：稳定还是靠少数几天？</small></div>
+    <div class="box">P4. 相关邻域：与 Top10 最相关因子的横向条形<br><small>回答：它是独立信息还是重复？</small></div>
+  </div>
+  <div class="row">
+    <div class="box">P5. 模型内贡献面板：① ic_linear 腿中的滚动 IC 权重时序 ② GBM 腿重要性 ③ 该因子在/不在特征集的两次 walkforward 对比入口<br><small>回答：模型真的在用它吗？去掉会怎样？</small></div>
+    <div class="box">P6. 覆盖面与缺失率：按日的非 NaN 占比<br><small>回答：它覆盖全市场还是只有大盘？</small></div>
+  </div>
+</div>
+<div class="callout ok">
+  <strong>「贡献」的三层定义（每层层层递进）：</strong>
+  ① <strong>独立预测力</strong>：RankIC / ICIR / IC_t（factor_eval 框架，训练段内评估防泄露）；
+  ② <strong>边际贡献</strong>：与现有因子库的相关性（冗余簇）、模型 vs 最强单因子差；
+  ③ <strong>组合内贡献</strong>：champion 集成中的实际权重 / 重要性，以及留一法（leave-one-out）walkforward 对比。
+  三层分开呈现——一个 IC 很高但与动量簇冗余的因子，真实贡献是零，表格必须让这一点无处遁形。
+</div>
+
+<h3>5.3 公式因子编辑器（<code>/factors/new</code>）——研发闭环</h3>
+<div class="wire">
+  <div class="row">
+    <div class="box b2">左：YAML/DSL 编辑器（id/formula/tags/expected_sign，带 schema 即时校验 + 依赖解析预览）</div>
+    <div class="box">右：实时预览：公式解析树 → 涉及的原始列 → 与现有因子的相关性预检</div>
+  </div>
+  <div class="row">
+    <div class="box hi">底部操作条：「保存到 custom.yaml 草稿」→「发起评估会话」（USE_FORMULA_FACTORS=1 + FORMULA_FACTOR_SUBSET=&lt;id&gt; 的 backtest/walkforward）→ 结果回填因子详情页</div>
+  </div>
+</div>
+<p>流程即 <code>factor_library</code> 的可视化封装：写公式 → 静态校验（schema.py 的字段 + explicit_deps）→ 评估会话 → 看三层贡献 → 一键 enabled=true 入库。评估会话通过 <code>param_env</code> 注入 <code>USE_FORMULA_FACTORS=1</code>，与 CLI 完全同构。</p>
+
+<h3>5.4 需要补齐的后端小契约</h3>
+<table>
+  <tr><th>缺口</th><th>补齐方式</th><th>工作量</th></tr>
+  <tr><td>单因子分层净值曲线数据（P2）</td><td><code>factor_eval.layer_equity()</code> 已存在，eval 会话落盘 <code>factor_layer_&lt;id&gt;.parquet</code></td><td>小</td></tr>
+  <tr><td>champion 内逐因子权重/重要性（「模型内贡献」列）</td><td>模型详情接口导出 ensemble 的 IC 权重时序 + GBM feature_importance → <code>models/champion/factor_contrib.parquet</code></td><td>中</td></tr>
+  <tr><td>留一法对比（P5③）</td><td>复用 walkforward 会话 + <code>LINEAR_FACTORS</code> 排除名单参数，结果挂在因子详情页</td><td>中</td></tr>
+  <tr><td>原生因子（非 YAML 族）的统一注册表</td><td>总览表把原生族（technical/alpha158/gtja191/北向/基本面）也映射出 id/类别/描述元数据</td><td>小</td></tr>
+</table>
+</section>
+
+<section id="s6">
+<h2><span class="num">6</span>页面四 · 行情观察（<code>/market</code>）</h2>
+<p>保留现有实现（个股 K 线 + 指标叠加、市场宽度、等权指数），仅做两处补强：</p>
+<ul>
+  <li><strong>与交易台联动</strong>：从订单执行单/持仓表点 symbol 直接跳 <code>/market?symbol=xxx</code> 并高亮买卖点参考价（limit_price）；</li>
+  <li><strong>信号上下文</strong>：个股视图叠加「当前模型排名分位 + 所属因子的暴露」，回答「模型为什么选它」。</li>
+</ul>
+</section>
+
+<section id="s7">
+<h2><span class="num">7</span>横切 · 会话引擎与 step-report 契约</h2>
+<p>现有机制是本系统最该保留的资产，新前端继续站在它上面：</p>
+<ul>
+  <li><strong>自描述 step report</strong>（<code>pipeline/context.py</code>）：<code>{step,title,status,elapsed,summary,kpis,tables,figures,notes}</code>，通用渲染器零成本承接新步骤——因子评估、留一法对比等新能力只需写 pipeline step，不需写前端。</li>
+  <li><strong>调度独立化</strong>（必要改造）：把 <code>webapp/sessions.py::tick()</code> 的进程内心跳 + 内存 Popen 表抽成独立调度模块（<code>pipeline/scheduler.py</code>），webapp 与未来的 CLI/TUI 共用；状态全部落盘（session.json），webapp 重启不丢任务。</li>
+  <li><strong>进度契约</strong>：沿用 <code>current_progress</code>（phase/pct/eta/extras）；walkforward 已有逐窗口 ETA 日志，把窗口号/Sharpe 也桥进 extras，前端渲染迷你窗口时间线。</li>
+  <li><strong>并发与资源护栏</strong>：全市场任务内存峰值 ~8-10GB，并发上限默认 1 保持；提交长任务前弹「预计 5h / 峰值内存」确认。</li>
+</ul>
+</section>
+
+<section id="s8">
+<h2><span class="num">8</span>空态与异常态设计</h2>
+<table>
+  <tr><th>场景</th><th>呈现</th></tr>
+  <tr><td>从未跑过实盘（无 orders/holdings/account）</td><td>交易台显示「三步开始」引导卡：① 跑 canonical walkforward ② 创建 account.csv ③ 今晚跑 daily_run.sh</td></tr>
+  <tr><td>无 champion 模型（models/ 为空）</td><td>模型实验室显示「首次训练」引导：推荐配置 = 当前 config.py 默认 + 预计耗时</td></tr>
+  <tr><td>因子评估 CSV 缺失/过期</td><td>工作台主表只显示 YAML 元数据，评估列统一灰色「未评估」+ 一键发起 eval 会话；CSV 日期 &lt; 最新数据日期 20 天以上显示「结果可能过期」角标</td></tr>
+  <tr><td>北向/宏观等数据源近期无更新</td><td>顶栏数据新鲜度灯变黄，鼠标悬停列出各源最后更新日期（hk_hold 限速 1次/小时 的说明常驻）</td></tr>
+  <tr><td>任务失败</td><td>Runs 表红色徽章，详情页 traceback 完整可读，并给「以相同参数重试」按钮</td></tr>
+  <tr><td>凭证缺失</td><td>全局横幅「TUSHARE_TOKEN 未配置」，数据类入口禁用并指向配置说明</td></tr>
+</table>
+</section>
+
+<section id="s9">
+<h2><span class="num">9</span>技术方案与迁移计划</h2>
+<h3>9.1 技术选型：延续 Dash，重构信息架构</h3>
+<p>不更换框架。理由：① step-report 契约已让渲染层与计算解耦，痛点在信息架构而非技术栈；② 现有 dataio 的 lru_cache + 预热机制对 6M 行面板已验证；③ 团队（当前维护者）已熟悉 Dash 回调模式。升级点：引入 <code>dash-ag-grid</code> 承载因子主表与订单执行单（排序/筛选/行内操作远比 html.Table 顺手），图表继续用 Plotly。</p>
+<h3>9.2 分阶段实施</h3>
+<table>
+  <tr><th>阶段</th><th>内容</th><th>验收</th></tr>
+  <tr><td><span class="pill p0">P0</span> 骨架</td><td>新路由与侧边栏；调度器独立化；交易台只读版（订单/持仓/风控灯/账户快照）</td><td>daily_run.sh 一晚产物在首页完整可读</td></tr>
+  <tr><td><span class="pill p1">P1</span> 模型实验室</td><td>champion/staging 卡片、验证时间线、Runs 表迁移、新建任务面板（成本预告+参数diff）</td><td>从前端发起 walkforward → 结果与 CLI canonical 同构展示</td></tr>
+  <tr><td><span class="pill p1">P2</span> 因子工作台</td><td>因子主表（含模型内贡献列）、单因子详情六面板、冗余簇热图</td><td>任一因子三层贡献一屏可答</td></tr>
+  <tr><td><span class="pill p2">P3</span> 研发闭环</td><td>公式编辑器 + 评估会话 + 入库流转；留一法对比入口；行情页联动</td><td>新公式因子从撰写到入库全程无 CLI</td></tr>
+</table>
+<h3>9.3 兼容与清理</h3>
+<ul>
+  <li>旧路由 <code>/session/&lt;id&gt;</code> 301 到 <code>/runs/&lt;id&gt;</code>；旧会话产物原样可读。</li>
+  <li>canonical 产物路径不变（<code>outputs/walkforward/</code> 等），CLI 用户无感知。</li>
+  <li>删除遗留散文件产物（<code>outputs/walkforward_oos_*.html</code> 等）在迁移收尾时统一归档。</li>
+</ul>
+</section>
+
+<section id="s10">
+<h2><span class="num">10</span>非目标</h2>
+<ul>
+  <li><strong>不做券商直连/自动下单</strong>：执行环节保持人工（订单 CSV + 勾选确认），本系统定位是决策支持；</li>
+  <li><strong>不做多账户/多用户/权限体系</strong>：单机单用户研究工作站；</li>
+  <li><strong>不做实时行情推送</strong>：日频系统，分钟级刷新无意义，轮询间隔 ≥2s 足够；</li>
+  <li><strong>不在前端引入训练计算</strong>：一切重活走会话子进程，前端进程保持可热重载、可随意重启。</li>
+</ul>
+<hr style="border-color:var(--line);margin-top:60px">
+<p><small>A股量化交易系统 · 前端重设计 v2.0 · 2026-10 · 配套文档：<a href="system_architecture.html">系统架构解析</a></small></p>
+</section>
+
+</main>
+</div>
+<script>
+// TOC 高亮跟随滚动
+const links=[...document.querySelectorAll('nav#toc a')];
+const secs=links.map(a=>document.querySelector(a.getAttribute('href')));
+const obs=new IntersectionObserver(es=>{
+  es.forEach(e=>{if(e.isIntersecting){
+    links.forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#'+e.target.id));
+  }});
+},{rootMargin:'-10% 0px -80% 0px'});
+secs.forEach(s=>s&&obs.observe(s));
+</script>
+</body>
+</html>

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .schema import FactorDefinition
 from .parser import extract_dependencies
@@ -117,11 +117,6 @@ def topological_sort(nodes: list[FactorNode]) -> list[FactorNode]:
     CycleError
         If a circular dependency is detected.
     """
-    # Build lookup: column → producing FactorNode
-    col_to_node: dict[str, FactorNode] = {
-        node.produces: node for node in nodes
-    }
-
     # Build reverse edges: column → list of nodes that depend on it
     reverse: dict[str, list[FactorNode]] = {}
     for node in nodes:
@@ -129,14 +124,10 @@ def topological_sort(nodes: list[FactorNode]) -> list[FactorNode]:
             reverse.setdefault(dep, []).append(node)
 
     # In-degree: number of unsatisfied dependencies
-    in_degree: dict[str, int] = {
-        node.produces: len(node.depends_on) for node in nodes
-    }
+    in_degree: dict[str, int] = {node.produces: len(node.depends_on) for node in nodes}
 
     # Queue: nodes with in_degree == 0 (all deps satisfied)
-    queue = deque(
-        [node for node in nodes if in_degree[node.produces] == 0]
-    )
+    queue = deque([node for node in nodes if in_degree[node.produces] == 0])
 
     sorted_nodes: list[FactorNode] = []
 
@@ -152,10 +143,7 @@ def topological_sort(nodes: list[FactorNode]) -> list[FactorNode]:
 
     if len(sorted_nodes) != len(nodes):
         remaining = [n.produces for n in nodes if n not in sorted_nodes]
-        raise CycleError(
-            f"公式因子之间存在循环依赖: {remaining}. "
-            f"请检查因子之间的引用关系."
-        )
+        raise CycleError(f"公式因子之间存在循环依赖: {remaining}. " f"请检查因子之间的引用关系.")
 
     return sorted_nodes
 
@@ -199,7 +187,8 @@ def resolve_execution_order(
         if unresolved:
             logger.warning(
                 "跳过因子 %s: 依赖列 %s 不存在, 且没有其他公式因子产生它们",
-                node.produces, sorted(unresolved),
+                node.produces,
+                sorted(unresolved),
             )
             # Also remove from produced set so downstream factors that depend
             # on this one get caught

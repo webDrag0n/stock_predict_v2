@@ -3,6 +3,7 @@
 Ensures the project root is importable (config, src, predict_tomorrow, ...)
 regardless of how pytest is invoked, replacing the per-file sys.path hacks.
 """
+
 from __future__ import annotations
 
 import os

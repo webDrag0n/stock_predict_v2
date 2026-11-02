@@ -10,17 +10,26 @@
 
 关键时序：**先写 os.environ，再 import pipeline**（config 在 import 时读 env）。
 """
+
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
 import traceback
 import warnings
 
-import pandas as _pd
+# 项目根与 src/ 加入 sys.path（src 优先），与 run_webapp.py / scripts/ 入口一致。
+# 只加路径不 import 项目模块：config 在 import 时读 env，必须等 main() 写好
+# os.environ 之后（见下）才允许触发。
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _PROJECT_ROOT)
+sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src"))
+
+import pandas as _pd  # noqa: E402  # sys.path 引导块必须在 import 之前
 
 # pandas 碎片化告警（PerformanceWarning）属构建期噪声；入口脚本显式屏蔽
 # （库模块不再在 import 期动全局 warnings 状态）。
@@ -40,6 +49,13 @@ def _save(path: str, obj: dict) -> None:
 
 
 def main() -> int:
+    # 库模块（src/data, src/live, src/ensemble 等）走标准 logging，入口统一配置；
+    # 会话子进程 stderr 落盘 outputs/job_logs/，logging 默认写 stderr 即被收集。
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     ap = argparse.ArgumentParser(description="运行一个会话流水线")
     ap.add_argument("--session-dir", required=True)
     args = ap.parse_args()
@@ -52,10 +68,9 @@ def main() -> int:
 
     # 1) 先写 os.environ（config 在 import pipeline.registry/steps_* 时读取 env）。
     #    param_env 是轻量模块，import 它不触发 config，因此映射可先拿到。
-    root = os.path.dirname(os.path.abspath(__file__))
-    sys.path.insert(0, os.path.join(root, "src"))
-    sys.path.insert(0, root)
+    #    sys.path 已在文件顶部引导块配好。
     from pipeline.param_env import env_overrides
+
     for k, v in env_overrides(params).items():
         os.environ[k] = v
 
@@ -67,6 +82,7 @@ def main() -> int:
     os.makedirs(steps_dir, exist_ok=True)
 
     from pipeline.context import StepContext, _jsonable
+
     ctx = StepContext(session_dir=sdir, params=params, shared={})
 
     meta["status"] = "running"
@@ -75,8 +91,9 @@ def main() -> int:
     meta["failure"] = None
     # 步骤骨架（若未初始化）
     if not meta.get("steps"):
-        meta["steps"] = [{"step": sid, "title": title, "status": "pending"}
-                         for sid, title, _ in steps]
+        meta["steps"] = [
+            {"step": sid, "title": title, "status": "pending"} for sid, title, _ in steps
+        ]
     _save(meta_path, meta)
 
     print(f"[run_session] mode={mode} params={params}", flush=True)
@@ -90,8 +107,7 @@ def main() -> int:
 
         def cb(payload: dict) -> None:
             now = time.time()
-            key = (payload.get("phase", ""), payload.get("pct", 0),
-                   payload.get("message", ""))
+            key = (payload.get("phase", ""), payload.get("pct", 0), payload.get("message", ""))
             if last_key[0] == key and (now - last_ts[0]) < 1.5:
                 return
             last_key[0] = key
@@ -111,9 +127,17 @@ def main() -> int:
         meta["steps"][i]["status"] = "running"
         meta["current_step"] = i
         meta["current_progress"] = {
-            "step_index": i, "step_id": sid, "step_title": title,
-            "phase": "步骤启动", "current": 0, "total": 1, "pct": 0.0,
-            "elapsed_sec": 0.0, "eta_sec": 0.0, "message": "", "extras": {},
+            "step_index": i,
+            "step_id": sid,
+            "step_title": title,
+            "phase": "步骤启动",
+            "current": 0,
+            "total": 1,
+            "pct": 0.0,
+            "elapsed_sec": 0.0,
+            "eta_sec": 0.0,
+            "message": "",
+            "extras": {},
             "ts": time.time(),
         }
         _save(meta_path, meta)
@@ -144,15 +168,24 @@ def main() -> int:
                 "exc_msg": str(e)[:500],
                 "traceback": tb,
                 "progress_position": cur_prog.get("phase", ""),
-                "progress_detail": (f"{cur_prog.get('current',0)}/{cur_prog.get('total',0)}"
-                                    f" ({cur_prog.get('pct',0):.0%})"),
+                "progress_detail": (
+                    f"{cur_prog.get('current',0)}/{cur_prog.get('total',0)}"
+                    f" ({cur_prog.get('pct',0):.0%})"
+                ),
                 "ts": time.time(),
             }
-            rep = {"step": sid, "title": title, "status": "failed",
-                   "elapsed": round(time.time() - t0, 2), "summary": "步骤失败",
-                   "kpis": [], "tables": [], "figures": [],
-                   "failure": failure,
-                   "notes": [f"❌ 步骤执行失败：\n{tb}"]}
+            rep = {
+                "step": sid,
+                "title": title,
+                "status": "failed",
+                "elapsed": round(time.time() - t0, 2),
+                "summary": "步骤失败",
+                "kpis": [],
+                "tables": [],
+                "figures": [],
+                "failure": failure,
+                "notes": [f"❌ 步骤执行失败：\n{tb}"],
+            }
             _save(os.path.join(steps_dir, f"{i:02d}_{sid}.json"), rep)
             meta["steps"][i]["status"] = "failed"
             meta["steps"][i]["elapsed"] = rep["elapsed"]

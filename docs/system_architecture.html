@@ -151,6 +151,7 @@ footer{color:var(--dim2);font-size:12.5px;text-align:center;padding:30px;border-
 <nav id="toc">
   <h2>目录</h2>
   <a href="#s0">总览：系统全景</a>
+  <a href="#s0b">模块架构与数据流</a>
   <a href="#s1">① 数据层</a>
   <a href="#s2">② 因子与标签</a>
   <a href="#s3">③ 模型层：增量集成</a>
@@ -158,7 +159,7 @@ footer{color:var(--dim2);font-size:12.5px;text-align:center;padding:30px;border-
   <a href="#s5">⑤ 风控：五层叠乘链</a>
   <a href="#s6">⑥ 撮合引擎：成交模拟</a>
   <a href="#s7">⑦ 成本模型</a>
-  <a href="#s8">⑧ 双回测引擎对比</a>
+  <a href="#s8">⑧ 回测引擎（唯一口径）</a>
   <a href="#s9">⑨ 回测 = 实盘同分布</a>
   <a href="#s10">⑩ 防泄露体系</a>
   <a href="#s11">⑪ 测试与质量保障</a>
@@ -281,6 +282,243 @@ footer{color:var(--dim2);font-size:12.5px;text-align:center;padding:30px;border-
   });
 })();
 </script>
+
+<!-- ============================ 0.5 模块架构与数据流 ============================ -->
+<section id="s0b">
+<h2><span class="num">00.5</span>模块架构与数据流</h2>
+<p class="sub">方框 = 模块（标题即代码文件/目录），<strong>箭头上的文字 = 模块间流动的数据产物</strong>。
+上方为离线研究轨道，下方为每晚实盘轨道，中间橙色带是两者共享的内核；虚线框为系统外部依赖。</p>
+
+<figure>
+<svg viewBox="0 0 1560 820" width="100%">
+  <defs>
+    <marker id="ah2" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#9aa7b8"/>
+    </marker>
+  </defs>
+
+  <text x="780" y="28" text-anchor="middle" class="svg-label" font-size="14" font-weight="700">原始行情 → 因子/标签 → 分数 → 订单 → 成交/净值：两条轨道，一个内核</text>
+
+  <!-- ========== ① 数据准备 ========== -->
+  <rect x="40" y="70" width="160" height="92" rx="9" fill="#161b22" stroke="#f2cc60" stroke-width="1.2" stroke-dasharray="5 4"/>
+  <text x="52" y="94" class="svg-label" font-weight="700" font-size="12" fill="#f2cc60">外部数据源</text>
+  <text x="52" y="112" class="svg-dim" font-size="10">tushare Pro 日线/估值</text>
+  <text x="52" y="128" class="svg-dim" font-size="10">akshare 财务/价值</text>
+  <text x="52" y="144" class="svg-dim" font-size="10">期权 IV · 宏观 · 北向</text>
+
+  <path d="M200 116 L320 116" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="260" y="108" text-anchor="middle" class="svg-dim" font-size="9">日线/估值/IV</text>
+
+  <rect x="320" y="70" width="170" height="92" rx="9" fill="#161b22" stroke="#f2cc60" stroke-width="1.2"/>
+  <text x="332" y="94" class="svg-label" font-weight="700" font-size="11" fill="#f2cc60">src/data/tushare.py</text>
+  <text x="332" y="112" class="svg-dim" font-size="10">全市场按日拉取·增量更新</text>
+  <text x="332" y="128" class="svg-dim" font-size="10">质量过滤：逐行可交易性</text>
+  <text x="332" y="144" class="svg-dim" font-size="10">pit 对齐：+1d/公告/lag1</text>
+
+  <path d="M490 116 L610 116" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="550" y="108" text-anchor="middle" class="svg-dim" font-size="9">OHLCV parquet</text>
+
+  <rect x="610" y="70" width="170" height="92" rx="9" fill="#161b22" stroke="#f2cc60" stroke-width="1.2"/>
+  <text x="622" y="94" class="svg-label" font-weight="700" font-size="11" fill="#f2cc60">src/data/factors/</text>
+  <text x="622" y="112" class="svg-dim" font-size="10">技术/正交/α158/GTJA191</text>
+  <text x="622" y="128" class="svg-dim" font-size="10">公式库 parser/evaluator</text>
+  <text x="622" y="144" class="svg-dim" font-size="10">宏观·期权 lag1 合并</text>
+
+  <path d="M780 116 L900 116" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="840" y="108" text-anchor="middle" class="svg-dim" font-size="9">命名因子面板</text>
+
+  <rect x="900" y="70" width="190" height="92" rx="9" fill="#161b22" stroke="#f2cc60" stroke-width="1.2"/>
+  <text x="912" y="94" class="svg-label" font-weight="700" font-size="11" fill="#f2cc60">src/features.py</text>
+  <text x="912" y="112" class="svg-dim" font-size="10">get_feature_matrix 组装</text>
+  <text x="912" y="128" class="svg-dim" font-size="10">responder_6 行业中性标签</text>
+  <text x="912" y="144" class="svg-dim" font-size="10">签名缓存+features.json</text>
+
+  <text x="1110" y="92" class="svg-label" font-weight="700" font-size="13" fill="#f2cc60">① 数据准备</text>
+  <text x="1110" y="112" class="svg-dim" font-size="10">全市场 ~5300 只/日 · 逐行无泄露</text>
+  <text x="1110" y="130" class="svg-dim" font-size="10">缓存签名：因子改一行即失效</text>
+
+  <!-- D -> E -->
+  <path d="M995 162 L995 230" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="1005" y="198" class="svg-dim" font-size="9.5">特征矩阵+成熟标签</text>
+  <!-- D -> N (最新截面，绕左侧) -->
+  <path d="M950 162 V195 H250 V505 H635 V520" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="580" y="188" text-anchor="middle" class="svg-dim" font-size="9.5">最新截面（无标签）</text>
+
+  <!-- ========== ② 研究轨道 ========== -->
+  <text x="300" y="258" class="svg-label" font-weight="700" font-size="13" fill="#d2a8ff">② 研究轨道（离线）</text>
+  <text x="300" y="278" class="svg-dim" font-size="10">滚动训练产出 OOS 分数，</text>
+  <text x="300" y="296" class="svg-dim" font-size="10">以 score_cache 喂入唯一回测引擎</text>
+
+  <rect x="900" y="230" width="190" height="92" rx="9" fill="#161b22" stroke="#d2a8ff" stroke-width="1.2"/>
+  <text x="912" y="254" class="svg-label" font-weight="700" font-size="11" fill="#d2a8ff">src/walkforward.py</text>
+  <text x="912" y="272" class="svg-dim" font-size="10">滚动窗口 train_predict</text>
+  <text x="912" y="288" class="svg-dim" font-size="10">gbm_l2/ic_linear/fusion</text>
+  <text x="912" y="304" class="svg-dim" font-size="10">多 seed bagging 合并</text>
+
+  <path d="M1090 276 L1150 276" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="1120" y="268" text-anchor="middle" class="svg-dim" font-size="9">OOS 预测</text>
+
+  <rect x="1150" y="230" width="150" height="92" rx="9" fill="#161b22" stroke="#d2a8ff" stroke-width="1.2"/>
+  <text x="1162" y="254" class="svg-label" font-weight="700" font-size="11" fill="#d2a8ff">score_cache</text>
+  <text x="1162" y="272" class="svg-dim" font-size="10">{日→{股：分数}}</text>
+  <text x="1162" y="288" class="svg-dim" font-size="10">指纹=特征+配置哈希</text>
+  <text x="1162" y="304" class="svg-dim" font-size="10">指纹不符拒绝复用</text>
+
+  <path d="M1300 276 L1340 276" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="1320" y="268" text-anchor="middle" class="svg-dim" font-size="9">指纹</text>
+
+  <rect x="1340" y="230" width="200" height="92" rx="9" fill="#161b22" stroke="#d2a8ff" stroke-width="1.2"/>
+  <text x="1352" y="254" class="svg-label" font-weight="700" font-size="11" fill="#d2a8ff">src/backtest_daily.py</text>
+  <text x="1352" y="272" class="svg-dim" font-size="10">run_daily_replay 唯一引擎</text>
+  <text x="1352" y="288" class="svg-dim" font-size="10">次日真实 OHLC 撮合</text>
+  <text x="1352" y="304" class="svg-dim" font-size="10">现金/估值双守恒断言</text>
+
+  <!-- G -> kernel band -->
+  <path d="M1360 322 L1000 378" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="1170" y="340" text-anchor="middle" class="svg-dim" font-size="9.5">调用共享内核：决策/撮合/成本/风控</text>
+  <!-- G -> outputs (绕右侧) -->
+  <path d="M1490 322 H1552 V735 H1506" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="1542" y="530" text-anchor="middle" class="svg-dim" font-size="9.5" transform="rotate(-90 1542 530)">trades · 净值 · 评估报告</text>
+
+  <!-- ========== ③ 共享内核 ========== -->
+  <rect x="280" y="375" width="720" height="95" rx="10" fill="rgba(255,166,87,.06)" stroke="#ffa657" stroke-width="1.8"/>
+  <text x="295" y="395" class="svg-label" font-weight="700" font-size="12.5" fill="#ffa657">共享内核 ★ —— 回测与实盘唯一实现（test_risk_parity 锁定）</text>
+
+  <rect x="295" y="402" width="225" height="58" rx="7" fill="#1c2330" stroke="#ffa657" stroke-width="1.2"/>
+  <text x="307" y="424" class="svg-label" font-weight="700" font-size="11" fill="#ffa657">trading.py ★</text>
+  <text x="307" y="442" class="svg-dim" font-size="10">decide_orders 订单生成</text>
+  <text x="307" y="458" class="svg-dim" font-size="10">simulate_fills 撮合 · 成本</text>
+
+  <rect x="532" y="402" width="190" height="58" rx="7" fill="#1c2330" stroke="#ffa657" stroke-width="1.2"/>
+  <text x="544" y="424" class="svg-label" font-weight="700" font-size="11" fill="#ffa657">risk.py ★</text>
+  <text x="544" y="442" class="svg-dim" font-size="10">compute_risk_scale</text>
+  <text x="544" y="458" class="svg-dim" font-size="10">五层叠乘 vol/dd/IC/IV</text>
+
+  <rect x="734" y="402" width="250" height="58" rx="7" fill="#1c2330" stroke="#ffa657" stroke-width="1.2"/>
+  <text x="746" y="424" class="svg-label" font-weight="700" font-size="11" fill="#ffa657">src/live_state.py</text>
+  <text x="746" y="442" class="svg-dim" font-size="10">RiskState 风控状态持久化</text>
+  <text x="746" y="458" class="svg-dim" font-size="10">成熟 IC 队列 · update_risk_state</text>
+
+  <text x="1020" y="400" class="svg-label" font-weight="700" font-size="13" fill="#ffa657">③ 共享内核</text>
+  <text x="1020" y="420" class="svg-dim" font-size="10">改一处，回测与实盘同时生效</text>
+  <text x="1020" y="438" class="svg-dim" font-size="10">回测 IC 队列 ∥ 实盘 live_state</text>
+  <text x="1020" y="456" class="svg-dim" font-size="10">动态 topk 仅回测侧·实盘显式报错</text>
+
+  <!-- ========== ④ 实盘轨道 ========== -->
+  <text x="45" y="548" class="svg-label" font-weight="700" font-size="13" fill="#ff7b72">④ 实盘轨道（每晚 cron）</text>
+  <text x="45" y="572" class="svg-dim" font-size="10">T+1 语义与回测对齐</text>
+  <text x="45" y="590" class="svg-dim" font-size="10">订单 CSV → 次日执行</text>
+
+  <rect x="320" y="520" width="180" height="92" rx="9" fill="#161b22" stroke="#ff7b72" stroke-width="1.2"/>
+  <text x="332" y="544" class="svg-label" font-weight="700" font-size="11" fill="#ff7b72">src/model_store.py</text>
+  <text x="332" y="562" class="svg-dim" font-size="10">champion/staging/archive</text>
+  <text x="332" y="578" class="svg-dim" font-size="10">指纹 manifest·原子写</text>
+  <text x="332" y="594" class="svg-dim" font-size="10">model_gate 晋升门控</text>
+
+  <path d="M500 566 L560 566" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="530" y="558" text-anchor="middle" class="svg-dim" font-size="9">冻结权重</text>
+
+  <rect x="560" y="520" width="190" height="92" rx="9" fill="#161b22" stroke="#ff7b72" stroke-width="1.2"/>
+  <text x="572" y="544" class="svg-label" font-weight="700" font-size="11" fill="#ff7b72">src/live.py</text>
+  <text x="572" y="562" class="svg-dim" font-size="10">load_live_panel 截面</text>
+  <text x="572" y="578" class="svg-dim" font-size="10">champion_predict_latest</text>
+  <text x="572" y="594" class="svg-dim" font-size="10">retrain_trigger 重训门控</text>
+
+  <path d="M750 566 L810 566" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="780" y="558" text-anchor="middle" class="svg-dim" font-size="9">截面分数</text>
+
+  <rect x="810" y="520" width="170" height="92" rx="9" fill="#161b22" stroke="#ff7b72" stroke-width="1.2"/>
+  <text x="822" y="544" class="svg-label" font-weight="700" font-size="11" fill="#ff7b72">predict_tomorrow.py</text>
+  <text x="822" y="562" class="svg-dim" font-size="10">CLI 出单主入口</text>
+  <text x="822" y="578" class="svg-dim" font-size="10">daily_run.sh cron 驱动</text>
+  <text x="822" y="594" class="svg-dim" font-size="10">--commit 确认成交</text>
+
+  <path d="M895 520 L895 478" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="905" y="502" class="svg-dim" font-size="9">decide_orders / trade_costs</text>
+
+  <path d="M980 566 L1040 566" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="1010" y="558" text-anchor="middle" class="svg-dim" font-size="9">订单</text>
+
+  <rect x="1040" y="520" width="140" height="92" rx="9" fill="#161b22" stroke="#ff7b72" stroke-width="1.2"/>
+  <text x="1052" y="544" class="svg-label" font-weight="700" font-size="11" fill="#ff7b72">orders CSV</text>
+  <text x="1052" y="562" class="svg-dim" font-size="10">orders_YYYYMMDD</text>
+  <text x="1052" y="578" class="svg-dim" font-size="10">blocked 涨跌停标记</text>
+  <text x="1052" y="594" class="svg-dim" font-size="10">碎单 &lt;3万 过滤</text>
+
+  <path d="M1180 566 L1240 566" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="1210" y="558" text-anchor="middle" class="svg-dim" font-size="9">成交后commit</text>
+
+  <rect x="1240" y="520" width="260" height="92" rx="9" fill="#161b22" stroke="#ff7b72" stroke-width="1.2"/>
+  <text x="1252" y="544" class="svg-label" font-weight="700" font-size="11" fill="#ff7b72">src/execution.py + live_tracking</text>
+  <text x="1252" y="562" class="svg-dim" font-size="10">成交写回 holdings.csv</text>
+  <text x="1252" y="578" class="svg-dim" font-size="10">risk_state 更新 · 净值快照</text>
+  <text x="1252" y="594" class="svg-dim" font-size="10">rejected 单原因跟踪</text>
+
+  <!-- ========== ⑤ 存储与消费 ========== -->
+  <text x="290" y="668" class="svg-label" font-weight="700" font-size="12" fill="#9aa7b8">⑤ 存储与消费（被各层读写）</text>
+
+  <rect x="40" y="680" width="230" height="110" rx="9" fill="#161b22" stroke="#7ee787" stroke-width="1.2"/>
+  <text x="52" y="704" class="svg-label" font-weight="700" font-size="11" fill="#7ee787">pipeline/ 编排</text>
+  <text x="52" y="722" class="svg-dim" font-size="10">会话 = 独立子进程</text>
+  <text x="52" y="738" class="svg-dim" font-size="10">scheduler 并发/心跳/对账</text>
+  <text x="52" y="754" class="svg-dim" font-size="10">registry 声明式步骤链</text>
+  <text x="52" y="770" class="svg-dim" font-size="10">steps: train/wf/nextday/eval</text>
+
+  <rect x="330" y="680" width="240" height="110" rx="9" fill="#161b22" stroke="#9aa7b8" stroke-width="1.2"/>
+  <text x="342" y="704" class="svg-label" font-weight="700" font-size="11" fill="#9aa7b8">models/ 模型库</text>
+  <text x="342" y="722" class="svg-dim" font-size="10">champion/ 现役（冻结出单）</text>
+  <text x="342" y="738" class="svg-dim" font-size="10">staging/ 候选（门控评估）</text>
+  <text x="342" y="754" class="svg-dim" font-size="10">archive/ 历史归档</text>
+
+  <rect x="630" y="680" width="270" height="110" rx="9" fill="#161b22" stroke="#4cc2ff" stroke-width="1.2"/>
+  <text x="642" y="704" class="svg-label" font-weight="700" font-size="11" fill="#4cc2ff">webapp/ 交互层</text>
+  <text x="642" y="722" class="svg-dim" font-size="10">Dash 5 页面：交易台/行情/</text>
+  <text x="642" y="738" class="svg-dim" font-size="10">因子台/模型实验室/会话详情</text>
+  <text x="642" y="754" class="svg-dim" font-size="10">dataio 读取 outputs 产物</text>
+  <text x="642" y="770" class="svg-dim" font-size="10">run_session.py 提交会话</text>
+
+  <rect x="960" y="680" width="220" height="110" rx="9" fill="#161b22" stroke="#9aa7b8" stroke-width="1.2"/>
+  <text x="972" y="704" class="svg-label" font-weight="700" font-size="11" fill="#9aa7b8">实盘状态文件</text>
+  <text x="972" y="722" class="svg-dim" font-size="10">holdings.csv 目标持仓</text>
+  <text x="972" y="738" class="svg-dim" font-size="10">risk_state.json 风控状态</text>
+  <text x="972" y="754" class="svg-dim" font-size="10">pred_hist 预测历史(120d)</text>
+
+  <rect x="1240" y="680" width="260" height="110" rx="9" fill="#161b22" stroke="#9aa7b8" stroke-width="1.2"/>
+  <text x="1252" y="704" class="svg-label" font-weight="700" font-size="11" fill="#9aa7b8">outputs/ 产物</text>
+  <text x="1252" y="722" class="svg-dim" font-size="10">sessions/ 会话产物+日志</text>
+  <text x="1252" y="738" class="svg-dim" font-size="10">walkforward/ 滚动报告</text>
+  <text x="1252" y="754" class="svg-dim" font-size="10">trades/净值/评估 CSV</text>
+  <text x="1252" y="770" class="svg-dim" font-size="10">ablations/ 消融结果</text>
+
+  <!-- storage arrows -->
+  <path d="M400 612 L450 677" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="388" y="650" text-anchor="middle" class="svg-dim" font-size="9">模型+manifest</text>
+
+  <path d="M1340 612 L1080 677" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="1250" y="650" text-anchor="middle" class="svg-dim" font-size="9">holdings / risk_state / 快照</text>
+
+  <path d="M990 680 L990 478" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="978" y="575" text-anchor="middle" class="svg-dim" font-size="9.5" transform="rotate(-90 978 575)">risk_scale 状态输入</text>
+
+  <path d="M1240 762 V800 H900 V792" stroke="#9aa7b8" stroke-width="1.4" fill="none" marker-end="url(#ah2)"/>
+  <text x="1070" y="796" text-anchor="middle" class="svg-dim" font-size="9">读取产物可视化</text>
+
+  <!-- pipeline orchestration -->
+  <path d="M150 677 L150 250" stroke="#7ee787" stroke-width="1.4" fill="none" marker-end="url(#ah2)" stroke-dasharray="6 4"/>
+  <text x="136" y="460" text-anchor="middle" class="svg-dim" font-size="9.5" fill="#7ee787" transform="rotate(-90 136 460)">pipeline 编排驱动：train / walkforward / nextday / factoreval / modeleval</text>
+</svg>
+<figcaption>图 0-2 · 模块架构与数据流。方框 = 模块（标题即代码文件/目录），箭头文字 = 流动的数据产物；
+中间橙色带为回测/实盘共享内核；虚线框 = 系统外部依赖；左侧绿色虚线 = pipeline 编排触发，右侧绕行长线 = 回测产物落盘。</figcaption>
+</figure>
+
+<div class="callout">
+<div class="t">三条读图路径</div>
+① <strong>研究路径</strong>（上半）：外部数据 → 因子/标签 → walkforward 滚动训练 → score_cache（带指纹）→ run_daily_replay → outputs/ 报告；
+② <strong>实盘路径</strong>（下半）：models/champion 冻结权重 → live.py 最新截面预测 → predict_tomorrow 出单 → 次日成交 commit → 状态文件回写，风控状态再向上反馈给共享内核的 risk_scale；
+③ <strong>消费路径</strong>：webapp 只读 outputs/ 与状态文件，不参与上游计算——可视化永远不会污染数据流。
+</div>
+</section>
+
 <!-- ============================ 1. 数据层 ============================ -->
 <section id="s1">
 <h2><span class="num">01</span>数据层：全市场、逐行无泄露、缓存可失效</h2>
@@ -643,7 +881,7 @@ IC 降仓是<strong>渐进的、滞后的</strong>（信号失效型风险）；
 <!-- ============================ 7. 成本模型 ============================ -->
 <section id="s7">
 <h2><span class="num">07</span>成本模型：三项成本，一个实现</h2>
-<p class="sub"><code>trading.trade_costs()</code> —— 每日重放引擎、周期调仓引擎、实盘事前估算<strong>三处共用</strong>（2026-09 重构前是两份平行实现，存在漂移风险）</p>
+<p class="sub"><code>trading.trade_costs()</code> —— 每日重放引擎与实盘事前估算<strong>两处共用</strong>（2026-09 重构前是多份平行实现，存在漂移风险）</p>
 
 <pre><span class="cm"># 佣金（双边，每笔最低 5 元）——A股券商普遍规则，纯比例会系统性低估小单成本</span>
 佣金 = max(成交额 × 0.0002, 5元)
@@ -669,25 +907,29 @@ IC 降仓是<strong>渐进的、滞后的</strong>（信号失效型风险）；
 </div>
 </section>
 
-<!-- ============================ 8. 双引擎 ============================ -->
+<!-- ============================ 8. 回测引擎 ============================ -->
 <section id="s8">
-<h2><span class="num">08</span>双回测引擎：为什么是两个，各自回答什么问题</h2>
+<h2><span class="num">08</span>回测引擎：每日重放 run_daily_replay（唯一口径）</h2>
+
+<p>仓库只有<strong>一个</strong>回测引擎：<code>run_daily_replay</code>（src/backtest_daily.py），
+与实盘共用 trading.py 的决策与撮合。它回答的问题是："这套策略<strong>实盘跑</strong>会怎样？"</p>
 
 <table>
-<tr><th></th><th>每日重放引擎 <code>run_daily_replay</code></th><th>周期调仓引擎 <code>run_backtest_periodic</code></th></tr>
-<tr><td>抽象层级</td><td>事件级逐笔（现金、股数、逐笔成交）</td><td>权重级向量化（目标权重 + 真实日收益）</td></tr>
-<tr><td>回答的问题</td><td>"这套策略<strong>实盘跑</strong>会怎样？"</td><td>"这批预测分数的<strong>信号质量</strong>如何？"</td></tr>
-<tr><td>微观结构</td><td>完整：涨跌停/T+1/整手/停牌/除权/参与率/现金约束</td><td>简化：仅成本（同公式）+ 换手</td></tr>
-<tr><td>模型更新</td><td>每日增量续训 + 滚动 IC 定权（生产口径）</td><td>外部传入静态预测序列（walkforward 产出）</td></tr>
-<tr><td>成本</td><td>trade_costs 逐笔</td><td>trade_costs 向量化（同一代码）</td></tr>
-<tr><td>用途</td><td>pipeline 主回测、参数扫描（score_cache 复用）、webapp</td><td>walkforward 滚动 OOS 指标、因子/目标评估</td></tr>
+<tr><th>维度</th><th>口径</th></tr>
+<tr><td>抽象层级</td><td>事件级逐笔（现金、股数、逐笔成交）</td></tr>
+<tr><td>微观结构</td><td>完整：涨跌停/T+1/整手/停牌/除权/参与率/现金约束</td></tr>
+<tr><td>模型更新</td><td>每日增量续训 + 滚动 IC 定权（生产口径）；或以 score_cache 跳过训练直接重放</td></tr>
+<tr><td>成本</td><td>trade_costs 逐笔（佣金+印花税+平方根冲击，唯一实现）</td></tr>
+<tr><td>用途</td><td>pipeline 主回测、walkforward 滚动 OOS（OOS 预测打包为 score_cache 重放）、参数扫描、webapp</td></tr>
 </table>
 
 <div class="callout bad">
-<div class="t">被删除的第三个引擎（教训）</div>
+<div class="t">被删除的两个引擎（教训）</div>
 旧 <code>run_backtest</code>（每日重叠调仓）已被删除且<strong>无回落开关</strong>：对 N 日前瞻目标，它每天在每条 entry 上重复计 N 日收益
 （同一笔收益被 N 个重叠 entry 日计 N 次），且把 N 日步长当 1 日步按 252 年化——Sharpe/PnL 双重虚高。
-项目规则：<strong>不要再引入"每天赚 pos×N日收益"的写法</strong>；没有逐日收益列时显式报错而非回落旧引擎。
+周期调仓向量化引擎 <code>run_backtest_periodic</code>（权重级近似：调仓日收盘成交、无 T+1/整手/涨跌停）也已删除——
+它与实盘口径脱节，walkforward 的 OOS 评估现统一走每日重放（score_cache）。
+项目规则：<strong>不要再引入"每天赚 pos×N日收益"或"向量化权重×日收益"的写法</strong>；没有逐日收益/行情列时显式报错而非回落旧引擎。
 </div>
 
 <div class="callout">
@@ -824,7 +1066,7 @@ IC 降仓是<strong>渐进的、滞后的</strong>（信号失效型风险）；
 </div>
 
 <footer>
-基于 stock_predict_v2 源码生成 · 核心模块：src/trading.py · src/backtest_daily.py · src/backtest.py · src/risk.py · src/ensemble.py · src/data/<br>
+基于 stock_predict_v2 源码生成 · 核心模块：src/trading.py · src/backtest_daily.py · src/risk.py · src/ensemble.py · src/data/<br>
 交互部件的公式与代码实现一一对应；拖动滑块即可验证。
 </footer>
 </section>

@@ -7,6 +7,7 @@ torch 是可选依赖（uv sync --extra attn），缺失时整个模块 skip。
 路径由 tests/conftest.py 统一处理；standalone 运行：
 PYTHONPATH=src:. uv run python tests/test_model_attn.py
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -25,14 +26,16 @@ def _make_panel(n_dates: int = 30):
     np.random.seed(42)
     for d in dates:
         for sym in ["600000.SH", "300001.SZ", "000001.SZ"]:
-            rows.append({
-                "date": d,
-                "symbol": sym,
-                C.TARGET: np.random.randn() * 0.02,
-                "feature_00": np.random.randn(),
-                "feature_01": np.random.randn(),
-                "feature_02": np.random.randn(),
-            })
+            rows.append(
+                {
+                    "date": d,
+                    "symbol": sym,
+                    C.TARGET: np.random.randn() * 0.02,
+                    "feature_00": np.random.randn(),
+                    "feature_01": np.random.randn(),
+                    "feature_02": np.random.randn(),
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -41,9 +44,12 @@ def test_attn_predict():
     dates = panel["date"].unique()
     train = panel[panel["date"] < dates[25]].copy()
     test = panel[panel["date"] >= dates[25]].copy()
-    pred = attn_predict(train, test, ["feature_00", "feature_01", "feature_02"],
-                        params={"epochs": 2, "d_model": 16, "n_heads": 2,
-                                "n_layers": 1, "patience": 1})
+    pred = attn_predict(
+        train,
+        test,
+        ["feature_00", "feature_01", "feature_02"],
+        params={"epochs": 2, "d_model": 16, "n_heads": 2, "n_layers": 1, "patience": 1},
+    )
     assert len(pred) == len(test)
     assert np.isfinite(pred).all()
     print("attn_predict OK, output range:", pred.min(), pred.max())

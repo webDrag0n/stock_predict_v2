@@ -17,6 +17,7 @@ A-share specifics:
     market-neutral is kept as a RESEARCH reference only (not practically tradeable).
   - costs: 0.02%% commission per side + 0.1%% stamp duty on the SELL side.
 """
+
 from __future__ import annotations
 
 import os
@@ -28,6 +29,11 @@ MODEL_DIR = os.path.join(ROOT, "models")
 OUTPUT_DIR = os.path.join(ROOT, "outputs")
 CACHE_DIR = os.path.join(ROOT, "data_cache")
 CREDENTIALS_FILE = os.path.join(ROOT, "config_credentials.toml")
+
+# load_factor_panel 磁盘缓存：签名全命中直接读 parquet；仅尾部新增交易日时
+# 只重算最后 N 个交易日的因子窗口并与缓存拼接（签名 = 因子配置 + 因子代码
+# 内容哈希，不含日期范围）。置 0 强制每晚全量重算。
+FACTOR_PANEL_CACHE = os.environ.get("FACTOR_PANEL_CACHE", "1") == "1"
 
 
 # --- Credentials -----------------------------------------------------------
@@ -74,7 +80,7 @@ UNIVERSE_MODE = os.environ.get("UNIVERSE_MODE", "all")  # "all" | "screen"
 # market includes penny stocks, suspended names and illiquid micro-caps that
 # corrupt the cross-section and aren't realistically tradeable.
 MAIN_BOARD_ONLY = os.environ.get("MAIN_BOARD_ONLY", "0") == "1"  # exclude STAR/ChiNext/BSE
-MIN_PRICE = float(os.environ.get("MIN_PRICE", "2.0"))          # 元, drop penny stocks
+MIN_PRICE = float(os.environ.get("MIN_PRICE", "2.0"))  # 元, drop penny stocks
 MIN_AMOUNT_WAN = float(os.environ.get("MIN_AMOUNT_WAN", "2000"))  # 万元, 20d median liquidity floor
 
 # DEFAULT_SYMBOLS can be used to pin an exact symbol list. Leaving it empty
@@ -86,7 +92,7 @@ DEFAULT_SYMBOLS: list[str] = []
 
 # Date range for historical data (None = auto: ~5 years back to today).
 START_DATE = os.environ.get("START_DATE", None)  # YYYY-MM-DD
-END_DATE = os.environ.get("END_DATE", None)      # YYYY-MM-DD
+END_DATE = os.environ.get("END_DATE", None)  # YYYY-MM-DD
 
 # Target prediction window (forward N trading days). Raised from 5 to 20: the
 # 5-day excess return is ~95% noise, so the learnable signal-to-noise ratio is
@@ -160,11 +166,7 @@ LINEAR_SIZE_NEUTRAL = os.environ.get("LINEAR_SIZE_NEUTRAL", "1") == "1"
 # Sign is NOT pre-set — the per-window training IC decides each factor's
 # direction, so listing a reversal factor is fine. Factors not present in the
 # loaded panel are skipped automatically.
-LINEAR_FACTORS = [
-    x.strip()
-    for x in os.environ.get("LINEAR_FACTORS", "").split(",")
-    if x.strip()
-]
+LINEAR_FACTORS = [x.strip() for x in os.environ.get("LINEAR_FACTORS", "").split(",") if x.strip()]
 
 # Factor-family toggles. All families are aggregated by
 # src.data.factors.compute_all_factors() and exposed as named columns in the
@@ -207,12 +209,10 @@ FACTOR_LIBRARY_DIR = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "factor_library"),
 )
 FORMULA_FACTOR_SUBSET = [
-    x.strip()
-    for x in os.environ.get("FORMULA_FACTOR_SUBSET", "").split(",")
-    if x.strip()
+    x.strip() for x in os.environ.get("FORMULA_FACTOR_SUBSET", "").split(",") if x.strip()
 ]
 
-# Robust denoising for the cross-sectional normalizer (walkforward._cross_sectional_norm).
+# Robust denoising for the cross-sectional normalizer (walkforward.cross_sectional_norm).
 # USE_WINSORIZE: MAD-winsorize each factor per date (clip to median ± WINSOR_MAD_K·
 # 1.4826·MAD) BEFORE z-scoring, so a lone outlier can't inflate the std used by the
 # z-score. Documented best practice (vs the old clip-after-z). k≈3 keeps ~99.7% of
@@ -225,11 +225,18 @@ WINSOR_MAD_K = float(os.environ.get("WINSOR_MAD_K", "3.0"))
 # names out-/under-perform the universe). False = raw forward return.
 MARKET_NEUTRAL_TARGET = os.environ.get("MARKET_NEUTRAL_TARGET", "1") == "1"
 
-# Fundamental (valuation) factors from tushare daily_basic: PE/PB/PS/dividend/
-# market-cap, sampled monthly and forward-filled point-in-time. daily_basic is
-# rate-limited to 1 call/min on the free tier, so the first build is slow
-# (~1 snapshot/min) but fully cached afterwards. Set to "0" to skip.
+# Fundamental (valuation) factors: PE/PB/PS/market-cap from akshare 东财个股估值
+# (stock_value_em, free, no rate limit, daily frequency, full per-symbol history),
+# merged point-in-time via merge_asof(backward). Set to "0" to skip the whole
+# fundamental family (ep/bp/sp/dv_ttm/ln_mv + ranks).
 USE_FUNDAMENTALS = os.environ.get("USE_FUNDAMENTALS", "1") == "1"
+# Independent switch for the akshare per-symbol valuation fetch. In whole-market
+# mode (UNIVERSE_MODE=all) this is what keeps valuation factors alive: the
+# tushare daily_basic path is capped at ~5 calls/day and stays disabled
+# market-wide, but akshare has no rate limit, so ep/bp/sp/ln_mv cover the full
+# ~5700-stock universe. Set USE_AK_VALUE=0 to skip the akshare valuation fetch
+# (e.g. when eastmoney is unreachable) without touching other factor families.
+USE_AK_VALUE = os.environ.get("USE_AK_VALUE", "1") == "1"
 USE_FINANCIAL_FACTORS = os.environ.get("USE_FINANCIAL_FACTORS", "1") == "1"
 FUND_SAMPLE_DAYS = int(os.environ.get("FUND_SAMPLE_DAYS", "21"))  # snapshot interval
 
@@ -253,10 +260,10 @@ SYMBOL_COL = "symbol_id"
 # Chronological 3-way split. The model trains on the train segment; strategies
 # are SELECTED on the validation segment; the chosen strategy is REPORTED on the
 # test segment. Selecting a strategy on the test set would be data snooping.
-SKIP_DATES = 0          # drop early warm-up dates if needed
-NUM_VAL_DATES = 60      # validation segment length (strategy selection)
-NUM_TEST_DATES = 60     # test segment length (final out-of-sample report)
-N_FOLD = 5              # purged date-based CV folds for training the ensemble
+SKIP_DATES = 0  # drop early warm-up dates if needed
+NUM_VAL_DATES = 60  # validation segment length (strategy selection)
+NUM_TEST_DATES = 60  # test segment length (final out-of-sample report)
+N_FOLD = 5  # purged date-based CV folds for training the ensemble
 
 # --- Leakage control & walk-forward ----------------------------------------
 # EMBARGO_DAYS: gap (in trading days) removed between any train segment and the
@@ -279,15 +286,30 @@ TRAIN_WINDOW = int(os.environ.get("TRAIN_WINDOW", "500"))
 TEST_WINDOW = int(os.environ.get("TEST_WINDOW", "60"))
 WF_STEP = int(os.environ.get("WF_STEP", str(TEST_WINDOW)))
 
-# 周期调仓回测：每 REBALANCE_DAYS 个交易日采用一次策略权重，中间持有，每天赚
-# 持有标的的真实日收益（return_1d/pct_chg），每个收益只计一次、ann=252 口径正确。
-# 旧的每日重叠引擎（run_backtest，Sharpe/PnL 双重虚高）已删除，无回落开关。
+# REBALANCE_DAYS：原周期调仓引擎（已删除）的调仓间隔；现仅作为 Newey-West
+# alpha 检验的滞后阶数（≈持仓持有期，见 model_gate / multiseed_eval）。
+# 唯一回测引擎是每日重放 run_daily_replay。
 REBALANCE_DAYS = int(os.environ.get("REBALANCE_DAYS", str(FORWARD_WINDOW)))
 
-# Industry neutralization (P0a): when True, the target responder_6 is the
-# industry-internal excess return (forward return minus the same-day industry
-# mean) rather than the universe mean. Requires industry labels from stock_basic.
+# Industry neutralization of the prediction target (P0-2). When True, the
+# target responder_6 is the industry-internal excess return (forward return
+# minus the same-day same-industry mean) rather than the whole-universe mean,
+# removing the sector-rotation component that dominates A-share cross-sections.
+# Industry labels come from tushare stock_basic (static snapshot, see
+# TushareConnector.get_industry_map for the point-in-time approximation).
+#
+# 与 MARKET_NEUTRAL_TARGET 的组合语义：
+#   MARKET_NEUTRAL_TARGET=1, INDUSTRY_NEUTRAL=1 → 减当日同行业均值（行业中性，默认）
+#   MARKET_NEUTRAL_TARGET=1, INDUSTRY_NEUTRAL=0 → 减当日全市场均值
+#   MARKET_NEUTRAL_TARGET=0, INDUSTRY_NEUTRAL=1 → 仍减行业均值
+#     （INDUSTRY_NEUTRAL=1 隐含截面中性——行业中性本身是截面去均值的一种）
+#   两者均 0 → 原始远期收益
+# 注意：行业特征族（add_industry_features 的 ep/bp 行业内 rank、行业动量等）
+# 与本开关独立，只要连接器支持行业映射就始终启用。
 INDUSTRY_NEUTRAL = os.environ.get("INDUSTRY_NEUTRAL", "1") == "1"
+# 行业中性化时，某行业当日有效样本数低于该阈值则回退到全市场均值
+# （小行业均值噪声大，几只股票的均值不具代表性）。
+INDUSTRY_MIN_COUNT = int(os.environ.get("INDUSTRY_MIN_COUNT", "5"))
 
 # Rolling IC meta-features (Method C). Disabled by default: IC at test dates
 # uses forward returns inside the test window (subtle look-ahead). Safe to re-
@@ -296,7 +318,7 @@ REGIME_IC_FEATURES = os.environ.get("REGIME_IC_FEATURES", "0") == "1"
 
 # --- Strategy --------------------------------------------------------------
 # Default tradeable strategy for A-share retail: long the top-K% names.
-STRATEGY = "long_topk"   # "long_topk" | "tanh" | "cross_sectional"(research-only)
+STRATEGY = "long_topk"  # "long_topk" | "tanh" | "cross_sectional"(research-only)
 # Phase-2b sweep (2026-06) on the corrected periodic-rebalance backtest found
 # topk=0.15 the sweet spot: concentrated enough to capture the head-concentrated
 # ret_weighted edge, without the over-concentration of 0.05 (whose drawdown
@@ -304,16 +326,16 @@ STRATEGY = "long_topk"   # "long_topk" | "tanh" | "cross_sectional"(research-onl
 # is insensitive here (robust). NOTE: tuned on the OOS test set (mild snooping),
 # so treat +1.48 as a slight optimistic bound; ~1.42 is the honest expectation.
 TOPK_RATIO = float(os.environ.get("TOPK_RATIO", "0.15"))  # top fraction long
-TANH_SCALE = 5.0         # steepness of tanh sizing
-GROSS_LEVERAGE = 1.0     # total gross exposure per day
+TANH_SCALE = 5.0  # steepness of tanh sizing
+GROSS_LEVERAGE = 1.0  # total gross exposure per day
 
 # Turnover control (long_topk hysteresis buffer). A held stock is only SOLD when
 # its predicted rank falls out of the top HOLD_RATIO band, and a new stock is
 # only BOUGHT when it enters the top TOPK_RATIO band. The gap (HOLD_RATIO −
 # TOPK_RATIO) is a no-trade zone that stops day-to-day churn from rank noise.
-# Default now = TOPK_RATIO (buffer OFF): under the periodic-rebalance backtest
-# (every REBALANCE_DAYS) turnover cost is already ~2% of PnL, so the buffer adds
-# nothing (Phase-2b sweep). It was essential only for the old daily-rebalance
+# Default now = TOPK_RATIO (buffer OFF): the Phase-2b sweep (run under the since-
+# removed periodic-rebalance engine) showed turnover cost already ~2% of PnL, so
+# the buffer adds nothing. It was essential only for the old daily-rebalance
 # regime. Set HOLD_RATIO > TOPK_RATIO to re-enable for higher-frequency configs.
 HOLD_RATIO = float(os.environ.get("HOLD_RATIO", str(TOPK_RATIO)))
 
@@ -330,8 +352,8 @@ DYNAMIC_TOPK_LOW = float(os.environ.get("DYNAMIC_TOPK_LOW", "0.10"))
 DYNAMIC_TOPK_HIGH = float(os.environ.get("DYNAMIC_TOPK_HIGH", "0.25"))
 
 # --- A-share transaction costs ---------------------------------------------
-COMMISSION_RATE = 0.0002   # brokerage commission, charged on BOTH buy and sell
-STAMP_DUTY_RATE = 0.0010   # stamp duty, charged on the SELL side only
+COMMISSION_RATE = 0.0002  # brokerage commission, charged on BOTH buy and sell
+STAMP_DUTY_RATE = 0.0010  # stamp duty, charged on the SELL side only
 # 最低佣金（元/笔）：A股券商普遍 max(5元, 费率×成交额)。纯比例佣金会系统性低估
 # 小额订单的成本（5万元订单的真实佣金是 5 元而非 1 元）。设为 0 可退回纯比例。
 MIN_COMMISSION = float(os.environ.get("MIN_COMMISSION", "5.0"))  # 元/笔
@@ -403,8 +425,7 @@ N_SEEDS = int(os.environ.get("N_SEEDS", "3"))
 # The attention leg is GPU-trained on each full rebuild (REBUILD_DAYS); on a
 # whole-market ~5700-stock panel it is both slow and memory-heavy, so it is now
 # opt-in.  Re-enable it with ENSEMBLE_MODELS=attn,gbm_l2,ic_linear.
-ENSEMBLE_MODELS = os.environ.get("ENSEMBLE_MODELS",
-                                 "gbm_l2,ic_linear")
+ENSEMBLE_MODELS = os.environ.get("ENSEMBLE_MODELS", "gbm_l2,ic_linear")
 # 增量集成的 seed 数：每日续训成本敏感，默认 1（N_SEEDS env 同时覆盖此处与
 # walkforward 的 bagging seed 数——两条路径历史上都读这个 env，故保留同名）。
 ENSEMBLE_N_SEEDS = int(os.environ.get("N_SEEDS", "1"))
@@ -477,10 +498,10 @@ ORDER_PRICE_MODE = os.environ.get("ORDER_PRICE_MODE", "next_open")  # next_open|
 # uses the pure-ML rebalance-to-equal-weight path (full deployment, periodic), which
 # fixes both. Re-enable only to experiment with mean-reversion entry timing.
 USE_BB_TIMING = os.environ.get("USE_BB_TIMING", "0") == "1"
-BB_BUY_K = float(os.environ.get("BB_BUY_K", "0.02"))   # within 2% above lower band
+BB_BUY_K = float(os.environ.get("BB_BUY_K", "0.02"))  # within 2% above lower band
 BB_SELL_K = float(os.environ.get("BB_SELL_K", "0.02"))  # within 2% below upper band
 # RSI overbought/oversold gates (0/100 disable the respective gate):
-RSI_BUY_MAX = float(os.environ.get("RSI_BUY_MAX", "70"))   # don't buy if RSI>this
+RSI_BUY_MAX = float(os.environ.get("RSI_BUY_MAX", "70"))  # don't buy if RSI>this
 RSI_SELL_MIN = float(os.environ.get("RSI_SELL_MIN", "80"))  # force-sell if RSI>this
 # Max names held simultaneously (position count cap; 0 = no cap, sized by pool).
 MAX_POSITIONS = int(os.environ.get("MAX_POSITIONS", "30"))
@@ -531,8 +552,8 @@ DD_SCALE = float(os.environ.get("DD_SCALE", "0.5"))
 USE_IC_SCALE = os.environ.get("USE_IC_SCALE", "1") == "1"
 IC_SCALE_WINDOW = int(os.environ.get("IC_SCALE_WINDOW", "20"))  # 滑动窗口长度
 IC_FULL_SCALE = float(os.environ.get("IC_FULL_SCALE", "0.02"))  # IC≥此值→满仓
-IC_ZERO_SCALE = float(os.environ.get("IC_ZERO_SCALE", "-0.01")) # IC≤此值→最低仓
-IC_MIN_SCALE = float(os.environ.get("IC_MIN_SCALE", "0.0"))     # 最低仓比例(IC失效全清到现金)
+IC_ZERO_SCALE = float(os.environ.get("IC_ZERO_SCALE", "-0.01"))  # IC≤此值→最低仓
+IC_MIN_SCALE = float(os.environ.get("IC_MIN_SCALE", "0.0"))  # 最低仓比例(IC失效全清到现金)
 
 # Regime 择时空仓避险（第四层风控）：DEFAULT OFF。2026-06-30 验证证明它是净亏——
 # "过去N日大盘为负→空仓"是滞后趋势规则，在A股V型反弹里追涨杀跌：含2024崩盘的早段
@@ -540,9 +561,9 @@ IC_MIN_SCALE = float(os.environ.get("IC_MIN_SCALE", "0.0"))     # 最低仓比�
 # vol目标化+IC降仓已是有效的【渐进】regime响应(保留部分仓接反弹)，二元空仓把滞后锁死
 # 两端。保留代码与开关供研究，默认关。
 USE_REGIME_FILTER = os.environ.get("USE_REGIME_FILTER", "0") == "1"
-REGIME_WINDOW = int(os.environ.get("REGIME_WINDOW", "20"))       # 趋势窗(交易日)
+REGIME_WINDOW = int(os.environ.get("REGIME_WINDOW", "20"))  # 趋势窗(交易日)
 REGIME_FLOOR_RET = float(os.environ.get("REGIME_FLOOR_RET", "0.0"))  # 窗累计收益阈值
-REGIME_MIN = float(os.environ.get("REGIME_MIN", "0.0"))         # 下行regime仓位(0=空仓)
+REGIME_MIN = float(os.environ.get("REGIME_MIN", "0.0"))  # 下行regime仓位(0=空仓)
 
 # --- Option implied-volatility features (Black-Scholes MVP) ------------------
 # ETF option IV is treated as a macro regime feature, NOT a stock-level alpha.
@@ -558,7 +579,9 @@ OPTION_OFFLINE = os.environ.get("OPTION_OFFLINE", "0") == "1"
 OPTION_MAX_FILL_DAYS = int(os.environ.get("OPTION_MAX_FILL_DAYS", "3"))
 OPTION_RISK_FREE = float(os.environ.get("OPTION_RISK_FREE", "0.025"))
 OPTION_DIV_YIELD = float(os.environ.get("OPTION_DIV_YIELD", "0.015"))
-OPTION_API_SLEEP = float(os.environ.get("OPTION_API_SLEEP", "0.35"))  # seconds between tushare option API calls
+OPTION_API_SLEEP = float(
+    os.environ.get("OPTION_API_SLEEP", "0.35")
+)  # seconds between tushare option API calls
 
 # --- Production integration of option IV features ---------------------------
 # Merge option IV macro features into the shared factor panel so they are
@@ -575,6 +598,19 @@ USE_GLOBAL_MACRO = os.environ.get("USE_GLOBAL_MACRO", "1") == "1"
 # Max days to forward-fill macro features to cover A-share dates that follow
 # a US holiday (when yfinance returns no new data point).
 MACRO_MAX_FILL_DAYS = int(os.environ.get("MACRO_MAX_FILL_DAYS", "3"))
+
+# --- Northbound (Stock Connect) holdings factors ----------------------------
+# Stock-level northbound holdings from tushare hk_hold（北向 = 沪股通 SH +
+# 深股通 SZ 两路，按日分路缓存 data_cache/tushare/hk_hold_{SH,SZ}_YYYYMMDD.parquet；
+# 注意 hk_hold 不传 exchange 返回的是南向 HK 数据，必须显式指定），派生
+# per-stock factors: north_ratio (持股比例), north_ratio_chg5, north_vol_chg5,
+# north_covered.
+# 防泄露：T 日北向持股数据在 T 日晚间/次晨才披露，特征合并后按 symbol
+# shift(1)——T 日收盘决策只能用 T-1 日及之前已披露的持股。
+USE_NORTHBOUND = os.environ.get("USE_NORTHBOUND", "1") == "1"
+# 陆港通休市错开（港股开市而 A 股休市等）时北向持股无新快照；前向填充上限
+# （覆盖国庆/春节级别的日历错位），超限后视为无数据（north_covered=0）。
+NORTHBOUND_MAX_FILL_DAYS = int(os.environ.get("NORTHBOUND_MAX_FILL_DAYS", "10"))
 
 # --- Macro × stock-factor interactions ---------------------------------------
 # Create stock-level interaction features: macro regime indicator × stock
@@ -621,10 +657,10 @@ MIN_FACTOR_STABILITY = float(os.environ.get("MIN_FACTOR_STABILITY", "0.0"))
 # overlay: the IV value used for today's decision is from t-1 (lag=1) and the
 # high-IV threshold is computed from trailing history only.
 USE_IV_SCALE = os.environ.get("USE_IV_SCALE", "1") == "1"
-IV_SCALE_WINDOW = int(os.environ.get("IV_SCALE_WINDOW", "60"))      # trailing trading days
+IV_SCALE_WINDOW = int(os.environ.get("IV_SCALE_WINDOW", "60"))  # trailing trading days
 IV_FEATURE_FOR_SCALE = os.environ.get("IV_FEATURE_FOR_SCALE", "opt_vix_like")
-IV_MIN_SCALE = float(os.environ.get("IV_MIN_SCALE", "0.5"))         # leverage multiplier in high-IV regime
-IV_MID_SCALE = float(os.environ.get("IV_MID_SCALE", "1.0"))         # leverage multiplier in mid-IV regime
+IV_MIN_SCALE = float(os.environ.get("IV_MIN_SCALE", "0.5"))  # leverage multiplier in high-IV regime
+IV_MID_SCALE = float(os.environ.get("IV_MID_SCALE", "1.0"))  # leverage multiplier in mid-IV regime
 
 
 # --- Config validation (import-time) -----------------------------------------
@@ -640,12 +676,14 @@ def _validate() -> None:
     """
     assert EMBARGO_DAYS >= FORWARD_WINDOW, (
         f"EMBARGO_DAYS={EMBARGO_DAYS} < FORWARD_WINDOW={FORWARD_WINDOW}："
-        "训练段尾部标签会偷看 OOS 窗口价格（前视泄露）")
+        "训练段尾部标签会偷看 OOS 窗口价格（前视泄露）"
+    )
     if MODEL_OBJECTIVE.startswith("multi_") and MULTI_HORIZON_WINDOWS:
         longest = max(MULTI_HORIZON_WINDOWS)
         assert EMBARGO_DAYS >= longest, (
             f"multi 目标要求 EMBARGO_DAYS={EMBARGO_DAYS} >= "
-            f"max(MULTI_HORIZON_WINDOWS)={longest}，否则长 horizon 标签泄露")
+            f"max(MULTI_HORIZON_WINDOWS)={longest}，否则长 horizon 标签泄露"
+        )
 
 
 _validate()

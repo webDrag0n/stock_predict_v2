@@ -12,7 +12,7 @@
 防泄露
 ------
 - 序列只向【过去】看（trailing L 日，含当日），绝不含未来。
-- 截面 z-score 每天只用当日自身横截面（_cross_sectional_norm，逐日独立）。
+- 截面 z-score 每天只用当日自身横截面（cross_sectional_norm，逐日独立）。
 - 序列按 (symbol, date) 排序后用 sliding-window 构造，左侧不足 L 的左 padding（mask）。
 - test 序列可回看 train 末尾的历史（在 concat 面板上构造 gather），但 test 标签
   绝不进训练，且序列只回看 → 无泄露。
@@ -20,6 +20,7 @@
 接口：attn_seq_predict(train, test, feat_cols, params) 与各 leg 签名一致。
 seq_len=1 时退化为纯截面（等同 model_attn）。
 """
+
 from __future__ import annotations
 
 import os
@@ -27,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 import config as C
-from walkforward import _cross_sectional_norm
+from walkforward import cross_sectional_norm
 from model_attn import _ic_loss, _by_date, _device, _require_torch
 
 
@@ -49,49 +50,55 @@ def _build_seq_gather(panel: pd.DataFrame, seq_len: int) -> tuple[np.ndarray, np
     starts = np.concatenate([[0], bounds])
     ends = np.concatenate([bounds, [n]])
     from numpy.lib.stride_tricks import sliding_window_view
+
     for s, e in zip(starts, ends):
-        r = order[s:e]                       # 该股的原始行号，时间升序
+        r = order[s:e]  # 该股的原始行号，时间升序
         padded = np.concatenate([np.full(seq_len - 1, -1, dtype=np.int64), r])
-        win = sliding_window_view(padded, seq_len)   # (len(r), L)
+        win = sliding_window_view(padded, seq_len)  # (len(r), L)
         seq_idx[r] = win
     valid = seq_idx >= 0
     return seq_idx, valid
 
 
 def _build_seq_model(n_feat, d_model, n_heads, n_layers, dropout, seq_len):
-    import torch
     import torch.nn as nn
 
     class SeqCrossAttn(nn.Module):
         def __init__(self):
             super().__init__()
-            self.inp = nn.Sequential(
-                nn.Linear(n_feat, d_model), nn.GELU(), nn.LayerNorm(d_model))
+            self.inp = nn.Sequential(nn.Linear(n_feat, d_model), nn.GELU(), nn.LayerNorm(d_model))
             # 时序编码：GRU over L 天（每股独立）。比时序 attn 轻、对短序列稳。
             self.gru = nn.GRU(d_model, d_model, num_layers=1, batch_first=True)
             # 截面互注意力（同 model_attn）
             layer = nn.TransformerEncoderLayer(
-                d_model=d_model, nhead=n_heads, dim_feedforward=d_model * 2,
-                dropout=dropout, batch_first=True, activation="gelu")
+                d_model=d_model,
+                nhead=n_heads,
+                dim_feedforward=d_model * 2,
+                dropout=dropout,
+                batch_first=True,
+                activation="gelu",
+            )
             self.enc = nn.TransformerEncoder(layer, num_layers=n_layers)
             self.head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, 1))
 
         def forward(self, seq):
             # seq: (S_stocks, L, n_feat) —— 一天 S 只股，每只 L 日序列
-            h = self.inp(seq)                      # (S, L, d_model)
-            _, hn = self.gru(h)                    # hn: (1, S, d_model) 末态
-            emb = hn.squeeze(0).unsqueeze(0)       # (1, S, d_model) 截面集合
-            z = self.enc(emb)                      # 截面互注意力
-            return self.head(z).squeeze(-1).squeeze(0)   # (S,)
+            h = self.inp(seq)  # (S, L, d_model)
+            _, hn = self.gru(h)  # hn: (1, S, d_model) 末态
+            emb = hn.squeeze(0).unsqueeze(0)  # (1, S, d_model) 截面集合
+            z = self.enc(emb)  # 截面互注意力
+            return self.head(z).squeeze(-1).squeeze(0)  # (S,)
 
     return SeqCrossAttn()
 
 
-def attn_seq_predict(train: pd.DataFrame, test: pd.DataFrame,
-                     feat_cols: list[str], params: dict | None = None) -> np.ndarray:
+def attn_seq_predict(
+    train: pd.DataFrame, test: pd.DataFrame, feat_cols: list[str], params: dict | None = None
+) -> np.ndarray:
     """时序+截面 attn：train 上训练、test 上 OOS 预测。返回与 test 行对齐的分。"""
     _require_torch()
     import torch
+
     p = dict(params or {})
     seq_len = int(p.get("seq_len", os.environ.get("ATTN_SEQ_LEN", "20")))
     d_model = int(p.get("d_model", os.environ.get("ATTN_DMODEL", "128")))
@@ -104,12 +111,13 @@ def attn_seq_predict(train: pd.DataFrame, test: pd.DataFrame,
     patience = int(p.get("patience", os.environ.get("ATTN_PATIENCE", "8")))
     seed = int(p.get("seed", C.RANDOM_STATE))
     dev = _device()
-    torch.manual_seed(seed); np.random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
     n_tr = len(train)
     full = pd.concat([train, test], ignore_index=True)
     # 截面 z-score（逐日独立，防泄露）在 concat 面板上算
-    Xall, _ = _cross_sectional_norm(full, feat_cols)
+    Xall, _ = cross_sectional_norm(full, feat_cols)
     Xall = np.nan_to_num(Xall, nan=0.0).astype(np.float32)
     # 序列 gather（仅向过去；test 行可回看 train 历史）
     seq_idx, _ = _build_seq_gather(full, seq_len)
@@ -119,7 +127,8 @@ def attn_seq_predict(train: pd.DataFrame, test: pd.DataFrame,
 
     yall = full[C.TARGET].to_numpy(np.float64)
     dates_all = full["date"].to_numpy()
-    is_tr = np.zeros(len(full), dtype=bool); is_tr[:n_tr] = True
+    is_tr = np.zeros(len(full), dtype=bool)
+    is_tr[:n_tr] = True
 
     uniq_tr = np.sort(pd.unique(dates_all[is_tr]))
     idx_all = _by_date(dates_all, np.sort(pd.unique(dates_all)))
@@ -127,9 +136,11 @@ def attn_seq_predict(train: pd.DataFrame, test: pd.DataFrame,
     n_val = max(int(len(uniq_tr) * 0.15), 1)
     emb_d = int(getattr(C, "EMBARGO_DAYS", 20))
     if len(uniq_tr) > n_val + emb_d + 5:
-        fit_dates = uniq_tr[: -(n_val + emb_d)]; val_dates = uniq_tr[-n_val:]
+        fit_dates = uniq_tr[: -(n_val + emb_d)]
+        val_dates = uniq_tr[-n_val:]
     else:
-        fit_dates = uniq_tr; val_dates = uniq_tr[-n_val:]
+        fit_dates = uniq_tr
+        val_dates = uniq_tr[-n_val:]
 
     Xpad_t = torch.as_tensor(Xpad, device=dev)
 
@@ -144,15 +155,14 @@ def attn_seq_predict(train: pd.DataFrame, test: pd.DataFrame,
             ok = np.isfinite(y)
             if ok.sum() < 10:
                 return None, None
-            ii = ii[ok]; y = y[ok]
-        si = seq_idx_pad[ii]                     # (S, L)
-        seq = Xpad_t[torch.as_tensor(si, device=dev)]   # (S, L, n_feat)
-        yt = (torch.as_tensor(y, dtype=torch.float32, device=dev)
-              if train_only else None)
+            ii = ii[ok]
+            y = y[ok]
+        si = seq_idx_pad[ii]  # (S, L)
+        seq = Xpad_t[torch.as_tensor(si, device=dev)]  # (S, L, n_feat)
+        yt = torch.as_tensor(y, dtype=torch.float32, device=dev) if train_only else None
         return seq, yt
 
-    model = _build_seq_model(len(feat_cols), d_model, n_heads, n_layers,
-                             dropout, seq_len).to(dev)
+    model = _build_seq_model(len(feat_cols), d_model, n_heads, n_layers, dropout, seq_len).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
 
     best_val, best_state, bad = -1e9, None, 0
@@ -199,5 +209,5 @@ def attn_seq_predict(train: pd.DataFrame, test: pd.DataFrame,
             si = seq_idx_pad[ii]
             seq = Xpad_t[torch.as_tensor(si, device=dev)]
             pr = model(seq).cpu().numpy()
-            out[ii - n_tr] = pr            # test 行在 full 中偏移 n_tr
+            out[ii - n_tr] = pr  # test 行在 full 中偏移 n_tr
     return out

@@ -4,12 +4,11 @@ These are the foundation factors that are always computed (unless explicitly
 disabled). They depend only on OHLCV and a few A-share meta columns that the
 DataConnector may provide (turnover_rate, volume_ratio, pct_chg).
 """
+
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-
-import config as C
 
 # 注：不在 import 期全局屏蔽 PerformanceWarning——库模块不该动全局 warnings
 # 状态，由入口脚本（run_session.py / predict_tomorrow.py / run_walkforward.py）
@@ -21,6 +20,11 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
 
     All per-symbol rolling/shift operations use groupby().transform() so the
     result stays aligned to the original row index (robust on pandas 2.x/3.x).
+
+    If the caller already provides an ``adj_close`` column (the factor-panel
+    incremental cache chains it forward from the cached panel so a truncated
+    raw window keeps the full-history anchor), it is used as-is; otherwise it
+    is built from pct_chg as below.
     """
     df = df.sort_values(["symbol", "date"]).reset_index(drop=True)
     g = df.groupby("symbol", group_keys=False)
@@ -34,40 +38,38 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     # momentum, MA, volatility, and the forward-return target). Raw OHLC stays
     # for intraday-ratio factors (hl_pct, K-line shapes) where the adjustment
     # factor cancels within a day, and raw close is kept for display/sizing.
-    if "pct_chg" in df.columns:
-        ratio = g["pct_chg"].transform(
-            lambda s: (1.0 + s.fillna(0.0) / 100.0).cumprod())
-        first_close = g["close"].transform("first")
-        df["adj_close"] = first_close * ratio
-    else:
-        df["adj_close"] = df["close"]
+    if "adj_close" not in df.columns:
+        if "pct_chg" in df.columns:
+            ratio = g["pct_chg"].transform(lambda s: (1.0 + s.fillna(0.0) / 100.0).cumprod())
+            first_close = g["close"].transform("first")
+            df["adj_close"] = first_close * ratio
+            # 复权累乘比（f32 累加器原值）：因子面板缓存的尾部增量路径用它精确
+            # 接续全历史复权序列；属隐藏中间列，视图层丢弃。
+            df["_adj_cp"] = ratio
+        else:
+            df["adj_close"] = df["close"]
     ga = df.groupby("symbol", group_keys=False)["adj_close"]
 
     # Returns (various windows) — on the adjusted series
     for window in [1, 2, 5, 10, 20]:
-        df[f"return_{window}d"] = ga.transform(
-            lambda x, w=window: x.pct_change(w))
+        df[f"return_{window}d"] = ga.transform(lambda x, w=window: x.pct_change(w))
 
     # Log returns
     df["log_return"] = ga.transform(lambda x: np.log(x / x.shift(1)))
 
     # Volume features
     df["volume_change"] = g["volume"].pct_change()
-    df["volume_ma_ratio_5"] = df["volume"] / g["volume"].transform(
-        lambda x: x.rolling(5).mean())
-    df["volume_ma_ratio_20"] = df["volume"] / g["volume"].transform(
-        lambda x: x.rolling(20).mean())
+    df["volume_ma_ratio_5"] = df["volume"] / g["volume"].transform(lambda x: x.rolling(5).mean())
+    df["volume_ma_ratio_20"] = df["volume"] / g["volume"].transform(lambda x: x.rolling(20).mean())
 
     # Price momentum (on the adjusted series)
     for window in [5, 10, 20]:
-        df[f"momentum_{window}"] = ga.transform(
-            lambda x, w=window: x / x.shift(w) - 1)
+        df[f"momentum_{window}"] = ga.transform(lambda x, w=window: x / x.shift(w) - 1)
 
     # Volatility (rolling std of log returns)
     lr = df.groupby("symbol", group_keys=False)["log_return"]
     for window in [5, 10, 20]:
-        df[f"volatility_{window}"] = lr.transform(
-            lambda x, w=window: x.rolling(w).std())
+        df[f"volatility_{window}"] = lr.transform(lambda x, w=window: x.rolling(w).std())
 
     # Moving averages and price/MA ratio (on the adjusted series so cross-day
     # comparisons are corporate-action-free; the ratio is unit-free either way)
@@ -79,7 +81,8 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     # High-low range
     df["hl_pct"] = (df["high"] - df["low"]) / df["close"]
     df["hl_ma_5"] = df.groupby("symbol", group_keys=False)["hl_pct"].transform(
-        lambda x: x.rolling(5).mean())
+        lambda x: x.rolling(5).mean()
+    )
 
     # RSI (Relative Strength Index) — 在 adj_close 上计算：
     # 除权日原始 close 的假跳变会污染 RSI 的涨跌计数；复权序列才是真实涨跌。
@@ -97,7 +100,8 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     exp2 = ga.transform(lambda x: x.ewm(span=26, adjust=False).mean())
     df["macd"] = exp1 - exp2
     df["macd_signal"] = df.groupby("symbol", group_keys=False)["macd"].transform(
-        lambda x: x.ewm(span=9, adjust=False).mean())
+        lambda x: x.ewm(span=9, adjust=False).mean()
+    )
     df["macd_diff"] = df["macd"] - df["macd_signal"]
 
     # Bollinger Bands (20-day) — 有意保持原始 close（不复权）：
@@ -109,7 +113,8 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     df["bb_upper_20"] = ma20 + 2 * std20
     df["bb_lower_20"] = ma20 - 2 * std20
     df["bb_position_20"] = (df["close"] - df["bb_lower_20"]) / (
-        df["bb_upper_20"] - df["bb_lower_20"])
+        df["bb_upper_20"] - df["bb_lower_20"]
+    )
 
     # Stochastic oscillator — 用复权后的 high/low/close（按当日复权因子等比
     # 缩放 high/low），避免除权日假跳变污染 %K 的位置度量
@@ -117,25 +122,25 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     adj_high = df["high"] * adj_ratio
     adj_low = df["low"] * adj_ratio
     low_14 = adj_low.groupby(df["symbol"], group_keys=False).transform(
-        lambda x: x.rolling(14).min())
+        lambda x: x.rolling(14).min()
+    )
     high_14 = adj_high.groupby(df["symbol"], group_keys=False).transform(
-        lambda x: x.rolling(14).max())
+        lambda x: x.rolling(14).max()
+    )
     df["stoch_k"] = 100 * (df["adj_close"] - low_14) / (high_14 - low_14)
     df["stoch_d"] = df.groupby("symbol", group_keys=False)["stoch_k"].transform(
-        lambda x: x.rolling(3).mean())
+        lambda x: x.rolling(3).mean()
+    )
 
     # --- A-share-specific factors -----------------------------------------
     # Turnover rate (换手率): liquidity/attention factor, key in A-share.
     if "turnover_rate" in df.columns:
-        df["turnover_ma_5"] = g["turnover_rate"].transform(
-            lambda x: x.rolling(5).mean())
-        df["turnover_ma_20"] = g["turnover_rate"].transform(
-            lambda x: x.rolling(20).mean())
+        df["turnover_ma_5"] = g["turnover_rate"].transform(lambda x: x.rolling(5).mean())
+        df["turnover_ma_20"] = g["turnover_rate"].transform(lambda x: x.rolling(20).mean())
         df["turnover_ratio"] = df["turnover_rate"] / (df["turnover_ma_20"] + 1e-9)
     # Volume ratio (量比): today's volume vs recent average, from tushare.
     if "volume_ratio" in df.columns:
-        df["volume_ratio_ma5"] = g["volume_ratio"].transform(
-            lambda x: x.rolling(5).mean())
+        df["volume_ratio_ma5"] = g["volume_ratio"].transform(lambda x: x.rolling(5).mean())
     # Limit up/down flag (涨跌停): |pct change| at the ±10% band. Positions
     # cannot be opened/closed at the limit, so the model should perceive it.
     if "pct_chg" in df.columns:

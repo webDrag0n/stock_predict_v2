@@ -16,6 +16,7 @@ so position should grow with the prediction. Available sizing schemes:
 
 Positions are returned in the same row order as the input dataframe.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -47,10 +48,9 @@ def _long_topk(df: pd.DataFrame, pred: np.ndarray, ratio: float) -> np.ndarray:
         selected = (rank_pct > (1.0 - ratio)).to_numpy()
     else:
         # Chronological hysteresis: carry holdings forward across dates.
-        enter = (1.0 - ratio)        # buy threshold (strict top band)
-        keep = (1.0 - hold_ratio)    # sell threshold (wider hold band)
-        sym = (df[C.SYMBOL_COL].to_numpy() if C.SYMBOL_COL in df.columns
-               else np.arange(len(df)))
+        enter = 1.0 - ratio  # buy threshold (strict top band)
+        keep = 1.0 - hold_ratio  # sell threshold (wider hold band)
+        sym = df[C.SYMBOL_COL].to_numpy() if C.SYMBOL_COL in df.columns else np.arange(len(df))
         selected = np.zeros(len(df), dtype=bool)
         rp = rank_pct.to_numpy()
         held: set = set()
@@ -65,6 +65,7 @@ def _long_topk(df: pd.DataFrame, pred: np.ndarray, ratio: float) -> np.ndarray:
             held = new_held
 
     tmp["sel"] = selected
+
     def _rank_weight(g):
         sel = g["sel"]
         if not sel.any():
@@ -73,8 +74,7 @@ def _long_topk(df: pd.DataFrame, pred: np.ndarray, ratio: float) -> np.ndarray:
         total = w.sum()
         return (C.GROSS_LEVERAGE * w / total) if total > 1e-12 else pd.Series(0.0, index=g.index)
 
-    pos = tmp.groupby("date", group_keys=False).apply(
-        _rank_weight, include_groups=False)
+    pos = tmp.groupby("date", group_keys=False).apply(_rank_weight, include_groups=False)
     return np.asarray(pos.reindex(tmp.index), dtype=np.float64)
 
 
@@ -82,14 +82,15 @@ def _tanh(pred: np.ndarray, scale: float) -> np.ndarray:
     return np.clip(np.tanh(scale * pred), -1.0, 1.0)
 
 
-def _cross_sectional(df: pd.DataFrame, pred: np.ndarray,
-                     gross: float) -> np.ndarray:
+def _cross_sectional(df: pd.DataFrame, pred: np.ndarray, gross: float) -> np.ndarray:
     """Dollar-neutral sizing within each (date, time): sum(pos)=0, sum|pos|=gross."""
-    tmp = pd.DataFrame({
-        C.DATE_COL: df[C.DATE_COL].to_numpy(),
-        C.TIME_COL: df[C.TIME_COL].to_numpy(),
-        "pred": pred,
-    })
+    tmp = pd.DataFrame(
+        {
+            C.DATE_COL: df[C.DATE_COL].to_numpy(),
+            C.TIME_COL: df[C.TIME_COL].to_numpy(),
+            "pred": pred,
+        }
+    )
     grp = tmp.groupby([C.DATE_COL, C.TIME_COL])["pred"]
     demeaned = tmp["pred"] - grp.transform("mean")
     abs_sum = demeaned.abs().groupby([tmp[C.DATE_COL], tmp[C.TIME_COL]]).transform("sum")
@@ -97,7 +98,7 @@ def _cross_sectional(df: pd.DataFrame, pred: np.ndarray,
     return np.asarray(pos, dtype=np.float64)
 
 
-def _long_short_topk(df: pd.DataFrame, pred: np.ndarray, ratio: float) -> np.ndarray:
+def long_short_topk(df: pd.DataFrame, pred: np.ndarray, ratio: float) -> np.ndarray:
     """Dollar-neutral long top-`ratio`, short bottom-`ratio` each date (RESEARCH).
 
     Goes long the top `ratio` fraction (+0.5*gross spread equal-weight) and short
@@ -122,16 +123,21 @@ def _long_short_topk(df: pd.DataFrame, pred: np.ndarray, ratio: float) -> np.nda
     tmp["long"], tmp["short"] = long_sel, short_sel
 
     half = 0.5 * C.GROSS_LEVERAGE
+
     def _weights(g):
         w = pd.Series(0.0, index=g.index)
         nl, ns = int(g["long"].sum()), int(g["short"].sum())
         if nl > 0:
-            w[g["long"]] = half / nl          # equal-weight long leg, +0.5 gross
+            w[g["long"]] = half / nl  # equal-weight long leg, +0.5 gross
         if ns > 0:
-            w[g["short"]] = -half / ns         # equal-weight short leg, -0.5 gross
+            w[g["short"]] = -half / ns  # equal-weight short leg, -0.5 gross
         return w
+
     pos = tmp.groupby("date", group_keys=False).apply(_weights, include_groups=False)
     return np.asarray(pos.reindex(tmp.index), dtype=np.float64)
+
+
+_long_short_topk = long_short_topk  # 向后兼容别名
 
 
 # Strategies that are practically tradeable for A-share retail (long-only).
@@ -140,8 +146,7 @@ TRADEABLE = ("long_topk",)
 ALL_STRATEGIES = ("long_topk", "tanh", "cross_sectional", "long_short_topk")
 
 
-def generate_positions(df: pd.DataFrame, pred: np.ndarray,
-                       strategy: str = None) -> np.ndarray:
+def generate_positions(df: pd.DataFrame, pred: np.ndarray, strategy: str = None) -> np.ndarray:
     """Map predictions -> positions (long-only weights, or signed for research)."""
     strategy = strategy or C.STRATEGY
     pred = np.asarray(pred, dtype=np.float64)
@@ -152,5 +157,5 @@ def generate_positions(df: pd.DataFrame, pred: np.ndarray,
     if strategy == "cross_sectional":
         return _cross_sectional(df, pred, C.GROSS_LEVERAGE)
     if strategy == "long_short_topk":
-        return _long_short_topk(df, pred, C.TOPK_RATIO)
+        return long_short_topk(df, pred, C.TOPK_RATIO)
     raise ValueError(f"Unknown strategy: {strategy}")

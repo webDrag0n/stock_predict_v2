@@ -15,6 +15,7 @@ d_prev + FORWARD_WINDOW ≤ 决策日才入队）；regime/IV 只用 ≤ 决策�
 默认值只从 config 读（params 可显式覆盖），消除历史上 config=0.0 与
 backtest_daily getattr 兜底 0.20 的双默认分叉。
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -43,10 +44,14 @@ def resolve_risk_params(params: dict | None = None) -> dict:
     }
 
 
-def compute_risk_scale(total_values, ic_queue, *,
-                       params: dict | None = None,
-                       risk_on: bool = True,
-                       iv_scale: float = 1.0) -> tuple[float, float, float | None]:
+def compute_risk_scale(
+    total_values,
+    ic_queue,
+    *,
+    params: dict | None = None,
+    risk_on: bool = True,
+    iv_scale: float = 1.0,
+) -> tuple[float, float, float | None]:
     """五层风控叠乘链（回测=实盘唯一实现）。
 
     Args:
@@ -68,11 +73,10 @@ def compute_risk_scale(total_values, ic_queue, *,
     ic_scale = 1.0
     roll_ic = None
     if rp["use_ic_scale"]:
-        q = [float(x) for x in list(ic_queue)[-rp["ic_scale_window"]:]]
+        q = [float(x) for x in list(ic_queue)[-rp["ic_scale_window"] :]]
         if len(q) >= max(3, rp["ic_scale_window"] // 4):
             roll_ic = float(np.mean(q))
-            t = ((roll_ic - rp["ic_zero_scale"]) /
-                 (rp["ic_full_scale"] - rp["ic_zero_scale"] + 1e-9))
+            t = (roll_ic - rp["ic_zero_scale"]) / (rp["ic_full_scale"] - rp["ic_zero_scale"] + 1e-9)
             t = max(0.0, min(1.0, t))
             ic_scale = rp["ic_min_scale"] + t * (1.0 - rp["ic_min_scale"])
 
@@ -81,7 +85,7 @@ def compute_risk_scale(total_values, ic_queue, *,
     if (rp["use_vol_target"] or rp["use_dd_brake"]) and len(tvs) >= 6:
         rets = tvs[1:] / tvs[:-1] - 1.0
         if rp["use_vol_target"] and len(rets) >= 5:
-            rv = float(np.std(rets[-rp["vol_window"]:])) + 1e-12
+            rv = float(np.std(rets[-rp["vol_window"] :])) + 1e-12
             target_daily = rp["target_vol"] / np.sqrt(252.0)
             risk_scale = min(1.0, target_daily / rv)
         if rp["use_dd_brake"]:

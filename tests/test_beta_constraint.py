@@ -1,13 +1,14 @@
 """Unit tests for portfolio beta constraint.
 
-Verifies that _apply_beta_constraint in trading.py reduces portfolio beta by
+Verifies that apply_beta_constraint in trading.py reduces portfolio beta by
 replacing high-beta stocks with lower-beta candidates.
 """
+
 from __future__ import annotations
 
 import numpy as np
 
-from trading import _apply_beta_constraint
+from trading import apply_beta_constraint
 
 
 def test_beta_constraint_reduces_beta():
@@ -19,7 +20,7 @@ def test_beta_constraint_reduces_beta():
     beta = np.array([2.0, 1.5, 1.0, 0.5])
     rank_pct = np.array([0.0, 0.33, 0.66, 1.0])  # 0=best
     pool_idx = [0, 1]
-    adjusted = _apply_beta_constraint(pool_idx, beta, rank_pct, max_portfolio_beta=1.2)
+    adjusted = apply_beta_constraint(pool_idx, beta, rank_pct, max_portfolio_beta=1.2)
     print("adjusted pool:", adjusted)
     avg_beta = float(np.mean(beta[adjusted]))
     print("avg beta:", avg_beta)
@@ -31,7 +32,7 @@ def test_beta_constraint_no_change_when_already_low():
     beta = np.array([1.1, 1.0, 0.9, 0.5])
     rank_pct = np.array([0.0, 0.33, 0.66, 1.0])
     pool_idx = [0, 1]
-    adjusted = _apply_beta_constraint(pool_idx, beta, rank_pct, max_portfolio_beta=1.2)
+    adjusted = apply_beta_constraint(pool_idx, beta, rank_pct, max_portfolio_beta=1.2)
     assert adjusted == pool_idx
 
 

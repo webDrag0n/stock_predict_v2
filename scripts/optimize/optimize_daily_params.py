@@ -6,6 +6,7 @@ simulate_fills，把小时级训练压缩到分钟级决策重放。
 
 产出: outputs/optimize_daily_params.csv
 """
+
 from __future__ import annotations
 
 import os
@@ -25,13 +26,16 @@ sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src"))
 import config as C
 from data import load_factor_panel, list_factor_columns
 from backtest_daily import run_daily_replay
-from measure_alpha import _newey_west_alpha_t
+from measure_alpha import newey_west_alpha_t
 
 
 def _bench_returns(panel: pd.DataFrame, daily_dates) -> np.ndarray:
     """等权基准日收益，与 daily['date'] 对齐。"""
-    ret_col = "return_1d" if "return_1d" in panel.columns else (
-        "pct_chg" if "pct_chg" in panel.columns else None)
+    ret_col = (
+        "return_1d"
+        if "return_1d" in panel.columns
+        else ("pct_chg" if "pct_chg" in panel.columns else None)
+    )
     if ret_col is None:
         return np.zeros(len(daily_dates))
     bser = panel.groupby("date")[ret_col].mean()
@@ -40,8 +44,9 @@ def _bench_returns(panel: pd.DataFrame, daily_dates) -> np.ndarray:
     return bser.reindex(pd.Index(daily_dates)).fillna(0.0).to_numpy()
 
 
-def _metrics(daily: pd.DataFrame, trades: pd.DataFrame,
-             panel: pd.DataFrame, initial_cash: float) -> dict:
+def _metrics(
+    daily: pd.DataFrame, trades: pd.DataFrame, panel: pd.DataFrame, initial_cash: float
+) -> dict:
     """从 daily/trades 计算关键指标。"""
     if len(daily) == 0:
         return {}
@@ -52,8 +57,11 @@ def _metrics(daily: pd.DataFrame, trades: pd.DataFrame,
 
     sharpe = float(rr.mean() / rr.std() * np.sqrt(252)) if rr.std() > 1e-12 else 0.0
     downside = rr[rr < 0]
-    sortino = (float(rr.mean() / downside.std() * np.sqrt(252))
-               if len(downside) > 1 and downside.std() > 1e-12 else 0.0)
+    sortino = (
+        float(rr.mean() / downside.std() * np.sqrt(252))
+        if len(downside) > 1 and downside.std() > 1e-12
+        else 0.0
+    )
     hit = float((rr > 0).mean()) if len(rr) else float("nan")
 
     peak = np.maximum.accumulate(tv)
@@ -67,7 +75,7 @@ def _metrics(daily: pd.DataFrame, trades: pd.DataFrame,
     # alpha / beta vs equal-weight benchmark
     bench = _bench_returns(panel, daily["date"].to_numpy())
     lags = max(1, min(getattr(C, "FORWARD_WINDOW", 20), len(rr) - 2))
-    alpha_d, beta, t_nw, _ = _newey_west_alpha_t(rr, bench[1:], lags)
+    alpha_d, beta, t_nw, _ = newey_west_alpha_t(rr, bench[1:], lags)
     alpha_ann = float(alpha_d * 252)
 
     return {
@@ -83,7 +91,9 @@ def _metrics(daily: pd.DataFrame, trades: pd.DataFrame,
         "cost": cost,
         "n_trades": n_trades,
         "avg_positions": float(daily["n_positions"].mean()),
-        "avg_risk_scale": float(daily["risk_scale"].mean()) if "risk_scale" in daily.columns else 1.0,
+        "avg_risk_scale": (
+            float(daily["risk_scale"].mean()) if "risk_scale" in daily.columns else 1.0
+        ),
     }
 
 
@@ -92,8 +102,7 @@ def main() -> None:
     print(f"加载面板... FW={C.FORWARD_WINDOW} | 目标={C.MODEL_OBJECTIVE}")
 
     # 允许通过环境变量覆盖扫描范围，便于测试与不同时间窗口研究
-    start = os.environ.get("OPT_START_DATE",
-                           (date.today() - timedelta(days=92)).isoformat())
+    start = os.environ.get("OPT_START_DATE", (date.today() - timedelta(days=92)).isoformat())
     end = os.environ.get("OPT_END_DATE", None)
     panel_path = os.environ.get("OPT_PANEL_PATH", "")
 
@@ -101,13 +110,14 @@ def main() -> None:
         print(f"从缓存面板加载: {panel_path}")
         panel = pd.read_parquet(panel_path)
     else:
-        panel = load_factor_panel(keep_trade_cols=True,
-                                  start_date=start or None,
-                                  end_date=end or None,
-                                  verbose=True)
+        panel = load_factor_panel(
+            keep_trade_cols=True, start_date=start or None, end_date=end or None, verbose=True
+        )
     factors = list_factor_columns(panel)
-    print(f"因子数={len(factors)} | 股票数={panel['symbol'].nunique()} "
-          f"| 交易日={panel['date'].nunique()}\n")
+    print(
+        f"因子数={len(factors)} | 股票数={panel['symbol'].nunique()} "
+        f"| 交易日={panel['date'].nunique()}\n"
+    )
 
     initial_cash = float(C.INITIAL_CAPITAL)
 
@@ -126,25 +136,31 @@ def main() -> None:
     }
 
     # 1) 基线训练并收集 score_cache（可通过环境变量复用已保存缓存，跳过小时级训练）
-    cache_path = os.environ.get("OPT_SCORE_CACHE_PATH",
-                                os.path.join(C.OUTPUT_DIR, "optimize_daily_params_score_cache.pkl"))
+    cache_path = os.environ.get(
+        "OPT_SCORE_CACHE_PATH", os.path.join(C.OUTPUT_DIR, "optimize_daily_params_score_cache.pkl")
+    )
     resume_cache = os.environ.get("OPT_RESUME_SCORE_CACHE", "")
     if resume_cache and os.path.exists(resume_cache):
         print(f"===== 复用已有 score_cache: {resume_cache} =====")
         with open(resume_cache, "rb") as f:
             score_cache_arg = pickle.load(f)
         # 引擎直接吃包装（解包+校验指纹）；本脚本查日期用裸分数 dict
-        score_cache = (score_cache_arg["scores"]
-                       if isinstance(score_cache_arg, dict) and "scores" in score_cache_arg
-                       else score_cache_arg)
+        score_cache = (
+            score_cache_arg["scores"]
+            if isinstance(score_cache_arg, dict) and "scores" in score_cache_arg
+            else score_cache_arg
+        )
         print(f"score_cache: {len(score_cache)} 决策日\n")
     else:
         print("===== 基线训练 + 收集 score_cache =====")
-        base_res = run_daily_replay(panel, factors, initial_cash=initial_cash,
-                                    params=base_params, progress=True)
+        base_res = run_daily_replay(
+            panel, factors, initial_cash=initial_cash, params=base_params, progress=True
+        )
         score_cache = base_res["score_cache"]
-        score_cache_arg = {"scores": score_cache,
-                           "fingerprint": base_res["meta"]["score_fingerprint"]}
+        score_cache_arg = {
+            "scores": score_cache,
+            "fingerprint": base_res["meta"]["score_fingerprint"],
+        }
         with open(cache_path, "wb") as f:
             pickle.dump(score_cache_arg, f)
         print(f"score_cache: {len(score_cache)} 决策日 (已保存 {cache_path})\n")
@@ -166,7 +182,7 @@ def main() -> None:
     rows = []
     for combo in combos:
         p = dict(base_params)
-        p["score_cache"] = score_cache_arg      # 复用缓存（含指纹），跳过训练
+        p["score_cache"] = score_cache_arg  # 复用缓存（含指纹），跳过训练
         p["collect_scores"] = False
         p.update(dict(zip(keys, combo)))
         # 默认关闭择时，专注策略/执行参数
@@ -175,15 +191,18 @@ def main() -> None:
         label = " | ".join(f"{k}={v}" for k, v in zip(keys, combo))
         print(f"  扫描: {label}", flush=True)
         try:
-            res = run_daily_replay(panel, factors, initial_cash=initial_cash,
-                                   params=p, progress=False)
+            res = run_daily_replay(
+                panel, factors, initial_cash=initial_cash, params=p, progress=False
+            )
             m = _metrics(res["daily"], res["trades"], panel, initial_cash)
             row = dict(zip(keys, combo))
             row.update(m)
             rows.append(row)
-            print(f"    -> ret={m['total_ret']:+.2%} sharpe={m['sharpe']:+.2f} "
-                  f"alpha={m['alpha_ann']:+.1%}(t={m['nw_t']:+.2f}) "
-                  f"cost={m['cost']:,.0f} trades={m['n_trades']}")
+            print(
+                f"    -> ret={m['total_ret']:+.2%} sharpe={m['sharpe']:+.2f} "
+                f"alpha={m['alpha_ann']:+.1%}(t={m['nw_t']:+.2f}) "
+                f"cost={m['cost']:,.0f} trades={m['n_trades']}"
+            )
         except Exception as e:
             print(f"    -> FAILED: {e}")
             row = dict(zip(keys, combo))
@@ -204,13 +223,21 @@ def main() -> None:
     top = ok.sort_values("sharpe", ascending=False).head(10)
     print("\n===== TOP 10 按 Sharpe =====")
     with pd.option_context("display.float_format", lambda v: f"{v:+.4f}"):
-        print(top[keys + ["total_ret", "sharpe", "alpha_ann", "nw_t", "max_dd", "cost"]].to_string(index=False))
+        print(
+            top[keys + ["total_ret", "sharpe", "alpha_ann", "nw_t", "max_dd", "cost"]].to_string(
+                index=False
+            )
+        )
 
     # 按 alpha NW-t 排序
     top_t = ok[ok["nw_t"].notna()].sort_values("nw_t", ascending=False).head(10)
     print("\n===== TOP 10 按 alpha NW-t =====")
     with pd.option_context("display.float_format", lambda v: f"{v:+.4f}"):
-        print(top_t[keys + ["total_ret", "sharpe", "alpha_ann", "nw_t", "max_dd", "cost"]].to_string(index=False))
+        print(
+            top_t[keys + ["total_ret", "sharpe", "alpha_ann", "nw_t", "max_dd", "cost"]].to_string(
+                index=False
+            )
+        )
 
     # 写入 JSON 摘要
     summary = {
@@ -223,7 +250,7 @@ def main() -> None:
         json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
 
     print(f"\n结果已保存: {out_csv}")
-    print(f"摘要已保存: outputs/optimize_daily_params_summary.json")
+    print("摘要已保存: outputs/optimize_daily_params_summary.json")
 
 
 if __name__ == "__main__":

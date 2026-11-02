@@ -6,6 +6,7 @@ champion 刷新保留晋升记录、损坏备份、指纹对 ensemble_models 形
 路径由 tests/conftest.py 统一处理；standalone 运行：
 PYTHONPATH=src:. uv run python tests/test_model_store.py
 """
+
 from __future__ import annotations
 
 import os
@@ -28,24 +29,41 @@ def _make_frame(n_dates: int = 30, n_syms: int = 4) -> pd.DataFrame:
     rows = []
     for d in dates:
         for i in range(n_syms):
-            rows.append({
-                "date": d, "symbol": f"S{i:03d}",
-                "feature_00": rng.randn(), "feature_01": rng.randn(),
-                C.TARGET: rng.randn() * 0.02, C.WEIGHT: 1.0,
-            })
+            rows.append(
+                {
+                    "date": d,
+                    "symbol": f"S{i:03d}",
+                    "feature_00": rng.randn(),
+                    "feature_01": rng.randn(),
+                    C.TARGET: rng.randn() * 0.02,
+                    C.WEIGHT: 1.0,
+                }
+            )
     return pd.DataFrame(rows)
 
 
 def _trained_ens(frame: pd.DataFrame) -> IncrementalEnsemble:
-    ens = IncrementalEnsemble(FEATS, models=("gbm_l2", "ic_linear"),
-                              n_seeds=1, incr_trees=5, rebuild_days=10,
-                              train_window=20, ic_window=5)
+    ens = IncrementalEnsemble(
+        FEATS,
+        models=("gbm_l2", "ic_linear"),
+        n_seeds=1,
+        incr_trees=5,
+        rebuild_days=10,
+        train_window=20,
+        ic_window=5,
+    )
     ens.update(frame.dropna(subset=[C.TARGET]), force_full=True)
     return ens
 
 
-PARAMS = {"ensemble_models": "gbm_l2,ic_linear", "n_seeds": 1, "incr_trees": 5,
-          "rebuild_days": 10, "train_window": 20, "ic_window": 5}
+PARAMS = {
+    "ensemble_models": "gbm_l2,ic_linear",
+    "n_seeds": 1,
+    "incr_trees": 5,
+    "rebuild_days": 10,
+    "train_window": 20,
+    "ic_window": 5,
+}
 
 
 @pytest.fixture
@@ -81,9 +99,11 @@ def test_fingerprint_stable_across_models_form():
     """ensemble_models 传 str / list / 缺省（走 config）→ 同一配方同一指纹。"""
     fp_str = model_store.fingerprint_of(FEATS, dict(PARAMS))
     fp_list = model_store.fingerprint_of(
-        FEATS, {**PARAMS, "ensemble_models": ["gbm_l2", "ic_linear"]})
+        FEATS, {**PARAMS, "ensemble_models": ["gbm_l2", "ic_linear"]}
+    )
     fp_default = model_store.fingerprint_of(
-        FEATS, {k: v for k, v in PARAMS.items() if k != "ensemble_models"})
+        FEATS, {k: v for k, v in PARAMS.items() if k != "ensemble_models"}
+    )
     assert fp_str == fp_list
     # 缺省回退 C.ENSEMBLE_MODELS；仅当 config 默认恰为同配方时相等
     if C.ENSEMBLE_MODELS.replace(" ", "") == "gbm_l2,ic_linear":
@@ -105,8 +125,7 @@ def test_stage_promote_load_champion(model_dir):
     assert os.path.exists(os.path.join(sdir, "ensemble_state.pkl"))
     assert manifest["fingerprint"] == model_store.fingerprint_of(FEATS, PARAMS)
 
-    model_store.promote(manifest["model_id"],
-                        promotion_record={"reason": "t", "decided_at": "now"})
+    model_store.promote(manifest["model_id"], promotion_record={"reason": "t", "decided_at": "now"})
     loaded = model_store.load_champion()
     assert loaded is not None
     champ_ens, champ_manifest = loaded
@@ -128,8 +147,7 @@ def test_refresh_champion_keeps_promotion_record(model_dir):
     frame = _make_frame()
     ens = _trained_ens(frame)
     sdir, manifest = model_store.stage_candidate(ens, FEATS, PARAMS)
-    model_store.promote(manifest["model_id"],
-                        promotion_record={"reason": "t", "decided_at": "d0"})
+    model_store.promote(manifest["model_id"], promotion_record={"reason": "t", "decided_at": "d0"})
 
     ens2 = _trained_ens(_make_frame(n_dates=31))
     model_store.refresh_champion(ens2, FEATS, PARAMS)

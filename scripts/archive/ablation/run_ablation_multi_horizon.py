@@ -3,11 +3,11 @@
 Loads the panel once and runs walk-forward for each objective, keeping all other
 config identical. Outputs a comparison CSV to outputs/ablation_multi_horizon.csv.
 """
+
 from __future__ import annotations
 
 import os
 import sys
-import json
 
 import numpy as np
 import pandas as pd
@@ -54,8 +54,9 @@ def main():
         # but we already imported it; set the module attribute directly).
         C.MODEL_OBJECTIVE = obj
         try:
-            res = run_walkforward(panel, factors, select_features=False,
-                                  strategy="long_topk", verbose=True)
+            res = run_walkforward(
+                panel, factors, select_features=False, strategy="long_topk", verbose=True
+            )
             row = {"objective": obj, **_extract(res)}
         except Exception as e:
             print(f"FAILED: {e}")

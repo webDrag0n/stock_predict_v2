@@ -8,11 +8,11 @@ Assumption: the input Series has a MultiIndex (symbol, date) or a single-level
 index that represents the symbol. Cross-sectional helpers group by the date
 level; time-series helpers group by the symbol level.
 """
+
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 
 def _symbol_level(s: pd.Series) -> int | str:
@@ -40,49 +40,57 @@ def ts_delta(s: pd.Series, n: int) -> pd.Series:
 def ts_sum(s: pd.Series, n: int) -> pd.Series:
     """Rolling sum over n days per symbol."""
     return s.groupby(level=_symbol_level(s), group_keys=False).transform(
-        lambda x: x.rolling(n, min_periods=max(1, n // 2)).sum())
+        lambda x: x.rolling(n, min_periods=max(1, n // 2)).sum()
+    )
 
 
 def ts_mean(s: pd.Series, n: int) -> pd.Series:
     """Rolling mean over n days per symbol."""
     return s.groupby(level=_symbol_level(s), group_keys=False).transform(
-        lambda x: x.rolling(n, min_periods=max(1, n // 2)).mean())
+        lambda x: x.rolling(n, min_periods=max(1, n // 2)).mean()
+    )
 
 
 def ts_std(s: pd.Series, n: int) -> pd.Series:
     """Rolling std over n days per symbol."""
     return s.groupby(level=_symbol_level(s), group_keys=False).transform(
-        lambda x: x.rolling(n, min_periods=max(1, n // 2)).std())
+        lambda x: x.rolling(n, min_periods=max(1, n // 2)).std()
+    )
 
 
 def ts_max(s: pd.Series, n: int) -> pd.Series:
     """Rolling max over n days per symbol."""
     return s.groupby(level=_symbol_level(s), group_keys=False).transform(
-        lambda x: x.rolling(n, min_periods=max(1, n // 2)).max())
+        lambda x: x.rolling(n, min_periods=max(1, n // 2)).max()
+    )
 
 
 def ts_min(s: pd.Series, n: int) -> pd.Series:
     """Rolling min over n days per symbol."""
     return s.groupby(level=_symbol_level(s), group_keys=False).transform(
-        lambda x: x.rolling(n, min_periods=max(1, n // 2)).min())
+        lambda x: x.rolling(n, min_periods=max(1, n // 2)).min()
+    )
 
 
 def ts_skew(s: pd.Series, n: int) -> pd.Series:
     """Rolling skew over n days per symbol."""
     return s.groupby(level=_symbol_level(s), group_keys=False).transform(
-        lambda x: x.rolling(n, min_periods=max(1, n // 2)).skew())
+        lambda x: x.rolling(n, min_periods=max(1, n // 2)).skew()
+    )
 
 
 def ts_argmax(s: pd.Series, n: int) -> pd.Series:
     """Index of the rolling max (0..n-1) per symbol."""
     return s.groupby(level=_symbol_level(s), group_keys=False).transform(
-        lambda x: x.rolling(n, min_periods=max(1, n // 2)).apply(np.argmax, raw=True))
+        lambda x: x.rolling(n, min_periods=max(1, n // 2)).apply(np.argmax, raw=True)
+    )
 
 
 def ts_argmin(s: pd.Series, n: int) -> pd.Series:
     """Index of the rolling min (0..n-1) per symbol."""
     return s.groupby(level=_symbol_level(s), group_keys=False).transform(
-        lambda x: x.rolling(n, min_periods=max(1, n // 2)).apply(np.argmin, raw=True))
+        lambda x: x.rolling(n, min_periods=max(1, n // 2)).apply(np.argmin, raw=True)
+    )
 
 
 def ts_corr(a: pd.Series, b: pd.Series, n: int) -> pd.Series:
@@ -92,10 +100,12 @@ def ts_corr(a: pd.Series, b: pd.Series, n: int) -> pd.Series:
 
     def _roll_sum(s: pd.Series) -> pd.Series:
         return s.groupby(level=sym, group_keys=False).transform(
-            lambda x: x.rolling(n, min_periods=min_p).sum())
+            lambda x: x.rolling(n, min_periods=min_p).sum()
+        )
 
     m = a.groupby(level=sym, group_keys=False).transform(
-        lambda x: x.rolling(n, min_periods=min_p).count())
+        lambda x: x.rolling(n, min_periods=min_p).count()
+    )
     sa = _roll_sum(a)
     sb = _roll_sum(b)
     sab = _roll_sum(a * b)
@@ -103,17 +113,19 @@ def ts_corr(a: pd.Series, b: pd.Series, n: int) -> pd.Series:
     sb2 = _roll_sum(b * b)
 
     num = m * sab - sa * sb
-    den = np.sqrt(np.maximum((m * sa2 - sa ** 2) * (m * sb2 - sb ** 2), 0.0))
+    den = np.sqrt(np.maximum((m * sa2 - sa**2) * (m * sb2 - sb**2), 0.0))
     out = num / den
     return out.replace([np.inf, -np.inf], np.nan)
 
 
 def ts_rank(s: pd.Series, n: int) -> pd.Series:
     """Time-series rank of the current value within the trailing n days (1..n)."""
+
     def _rank(g):
         # pandas rolling.rank() is Cythonized and ~100x faster than scipy rankdata
         # applied per window. The value at each point is its rank within the window.
         return g.rolling(n, min_periods=max(1, n // 2)).rank()
+
     return s.groupby(level=_symbol_level(s), group_keys=False).transform(_rank)
 
 
@@ -124,10 +136,12 @@ def cs_rank(s: pd.Series) -> pd.Series:
 
 def cs_zscore(s: pd.Series) -> pd.Series:
     """Cross-sectional z-score within each date."""
+
     def _z(g):
         m = g.mean()
         sd = g.std()
         return (g - m) / sd if sd > 1e-12 else pd.Series(np.nan, index=g.index)
+
     return s.groupby(level=_date_level(s), group_keys=False).transform(_z)
 
 
@@ -154,11 +168,13 @@ def safe_div(a: pd.Series, b: pd.Series, fill: float = np.nan) -> pd.Series:
 def ts_quantile(s: pd.Series, n: int, q: float) -> pd.Series:
     """Rolling q-quantile per symbol."""
     return s.groupby(level=_symbol_level(s), group_keys=False).transform(
-        lambda x: x.rolling(n, min_periods=max(1, n // 2)).quantile(q))
+        lambda x: x.rolling(n, min_periods=max(1, n // 2)).quantile(q)
+    )
 
 
 def ts_reg_resid(s: pd.Series, n: int) -> pd.Series:
     """Residual of the LAST point vs a linear time-trend fit over the window."""
+
     def _resid(y: np.ndarray) -> float:
         m = len(y)
         if m < 3 or not np.all(np.isfinite(y)):
@@ -166,12 +182,15 @@ def ts_reg_resid(s: pd.Series, n: int) -> pd.Series:
         x = np.arange(m, dtype=np.float64)
         b, a = np.polyfit(x, y, 1)
         return float(y[-1] - (b * x[-1] + a))
+
     return s.groupby(level=_symbol_level(s), group_keys=False).transform(
-        lambda x: x.rolling(n, min_periods=max(1, n // 2)).apply(_resid, raw=True))
+        lambda x: x.rolling(n, min_periods=max(1, n // 2)).apply(_resid, raw=True)
+    )
 
 
 def ts_reg_r2(s: pd.Series, n: int) -> pd.Series:
     """R² of y regressed on a time index 0..n-1 (for trend quality)."""
+
     def _r2(y: np.ndarray) -> float:
         m = len(y)
         if m < 3 or not np.all(np.isfinite(y)):
@@ -184,5 +203,7 @@ def ts_reg_r2(s: pd.Series, n: int) -> pd.Series:
             return np.nan
         sxy = np.sum((x - xm) * (y - ym))
         return (sxy * sxy) / (sxx * syy)
+
     return s.groupby(level=_symbol_level(s), group_keys=False).transform(
-        lambda x: x.rolling(n, min_periods=max(1, n // 2)).apply(_r2, raw=True))
+        lambda x: x.rolling(n, min_periods=max(1, n // 2)).apply(_r2, raw=True)
+    )

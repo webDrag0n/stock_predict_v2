@@ -1,7 +1,8 @@
 """每日重放回测引擎 —— 把共享每日交易决策(trading.py)在历史上一天天重放。
 
-与旧的 run_backtest_periodic（固定周期、向量化、只算组合收益率）不同，这里是
-**事件级逐笔模拟**，完全对应需求：
+本引擎是仓库的**唯一回测引擎**（旧的周期调仓向量化引擎 run_backtest_periodic
+已删除：调仓日收盘近似成交、无 T+1/整手/涨跌停，口径与实盘脱节）。这里是
+**事件级逐笔模拟**，与实盘共用 trading.py 的决策与撮合，完全对应需求：
 
   每个交易日 t（按时间顺序遍历）：
     1. 增量更新 ensemble（只用 ≤ t−FORWARD_WINDOW 的已成熟标签行续训/重建）；
@@ -26,9 +27,10 @@
   · weights : 每个更新点的各模型 IC 权重（供"模型权重随时间"图）
   · 最终 PortfolioState
 """
+
 from __future__ import annotations
 
-import os
+import logging
 import time
 import warnings
 
@@ -40,6 +42,8 @@ import config as C
 import risk
 from ensemble import IncrementalEnsemble
 from trading import PortfolioState, decide_orders, simulate_fills
+
+logger = logging.getLogger(__name__)
 
 
 # 指纹逻辑已上移到 model_store（champion/staging 机制共用同一配方指纹，
@@ -57,27 +61,42 @@ def _unwrap_score_cache(score_cache, fingerprint: str):
         elif cached_fp != fingerprint:
             raise ValueError(
                 f"score_cache 指纹不匹配：缓存 {cached_fp} ≠ 当前配置 {fingerprint}。"
-                "特征/模型/前瞻窗已变化，缓存分已失效，请重新训练收集。")
+                "特征/模型/前瞻窗已变化，缓存分已失效，请重新训练收集。"
+            )
         return score_cache["scores"]
     warnings.warn(
         "score_cache 未带指纹（旧格式），无法校验是否与当前信号配置一致——"
         "若特征/模型/FORWARD_WINDOW 已变，结果基于陈旧分数。新格式："
         '{"scores": ..., "fingerprint": meta["score_fingerprint"]}。',
-        stacklevel=3)
+        stacklevel=3,
+    )
     return score_cache
 
 
 # 撮合 / 估值所需的次日行情列
-_BAR_COLS = ("symbol", "open", "high", "low", "close", "amount",
-             "pre_close", "limit_flag", "pct_chg")
+_BAR_COLS = (
+    "symbol",
+    "open",
+    "high",
+    "low",
+    "close",
+    "amount",
+    "pre_close",
+    "limit_flag",
+    "pct_chg",
+)
 
 
-def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
-                     initial_cash: float = None,
-                     initial_holdings: dict[str, int] | None = None,
-                     params: dict | None = None,
-                     start_date=None, end_date=None,
-                     progress: bool = True) -> dict:
+def run_daily_replay(
+    panel: pd.DataFrame,
+    feat_cols: list[str],
+    initial_cash: float = None,
+    initial_holdings: dict[str, int] | None = None,
+    params: dict | None = None,
+    start_date=None,
+    end_date=None,
+    progress: bool = True,
+) -> dict:
     """逐日重放回测。panel 需为 keep_trade_cols=True 的面板（含 OHLC + 布林带 meta）。
 
     Args:
@@ -95,8 +114,7 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
         dict(daily, trades, weights, state, meta)
     """
     p = dict(params or {})
-    initial_cash = float(initial_cash if initial_cash is not None
-                         else C.INITIAL_CAPITAL)
+    initial_cash = float(initial_cash if initial_cash is not None else C.INITIAL_CAPITAL)
     fw = int(getattr(C, "FORWARD_WINDOW", 20))
     embargo = int(getattr(C, "EMBARGO_DAYS", fw))
     warmup = int(p.get("warmup_days", getattr(C, "TRAIN_WINDOW", 500)))
@@ -132,8 +150,12 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
     # 动态 topk 集中度：根据近期 OOS rank-IC 调整持仓只数。IC 高时集中吃头部 edge，
     # IC 低时分散降低噪音与换手。与 IC 降仓共用同一个成熟 IC 队列，无泄露。
     use_dynamic_topk = bool(p.get("use_dynamic_topk", getattr(C, "USE_DYNAMIC_TOPK", False)))
-    dynamic_topk_ic_full = float(p.get("dynamic_topk_ic_full", getattr(C, "DYNAMIC_TOPK_IC_FULL", 0.02)))
-    dynamic_topk_ic_zero = float(p.get("dynamic_topk_ic_zero", getattr(C, "DYNAMIC_TOPK_IC_ZERO", -0.01)))
+    dynamic_topk_ic_full = float(
+        p.get("dynamic_topk_ic_full", getattr(C, "DYNAMIC_TOPK_IC_FULL", 0.02))
+    )
+    dynamic_topk_ic_zero = float(
+        p.get("dynamic_topk_ic_zero", getattr(C, "DYNAMIC_TOPK_IC_ZERO", -0.01))
+    )
     dynamic_topk_low = float(p.get("dynamic_topk_low", getattr(C, "DYNAMIC_TOPK_LOW", 0.10)))
     dynamic_topk_high = float(p.get("dynamic_topk_high", getattr(C, "DYNAMIC_TOPK_HIGH", 0.25)))
     # Regime 择时空仓避险（最果断的一层）：当【大盘趋势】转空（等权市场跌破均线 /
@@ -155,10 +177,9 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
     # Pre-compute trailing betas if beta constraint is enabled.
     # Beta = slope of stock return_1d vs equal-weight market return_1d over the
     # trailing BETA_LOOKBACK days per symbol. Leak-free: uses only past returns.
-    use_beta_constraint = bool(p.get("use_beta_constraint",
-                                     getattr(C, "USE_BETA_CONSTRAINT", False)))
-    max_portfolio_beta = float(p.get("max_portfolio_beta",
-                                      getattr(C, "MAX_PORTFOLIO_BETA", 1.10)))
+    use_beta_constraint = bool(
+        p.get("use_beta_constraint", getattr(C, "USE_BETA_CONSTRAINT", False))
+    )
     beta_lookback = int(p.get("beta_lookback", getattr(C, "BETA_LOOKBACK", 60)))
     if use_beta_constraint and "return_1d" in panel.columns:
         panel = _add_trailing_beta(panel, lookback=beta_lookback)
@@ -179,22 +200,23 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
     # 预切：把面板按日期切成 (start, end) 行索引。避免把每个交易日存成一个独立
     # DataFrame（会复制/引用大量内存），也避免每天做整表布尔索引。
     row_dates = panel["date"].to_numpy()
-    _uniq_dates, _starts, _counts = np.unique(
-        row_dates, return_index=True, return_counts=True)
+    _uniq_dates, _starts, _counts = np.unique(row_dates, return_index=True, return_counts=True)
     _date_start = {d: int(s) for d, s in zip(_uniq_dates, _starts)}
     _date_end = {d: int(s + c) for d, s, c in zip(_uniq_dates, _starts, _counts)}
-    date_to_next = {all_dates[i]: all_dates[i + 1]
-                    for i in range(len(all_dates) - 1)}
+    date_to_next = {all_dates[i]: all_dates[i + 1] for i in range(len(all_dates) - 1)}
 
     def _slice_date(d):
-        return panel.iloc[_date_start[d]:_date_end[d]]
+        return panel.iloc[_date_start[d] : _date_end[d]]
 
     # Regime 择时：预计算每个交易日的【大盘 regime 在险标志】（仅用 ≤ 当日行情，防泄露）。
     # 等权市场日收益 → 过去 regime_window 日累计收益；≤ regime_floor_ret 视为下行 regime。
     _regime_risk_on = {}
     if use_regime:
-        _rc = ("return_1d" if "return_1d" in panel.columns
-               else ("pct_chg" if "pct_chg" in panel.columns else None))
+        _rc = (
+            "return_1d"
+            if "return_1d" in panel.columns
+            else ("pct_chg" if "pct_chg" in panel.columns else None)
+        )
         if _rc is not None:
             _mkt = panel.groupby("date")[_rc].mean().sort_index()
             if _rc == "pct_chg":
@@ -203,8 +225,8 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
             _mkt_v = _mkt.to_numpy(dtype=np.float64)
             for i, dd_ in enumerate(_mkt_dates):
                 lo = max(0, i - regime_window + 1)
-                trail = float(np.prod(1.0 + _mkt_v[lo:i + 1]) - 1.0)
-                _regime_risk_on[dd_] = (trail > regime_floor_ret)
+                trail = float(np.prod(1.0 + _mkt_v[lo : i + 1]) - 1.0)
+                _regime_risk_on[dd_] = trail > regime_floor_ret
 
     # IV-based leverage scaling: pre-compute per-date scale from trailing history.
     # The IV feature is already lagged by 1 trading day in the data loader, so it
@@ -233,38 +255,46 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
 
     ens = None
     if not use_cache:
-        ens = IncrementalEnsemble(feat_cols,
-                                  models=p.get("ensemble_models") or None,
-                                  n_seeds=p.get("n_seeds"),
-                                  incr_trees=p.get("incr_trees"),
-                                  rebuild_days=p.get("rebuild_days"),
-                                  train_window=p.get("train_window"),
-                                  ic_window=p.get("ic_window"))
+        ens = IncrementalEnsemble(
+            feat_cols,
+            models=p.get("ensemble_models") or None,
+            n_seeds=p.get("n_seeds"),
+            incr_trees=p.get("incr_trees"),
+            rebuild_days=p.get("rebuild_days"),
+            train_window=p.get("train_window"),
+            ic_window=p.get("ic_window"),
+        )
 
-    state = PortfolioState(cash=initial_cash,
-                           holdings=dict(initial_holdings or {}))
+    state = PortfolioState(cash=initial_cash, holdings=dict(initial_holdings or {}))
 
     daily_rows: list[dict] = []
     trade_frames: list[pd.DataFrame] = []
     weight_rows: list[dict] = []
-    # 可疑除权调整计数（_price_map 写入）：pre_close 链条出现超大幅调整说明
+    # 可疑除权调整计数（price_map 写入）：pre_close 链条出现超大幅调整说明
     # 数据源 pre_close 脏，val_factor 会永久漂移——记录下来供事后审计。
     _suspicious_val_adjusts: list[tuple] = []
     # IC 信号失效降仓：维护一个 (pred_date -> {sym: score}) 的预测历史，
     # 和一个已成熟 IC 的滑动队列。pred_date 的 IC 在 pred_date + FW 日后才能计算。
     from collections import deque
-    _pred_hist_ic: dict = {}    # date -> {sym: score}（仅用于 IC 打分，与 ensemble 的无关）
-    _ic_queue: deque = deque(maxlen=ic_scale_window)   # 最近 ic_scale_window 个已成熟 IC
+
+    _pred_hist_ic: dict = {}  # date -> {sym: score}（仅用于 IC 打分，与 ensemble 的无关）
+    _ic_queue: deque = deque(maxlen=ic_scale_window)  # 最近 ic_scale_window 个已成熟 IC
     _scored_ic: set = set()
 
     t0 = time.time()
     n_dec = len(decision_dates)
     if progress_cb is not None:
         try:
-            progress_cb(phase="回放启动", current=0, total=max(n_dec, 1),
-                        n_decision_days=int(n_dec),
-                        date_range=(f"{pd.Timestamp(all_dates[first_decision_i]).date()} ~ "
-                                    f"{pd.Timestamp(decision_dates[-1]).date()}"))
+            progress_cb(
+                phase="回放启动",
+                current=0,
+                total=max(n_dec, 1),
+                n_decision_days=int(n_dec),
+                date_range=(
+                    f"{pd.Timestamp(all_dates[first_decision_i]).date()} ~ "
+                    f"{pd.Timestamp(decision_dates[-1]).date()}"
+                ),
+            )
         except Exception:
             pass
 
@@ -275,8 +305,7 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
         if use_cache:
             # 复用缓存分：跳过全部模型工作。缺某日 → 全 0 分（决策层等同空仓）。
             sc_map = score_cache.get(d, {})
-            score = np.array([sc_map.get(s, np.nan) for s in sym_today],
-                             dtype=np.float64)
+            score = np.array([sc_map.get(s, np.nan) for s in sym_today], dtype=np.float64)
             if not np.isfinite(score).any():
                 score = np.zeros(len(today), dtype=np.float64)
             else:
@@ -289,22 +318,26 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
             di = np.searchsorted(all_dates, d)
             mat_cut_i = max(0, di - fw - embargo)
             mat_cut = all_dates[mat_cut_i]
-            matured = panel.iloc[:_date_end[mat_cut]]
+            matured = panel.iloc[: _date_end[mat_cut]]
 
             # --- 1b) 增量更新 + 滚动 IC 定权 ---
             ens.update(matured, asof_date=d)
             ens.refresh_weights(panel, asof_date=d)
             w = ens.weights
-            weight_rows.append({"date": d, **{f"w_{m}": w.get(m, 0.0) for m in ens.models},
-                                **{f"ic_{m}": v for m, v in ens.ic_means().items()}})
+            weight_rows.append(
+                {
+                    "date": d,
+                    **{f"w_{m}": w.get(m, 0.0) for m in ens.models},
+                    **{f"ic_{m}": v for m, v in ens.ic_means().items()},
+                }
+            )
 
             # --- 2) 决策日横截面预测 ---
             preds = ens.predict(today)
             score = ens.combine(preds, today["date"].to_numpy())
-            ens.observe(d, today, preds)   # 存预测供日后成熟定权
+            ens.observe(d, today, preds)  # 存预测供日后成熟定权
             if collected is not None:
-                collected[d] = {sym_today[i]: float(score[i])
-                                for i in range(len(sym_today))}
+                collected[d] = {sym_today[i]: float(score[i]) for i in range(len(sym_today))}
 
         # --- IC 信号失效降仓：记录今日预测分，供 FW 天后成熟打分 ---
         if use_ic_scale:
@@ -327,36 +360,44 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
                     continue
                 sub = _slice_date(d_prev) if d_prev in _date_start else None
                 if sub is None:
-                    _scored_ic.add(d_prev); continue
+                    _scored_ic.add(d_prev)
+                    continue
                 pm = _pred_hist_ic[d_prev]
-                sub_syms = set(sub["symbol"].to_numpy())   # set 成员判断，避免 O(n²)
+                sub_syms = set(sub["symbol"].to_numpy())  # set 成员判断，避免 O(n²)
                 syms = [s for s in pm if s in sub_syms]
                 if len(syms) < 30:
-                    _scored_ic.add(d_prev); continue
+                    _scored_ic.add(d_prev)
+                    continue
                 sy = sub.set_index("symbol")
                 tgt = sy.loc[syms, C.TARGET].to_numpy(float)
                 sc_ = np.array([pm[s] for s in syms], float)
                 ok = np.isfinite(tgt) & np.isfinite(sc_)
                 if ok.sum() < 20:
-                    _scored_ic.add(d_prev); continue
+                    _scored_ic.add(d_prev)
+                    continue
                 ic_val = spearmanr(sc_[ok], tgt[ok]).correlation
                 if ic_val == ic_val:
                     _ic_queue.append(float(ic_val))
                 _scored_ic.add(d_prev)
-                del _pred_hist_ic[d_prev]   # 释放内存
+                del _pred_hist_ic[d_prev]  # 释放内存
         # 五层叠乘链（唯一实现）：vol min 截断 → dd × → IC × → regime × → IV ×
         risk_scale, ic_scale, roll_ic = risk.compute_risk_scale(
-            (r["total_value"] for r in daily_rows), _ic_queue, params=p,
+            (r["total_value"] for r in daily_rows),
+            _ic_queue,
+            params=p,
             risk_on=_regime_risk_on.get(d, True),
-            iv_scale=_iv_scale.get(d, 1.0))
+            iv_scale=_iv_scale.get(d, 1.0),
+        )
         day_p = dict(p)
-        day_p["gross_leverage"] = float(p.get("gross_leverage",
-                                              getattr(C, "GROSS_LEVERAGE", 1.0))) * risk_scale
+        day_p["gross_leverage"] = (
+            float(p.get("gross_leverage", getattr(C, "GROSS_LEVERAGE", 1.0))) * risk_scale
+        )
 
         # 动态 topk：根据近期 IC 调整集中度。IC 高->集中，IC 低->分散。
         if use_dynamic_topk and roll_ic is not None:
-            t = ((roll_ic - dynamic_topk_ic_zero) /
-                 (dynamic_topk_ic_full - dynamic_topk_ic_zero + 1e-9))
+            t = (roll_ic - dynamic_topk_ic_zero) / (
+                dynamic_topk_ic_full - dynamic_topk_ic_zero + 1e-9
+            )
             t = max(0.0, min(1.0, t))
             # t=1 at IC_FULL -> low topk; t=0 at IC_ZERO -> high topk
             dyn_topk = dynamic_topk_high - t * (dynamic_topk_high - dynamic_topk_low)
@@ -371,8 +412,7 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
         # rebalance_every: 只在每第 N 个决策日重新决策，其余日持有不动（降频闸门）。
         rebal_every = int(p.get("rebalance_every", getattr(C, "REBALANCE_EVERY", 1)))
         if rebal_every > 1 and (k % rebal_every) != 0:
-            orders = decide_orders(state, today.iloc[0:0], np.array([]), params=day_p,
-                                   asof_date=d)
+            orders = decide_orders(state, today.iloc[0:0], np.array([]), params=day_p, asof_date=d)
         else:
             orders = decide_orders(state, today, score, params=day_p, asof_date=d)
 
@@ -386,61 +426,79 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
         if len(orders) and next_bars is not None:
             fill_res = simulate_fills(state, orders, next_bars, params=p, t1_lock=True)
         else:
-            fill_res = {"fills": pd.DataFrame(), "n_fill": 0, "n_reject": len(orders),
-                        "buy_notional": 0.0, "sell_notional": 0.0,
-                        "commission": 0.0, "stamp": 0.0, "impact": 0.0,
-                        "total_cost": 0.0}
+            fill_res = {
+                "fills": pd.DataFrame(),
+                "n_fill": 0,
+                "n_reject": len(orders),
+                "buy_notional": 0.0,
+                "sell_notional": 0.0,
+                "commission": 0.0,
+                "stamp": 0.0,
+                "impact": 0.0,
+                "total_cost": 0.0,
+            }
 
         # --- 5) 收盘估值：用【次日】close 给收盘后的持仓估值（持仓是次日成交后的）---
         # 除权检测只在用次日行情估值时做（pre_close(次日) 对 last_price(决策日原始收盘)）；
         # 退化为 today 估值时 last_price 已被 decide_orders 刷新为同日收盘，会误判，故不传 state。
         val_bars = next_bars if next_bars is not None else today
-        price_map = _price_map(val_bars, state=state if next_bars is not None else None,
-                               suspicious=_suspicious_val_adjusts)
-        stock_val = state.market_value(price_map)
+        px_map = price_map(
+            val_bars,
+            state=state if next_bars is not None else None,
+            suspicious=_suspicious_val_adjusts,
+        )
+        stock_val = state.market_value(px_map)
         total_val = state.cash + stock_val
 
         # --- 守恒校验 ---
         if strict:
-            expected = (cash_before - fill_res["buy_notional"]
-                        + fill_res["sell_notional"] - fill_res["total_cost"])
+            expected = (
+                cash_before
+                - fill_res["buy_notional"]
+                + fill_res["sell_notional"]
+                - fill_res["total_cost"]
+            )
             if abs(expected - state.cash) > max(1.0, abs(expected) * 1e-6):
                 raise AssertionError(
                     f"现金守恒被破坏 @ {pd.Timestamp(d).date()}: "
                     f"期望 {expected:.2f} 实际 {state.cash:.2f} "
                     f"(买{fill_res['buy_notional']:.2f} 卖{fill_res['sell_notional']:.2f} "
-                    f"成本{fill_res['total_cost']:.2f})")
+                    f"成本{fill_res['total_cost']:.2f})"
+                )
             # 估值侧守恒：total_value 必须等于现金 + 按同一口径独立重算的持仓市值
             # （停牌股用 last_price 兜底、除权股乘 val_factor，与 market_value 一致）。
             indep_mv = 0.0
             for s_, sh_ in state.holdings.items():
                 if sh_ <= 0:
                     continue
-                px_ = price_map.get(s_, state.last_price.get(s_, 0.0))
+                px_ = px_map.get(s_, state.last_price.get(s_, 0.0))
                 indep_mv += sh_ * px_ * state.val_factor.get(s_, 1.0)
             if abs(state.cash + indep_mv - total_val) > max(1.0, abs(total_val) * 1e-6):
                 raise AssertionError(
                     f"估值守恒被破坏 @ {pd.Timestamp(d).date()}: "
                     f"现金{state.cash:.2f} + 独立重算市值{indep_mv:.2f} "
-                    f"≠ total_value {total_val:.2f}")
+                    f"≠ total_value {total_val:.2f}"
+                )
 
-        turnover = (fill_res["buy_notional"] + fill_res["sell_notional"])
-        daily_rows.append({
-            "date": nd,                       # 成交发生在下一交易日，归到该日
-            "decision_date": d,
-            "cash": state.cash,
-            "stock_value": stock_val,
-            "total_value": total_val,
-            "n_positions": len(state.held_symbols()),
-            "turnover": turnover,
-            "cost": fill_res["total_cost"],
-            "commission": fill_res["commission"],
-            "stamp": fill_res["stamp"],
-            "impact": fill_res["impact"],
-            "n_fill": fill_res["n_fill"],
-            "n_reject": fill_res["n_reject"],
-            "risk_scale": risk_scale,
-        })
+        turnover = fill_res["buy_notional"] + fill_res["sell_notional"]
+        daily_rows.append(
+            {
+                "date": nd,  # 成交发生在下一交易日，归到该日
+                "decision_date": d,
+                "cash": state.cash,
+                "stock_value": stock_val,
+                "total_value": total_val,
+                "n_positions": len(state.held_symbols()),
+                "turnover": turnover,
+                "cost": fill_res["total_cost"],
+                "commission": fill_res["commission"],
+                "stamp": fill_res["stamp"],
+                "impact": fill_res["impact"],
+                "n_fill": fill_res["n_fill"],
+                "n_reject": fill_res["n_reject"],
+                "risk_scale": risk_scale,
+            }
+        )
         fdf = fill_res["fills"]
         if len(fdf):
             fdf = fdf.copy()
@@ -450,12 +508,13 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
         if progress and (k % 5 == 0 or k == n_dec - 1):
             el = time.time() - t0
             eta = el / (k + 1) * (n_dec - k - 1)
-            wtxt = ("缓存分" if use_cache
-                    else str({m: round(w.get(m, 0), 2) for m in ens.models}))
-            print(f"  [{k+1}/{n_dec}] {pd.Timestamp(d).date()} "
-                  f"总值¥{total_val:,.0f} 持仓{len(state.held_symbols())} "
-                  f"权重{wtxt} "
-                  f"(elapsed {el:.0f}s eta {eta:.0f}s)", flush=True)
+            wtxt = "缓存分" if use_cache else str({m: round(w.get(m, 0), 2) for m in ens.models})
+            logger.info(
+                f"  [{k+1}/{n_dec}] {pd.Timestamp(d).date()} "
+                f"总值¥{total_val:,.0f} 持仓{len(state.held_symbols())} "
+                f"权重{wtxt} "
+                f"(elapsed {el:.0f}s eta {eta:.0f}s)"
+            )
             if progress_cb is not None:
                 try:
                     progress_cb(
@@ -474,21 +533,22 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
 
     if progress_cb is not None:
         try:
-            progress_cb(phase="回放完成", current=n_dec, total=max(n_dec, 1),
-                        n_decision_days=int(n_dec))
+            progress_cb(
+                phase="回放完成", current=n_dec, total=max(n_dec, 1), n_decision_days=int(n_dec)
+            )
         except Exception:
             pass
 
     daily = pd.DataFrame(daily_rows)
-    trades = (pd.concat(trade_frames, ignore_index=True)
-              if trade_frames else pd.DataFrame())
+    trades = pd.concat(trade_frames, ignore_index=True) if trade_frames else pd.DataFrame()
     weights = pd.DataFrame(weight_rows)
 
     if _suspicious_val_adjusts:
         warnings.warn(
             f"{len(_suspicious_val_adjusts)} 次除权调整幅度超 [1/3, 3] 护栏，已跳过"
             f"（pre_close 数据疑似脏，例：{_suspicious_val_adjusts[:3]}）",
-            stacklevel=2)
+            stacklevel=2,
+        )
 
     # 期末以最后持仓的最后可得价格估值已在 daily 最后一行；补充总收益
     meta = {
@@ -502,15 +562,15 @@ def run_daily_replay(panel: pd.DataFrame, feat_cols: list[str],
         "score_fingerprint": score_fp,
         "n_suspicious_val_adjusts": len(_suspicious_val_adjusts),
     }
-    out = {"daily": daily, "trades": trades, "weights": weights,
-           "state": state, "meta": meta}
+    out = {"daily": daily, "trades": trades, "weights": weights, "state": state, "meta": meta}
     if collected is not None:
         out["score_cache"] = collected
     return out
 
 
-def _price_map(bars: pd.DataFrame, state: PortfolioState | None = None,
-               suspicious: list | None = None) -> dict[str, float]:
+def price_map(
+    bars: pd.DataFrame, state: PortfolioState | None = None, suspicious: list | None = None
+) -> dict[str, float]:
     """symbol -> 估值用原始 close；传入 state 时顺手维护每股累计除权估值因子。
 
     除权日检测：bar 的 pre_close 与该股最近一次可得原始收盘（state.last_price，
@@ -527,8 +587,7 @@ def _price_map(bars: pd.DataFrame, state: PortfolioState | None = None,
         return {}
     sym = bars["symbol"].to_numpy()
     close = bars["close"].to_numpy(dtype=np.float64)
-    pc = (bars["pre_close"].to_numpy(dtype=np.float64)
-          if "pre_close" in bars.columns else None)
+    pc = bars["pre_close"].to_numpy(dtype=np.float64) if "pre_close" in bars.columns else None
     out: dict[str, float] = {}
     for i in range(len(sym)):
         px = close[i]
@@ -539,9 +598,13 @@ def _price_map(bars: pd.DataFrame, state: PortfolioState | None = None,
             prev_raw = state.last_price.get(s)
             pc_i = pc[i]
             # 0.1% 容差防浮点/舍入噪声误判为除权
-            if (prev_raw is not None and prev_raw > 0
-                    and pc_i == pc_i and pc_i > 0
-                    and abs(pc_i - prev_raw) > 0.001 * prev_raw):
+            if (
+                prev_raw is not None
+                and prev_raw > 0
+                and pc_i == pc_i
+                and pc_i > 0
+                and abs(pc_i - prev_raw) > 0.001 * prev_raw
+            ):
                 ratio = prev_raw / pc_i
                 if 1.0 / 3.0 <= ratio <= 3.0:
                     state.val_factor[s] = state.val_factor.get(s, 1.0) * ratio
@@ -551,6 +614,9 @@ def _price_map(bars: pd.DataFrame, state: PortfolioState | None = None,
     return out
 
 
+_price_map = price_map  # 向后兼容别名
+
+
 def compute_trade_stats(trades: pd.DataFrame) -> dict:
     """从逐笔成交计算交易级统计：买卖笔数、成交率、按代码配对的已实现盈亏。
 
@@ -558,10 +624,17 @@ def compute_trade_stats(trades: pd.DataFrame) -> dict:
     复杂分摊，足够给出胜率/平均盈亏/盈亏比的画像）。
     """
     if trades is None or len(trades) == 0:
-        return {"n_buy": 0, "n_sell": 0, "n_round_trips": 0, "win_rate": float("nan"),
-                "avg_win": float("nan"), "avg_loss": float("nan"),
-                "profit_factor": float("nan"), "realized_pnl": 0.0,
-                "round_trips": pd.DataFrame()}
+        return {
+            "n_buy": 0,
+            "n_sell": 0,
+            "n_round_trips": 0,
+            "win_rate": float("nan"),
+            "avg_win": float("nan"),
+            "avg_loss": float("nan"),
+            "profit_factor": float("nan"),
+            "realized_pnl": 0.0,
+            "round_trips": pd.DataFrame(),
+        }
     f = trades[trades["filled"]] if "filled" in trades.columns else trades
     f = f.sort_values("date")
     n_buy = int((f["side"] == "buy").sum())
@@ -569,6 +642,7 @@ def compute_trade_stats(trades: pd.DataFrame) -> dict:
 
     # FIFO 配对（每股一队列）
     from collections import defaultdict, deque
+
     lots: dict[str, deque] = defaultdict(deque)
     rt_rows = []
     for r in f.itertuples(index=False):
@@ -583,11 +657,18 @@ def compute_trade_stats(trades: pd.DataFrame) -> dict:
                 lot = lots[r.symbol][0]
                 take = min(remain, lot[0])
                 pnl = (sell_px - lot[1]) * take
-                rt_rows.append({"symbol": r.symbol, "buy_date": lot[2],
-                                "sell_date": r.date, "shares": take,
-                                "buy_price": lot[1], "sell_price": sell_px,
-                                "pnl": pnl,
-                                "ret": (sell_px / lot[1] - 1.0) if lot[1] else np.nan})
+                rt_rows.append(
+                    {
+                        "symbol": r.symbol,
+                        "buy_date": lot[2],
+                        "sell_date": r.date,
+                        "shares": take,
+                        "buy_price": lot[1],
+                        "sell_price": sell_px,
+                        "pnl": pnl,
+                        "ret": (sell_px / lot[1] - 1.0) if lot[1] else np.nan,
+                    }
+                )
                 lot[0] -= take
                 remain -= take
                 if lot[0] <= 0:
@@ -600,15 +681,28 @@ def compute_trade_stats(trades: pd.DataFrame) -> dict:
         win_rate = float((rt["pnl"] > 0).mean())
         avg_win = float(wins.mean()) if len(wins) else 0.0
         avg_loss = float(losses.mean()) if len(losses) else 0.0
-        pf = float(wins.sum() / abs(losses.sum())) if len(losses) and losses.sum() != 0 else float("inf")
+        pf = (
+            float(wins.sum() / abs(losses.sum()))
+            if len(losses) and losses.sum() != 0
+            else float("inf")
+        )
         realized = float(rt["pnl"].sum())
     else:
         win_rate = avg_win = avg_loss = float("nan")
-        pf = float("nan"); realized = 0.0
+        pf = float("nan")
+        realized = 0.0
 
-    return {"n_buy": n_buy, "n_sell": n_sell, "n_round_trips": int(len(rt)),
-            "win_rate": win_rate, "avg_win": avg_win, "avg_loss": avg_loss,
-            "profit_factor": pf, "realized_pnl": realized, "round_trips": rt}
+    return {
+        "n_buy": n_buy,
+        "n_sell": n_sell,
+        "n_round_trips": int(len(rt)),
+        "win_rate": win_rate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "profit_factor": pf,
+        "realized_pnl": realized,
+        "round_trips": rt,
+    }
 
 
 def _add_trailing_beta(panel: pd.DataFrame, lookback: int = 60) -> pd.DataFrame:
@@ -628,14 +722,18 @@ def _add_trailing_beta(panel: pd.DataFrame, lookback: int = 60) -> pd.DataFrame:
 
     min_periods = max(10, lookback // 3)
     g = df.groupby("symbol", group_keys=False)
-    x = df["_mkt_ret"]
-    y = df["return_1d"]
     x_mean = g["_mkt_ret"].transform(lambda s: s.rolling(lookback, min_periods=min_periods).mean())
     y_mean = g["return_1d"].transform(lambda s: s.rolling(lookback, min_periods=min_periods).mean())
-    xy_mean = g.apply(lambda sub: (sub["_mkt_ret"] * sub["return_1d"]).rolling(lookback, min_periods=min_periods).mean())
-    x2_mean = g["_mkt_ret"].transform(lambda s: (s * s).rolling(lookback, min_periods=min_periods).mean())
+    xy_mean = g.apply(
+        lambda sub: (sub["_mkt_ret"] * sub["return_1d"])
+        .rolling(lookback, min_periods=min_periods)
+        .mean()
+    )
+    x2_mean = g["_mkt_ret"].transform(
+        lambda s: (s * s).rolling(lookback, min_periods=min_periods).mean()
+    )
     cov = xy_mean - x_mean * y_mean
-    var = x2_mean - x_mean ** 2
+    var = x2_mean - x_mean**2
     beta = cov / var
     beta[(var <= 1e-12) | (~np.isfinite(var))] = np.nan
     df["beta"] = beta

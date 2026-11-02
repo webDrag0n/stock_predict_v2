@@ -5,6 +5,11 @@ config_credentials.toml
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
+
+# 本地工具配置（含本机权限白名单，不入库）
+.claude/
 
 # 数据缓存与产出
 data_cache/

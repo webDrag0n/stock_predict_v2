@@ -16,6 +16,7 @@ score_cache 指纹同一函数（单一来源）；指纹相同 = 同一模型�
 防损坏：manifest/工件均先写临时文件再 os.replace（原子）；读取损坏时备份为
 .corrupt-<时间戳> 目录/文件后按"无 champion"处理（同 live_state 惯例）。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -53,9 +54,13 @@ def fingerprint_of(feat_cols: list[str], p: dict) -> str:
     训练超参。决策/撮合参数（topk、成本、限价模式等）不在内——它们与分数
     解耦。指纹不同 = 候选与 champion 是不同配方，需门控评估；相同 = 同一
     配方的滚动重训，直接刷新工件即可。
+
+    feat_cols 排序后哈希：特征【集合】相同仅列顺序不同（如北向兜底列补在
+    末尾 vs 真实 merge 落在中部）语义等价——模型按列名取数，列序不影响
+    训练/预测；不排序会因列序抖动产生假指纹差异，触发无谓的退化门控双回放。
     """
     payload = {
-        "feat_cols": [str(c) for c in feat_cols],
+        "feat_cols": sorted(str(c) for c in feat_cols),
         "fw": int(getattr(C, "FORWARD_WINDOW", 20)),
         "embargo": int(getattr(C, "EMBARGO_DAYS", 0)),
         "ensemble_models": _canon_models(p.get("ensemble_models")),
@@ -65,8 +70,7 @@ def fingerprint_of(feat_cols: list[str], p: dict) -> str:
         "train_window": p.get("train_window") or getattr(C, "TRAIN_WINDOW", 500),
         "ic_window": p.get("ic_window") or getattr(C, "IC_WINDOW", 20),
     }
-    return hashlib.md5(json.dumps(payload, sort_keys=True,
-                                  default=str).encode()).hexdigest()[:12]
+    return hashlib.md5(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
 def config_snapshot(feat_cols: list[str], p: dict) -> dict:
@@ -126,8 +130,8 @@ def _atomic_write_bytes(path: str, data: bytes) -> None:
 def _write_manifest(model_dir: str, manifest: dict) -> None:
     _atomic_write_bytes(
         os.path.join(model_dir, _MANIFEST_FILE),
-        json.dumps(manifest, ensure_ascii=False, indent=2,
-                   default=str).encode("utf-8"))
+        json.dumps(manifest, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
+    )
 
 
 def _read_manifest(model_dir: str) -> dict:
@@ -140,14 +144,14 @@ def save_ensemble(ens, model_dir: str, manifest: dict) -> None:
     os.makedirs(model_dir, exist_ok=True)
     manifest = dict(manifest)
     manifest["schema_version"] = SCHEMA_VERSION
-    _atomic_write_bytes(os.path.join(model_dir, _STATE_FILE),
-                        pickle.dumps(ens.state_dict()))
+    _atomic_write_bytes(os.path.join(model_dir, _STATE_FILE), pickle.dumps(ens.state_dict()))
     _write_manifest(model_dir, manifest)
 
 
 def load_ensemble(model_dir: str):
     """读取 (ensemble, manifest)。manifest 损坏/缺失抛异常（调用方按惯例备份）。"""
     from ensemble import IncrementalEnsemble
+
     manifest = _read_manifest(model_dir)
     with open(os.path.join(model_dir, _STATE_FILE), "rb") as f:
         state = pickle.load(f)
@@ -161,8 +165,10 @@ def _backup_corrupt(path: str, err: Exception) -> str:
         os.replace(path, bak)
     except OSError:
         bak = ""
-    print(f"[警告] 模型目录/文件 {path} 损坏（{type(err).__name__}: {err}），"
-          + (f"已备份到 {bak}。" if bak else "备份失败，请人工核查。"))
+    print(
+        f"[警告] 模型目录/文件 {path} 损坏（{type(err).__name__}: {err}），"
+        + (f"已备份到 {bak}。" if bak else "备份失败，请人工核查。")
+    )
     return bak
 
 
@@ -193,8 +199,9 @@ def load_champion_manifest() -> dict | None:
         return None
 
 
-def stage_candidate(ens, feat_cols: list[str], params: dict,
-                    extra: dict | None = None) -> tuple[str, dict]:
+def stage_candidate(
+    ens, feat_cols: list[str], params: dict, extra: dict | None = None
+) -> tuple[str, dict]:
     """候选落盘到 staging/<model_id>/。返回 (staging_dir, manifest)。"""
     fp = fingerprint_of(feat_cols, params)
     mid = _new_model_id(fp)
@@ -203,7 +210,9 @@ def stage_candidate(ens, feat_cols: list[str], params: dict,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "fingerprint": fp,
         "config_snapshot": config_snapshot(feat_cols, params),
-        "train_end_date": str(ens._last_trained_date)[:10] if ens._last_trained_date is not None else None,
+        "train_end_date": (
+            str(ens._last_trained_date)[:10] if ens._last_trained_date is not None else None
+        ),
         "weights": {m: round(float(w), 6) for m, w in ens.weights.items()},
         "promotion": None,
     }
@@ -224,7 +233,9 @@ def refresh_champion(ens, feat_cols: list[str], params: dict) -> None:
         "refreshed_at": datetime.now().isoformat(timespec="seconds"),
         "fingerprint": fingerprint_of(feat_cols, params),
         "config_snapshot": config_snapshot(feat_cols, params),
-        "train_end_date": str(ens._last_trained_date)[:10] if ens._last_trained_date is not None else None,
+        "train_end_date": (
+            str(ens._last_trained_date)[:10] if ens._last_trained_date is not None else None
+        ),
         "weights": {m: round(float(w), 6) for m, w in ens.weights.items()},
         "promotion": old.get("promotion"),
     }
@@ -235,8 +246,8 @@ def write_evaluation(staging_dir: str, evaluation: dict) -> None:
     """把门控评估报告写进候选目录（双方指标 + 判定 + 原因）。"""
     _atomic_write_bytes(
         os.path.join(staging_dir, _EVAL_FILE),
-        json.dumps(evaluation, ensure_ascii=False, indent=2,
-                   default=str).encode("utf-8"))
+        json.dumps(evaluation, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
+    )
 
 
 def promote(staging_id: str, promotion_record: dict | None = None) -> dict:
@@ -250,8 +261,11 @@ def promote(staging_id: str, promotion_record: dict | None = None) -> dict:
     if not os.path.isdir(src):
         raise FileNotFoundError(f"staging 候选不存在: {src}")
     manifest = _read_manifest(src)
-    record = promotion_record or manifest.get("promotion") or {
-        "reason": "manual", "decided_at": datetime.now().isoformat(timespec="seconds")}
+    record = (
+        promotion_record
+        or manifest.get("promotion")
+        or {"reason": "manual", "decided_at": datetime.now().isoformat(timespec="seconds")}
+    )
     manifest["promotion"] = record
 
     champ = champion_dir()
@@ -261,8 +275,9 @@ def promote(staging_id: str, promotion_record: dict | None = None) -> dict:
             old_manifest = _read_manifest(champ)
         except Exception:
             pass
-        old_id = (old_manifest or {}).get("model_id") or \
-            "champion_" + datetime.now().strftime("%Y%m%d%H%M%S")
+        old_id = (old_manifest or {}).get("model_id") or "champion_" + datetime.now().strftime(
+            "%Y%m%d%H%M%S"
+        )
         dst_archive = os.path.join(archive_root(), old_id)
         os.makedirs(archive_root(), exist_ok=True)
         n = 2
@@ -278,8 +293,7 @@ def promote(staging_id: str, promotion_record: dict | None = None) -> dict:
 def save_ensemble_from_dir(src_dir: str, dst_dir: str, manifest: dict) -> None:
     """目录级复制晋升：工件 + manifest 从 src 复制到 dst（src 保留作留档）。"""
     os.makedirs(dst_dir, exist_ok=True)
-    shutil.copy2(os.path.join(src_dir, _STATE_FILE),
-                 os.path.join(dst_dir, _STATE_FILE))
+    shutil.copy2(os.path.join(src_dir, _STATE_FILE), os.path.join(dst_dir, _STATE_FILE))
     manifest = dict(manifest)
     manifest["schema_version"] = SCHEMA_VERSION
     _write_manifest(dst_dir, manifest)
@@ -291,8 +305,9 @@ def _prune_archive() -> None:
     if not os.path.isdir(root):
         return
     keep = int(getattr(C, "ARCHIVE_KEEP", 5))
-    entries = [os.path.join(root, d) for d in os.listdir(root)
-               if os.path.isdir(os.path.join(root, d))]
+    entries = [
+        os.path.join(root, d) for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))
+    ]
     entries.sort(key=os.path.getmtime)
     for d in entries[:-keep] if keep > 0 else entries:
         shutil.rmtree(d, ignore_errors=True)
