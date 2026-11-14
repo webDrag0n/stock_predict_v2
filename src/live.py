@@ -514,6 +514,32 @@ def run_gated_prediction(
     }
 
 
+def is_rebalance_day(
+    panel: pd.DataFrame,
+    today_date,
+    risk_state_path: str,
+    every: int | None = None,
+    force: bool = False,
+) -> bool:
+    from live_state import (
+        load_rebalance_state,
+        rebalance_state_path_for,
+        trading_days_since,
+    )
+
+    if force:
+        return True
+    interval = int(C.REBALANCE_EVERY if every is None else every)
+    if interval <= 1:
+        return True
+    state = load_rebalance_state(rebalance_state_path_for(risk_state_path))
+    last_date = state.get("last_rebalance_date")
+    if last_date is None:
+        return True
+    elapsed = trading_days_since(panel, last_date, today_date)
+    return elapsed is not None and elapsed >= interval
+
+
 def make_orders_from_state(
     today: pd.DataFrame,
     score: np.ndarray,
@@ -556,6 +582,9 @@ def make_orders_from_state(
         update_risk_state,
         pred_hist_path_for,
         load_pred_hist,
+        load_rebalance_state,
+        rebalance_state_path_for,
+        trading_days_since,
     )
 
     p = dict(params or {})
@@ -589,11 +618,12 @@ def make_orders_from_state(
         total_value_known = False
     state = PortfolioState(cash=cash, holdings=dict(current))
 
+    latest = today["date"].max()
+    risk_panel = panel if panel is not None else today
+
     # 风控缩放：复用回测一致的五层风控（唯一实现在 src/risk.py）
     if risk_state_path is not None:
         rstate = load_risk_state(risk_state_path)
-        latest = today["date"].max()
-        risk_panel = panel if panel is not None else today
         # 持久化预测历史：供 IC 降仓层把新成熟 OOS 预测日打分入队
         pred_hist = load_pred_hist(pred_hist_path_for(risk_state_path))
         risk_scale, rstate = compute_risk_scale(
@@ -609,11 +639,33 @@ def make_orders_from_state(
             rstate.last_update = str(pd.Timestamp(latest).date())
         save_risk_state(risk_state_path, rstate)
 
+    interval = int(p.get("rebalance_every", C.REBALANCE_EVERY))
+    if risk_state_path and not is_rebalance_day(
+        risk_panel,
+        latest,
+        risk_state_path,
+        every=interval,
+        force=bool(p.get("force_rebalance", False)),
+    ):
+        last_date = load_rebalance_state(rebalance_state_path_for(risk_state_path)).get(
+            "last_rebalance_date"
+        )
+        elapsed = trading_days_since(risk_panel, last_date, latest)
+        print(f"今日非调仓日（距上次调仓 {elapsed} 个交易日，周期 {interval}），未生成订单")
+        return decide_orders(
+            state,
+            today.iloc[0:0],
+            np.array([]),
+            params=p,
+            asof_date=latest,
+            price_col=px_col,
+        )
+
     return decide_orders(
         state,
         today,
         np.asarray(score, dtype=float),
         params=p,
-        asof_date=today["date"].max(),
+        asof_date=latest,
         price_col=px_col,
     )

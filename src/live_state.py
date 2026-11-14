@@ -89,6 +89,55 @@ def save_risk_state(path: str, state: RiskState) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 实盘调仓周期状态
+# ---------------------------------------------------------------------------
+def rebalance_state_path_for(risk_state_path: str) -> str:
+    return os.path.join(os.path.dirname(risk_state_path), "live_rebalance_state.json")
+
+
+def load_rebalance_state(path: str) -> dict:
+    if not os.path.exists(path):
+        return {"last_rebalance_date": None}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        if not isinstance(state, dict):
+            raise ValueError("调仓状态必须是 JSON 对象")
+        return {"last_rebalance_date": state.get("last_rebalance_date")}
+    except Exception as e:
+        bak = path + ".corrupt-" + pd.Timestamp.now().strftime("%Y%m%d%H%M%S") + ".bak"
+        try:
+            os.replace(path, bak)
+        except OSError:
+            bak = ""
+        print(
+            f"[警告] 调仓状态文件 {path} 损坏（{type(e).__name__}: {e}），"
+            "已按首次调仓处理"
+            + (f"，原文件已备份到 {bak}。" if bak else "，备份失败，请人工核查。")
+        )
+        return {"last_rebalance_date": None}
+
+
+def save_rebalance_state(path: str, last_date: str) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp-{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"last_rebalance_date": last_date}, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def trading_days_since(panel: pd.DataFrame, last_date, today) -> int | None:
+    if last_date is None:
+        return None
+    dates = np.unique(panel["date"].to_numpy(dtype="datetime64[D]"))
+    last = np.datetime64(pd.Timestamp(last_date).date())
+    current = np.datetime64(pd.Timestamp(today).date())
+    last_pos = np.searchsorted(dates, last, side="right")
+    today_pos = np.searchsorted(dates, current, side="right")
+    return int(today_pos - last_pos)
+
+
+# ---------------------------------------------------------------------------
 # 持久化预测历史（pred_hist）：小 parquet，与 risk_state JSON 同目录同行命名
 # ---------------------------------------------------------------------------
 def pred_hist_path_for(risk_state_path: str) -> str:

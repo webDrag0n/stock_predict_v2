@@ -147,6 +147,8 @@ def _decision_params(args) -> dict:
         p["use_bb_timing"] = bool(args.use_bb_timing)
     if args.order_price_mode:
         p["order_price_mode"] = str(args.order_price_mode)
+    if getattr(args, "force_rebalance", False):
+        p["force_rebalance"] = True
     return p
 
 
@@ -249,6 +251,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--force-retrain", action="store_true", help="无视触发指标，强制今晚重训并走门控"
     )
+    ap.add_argument("--force-rebalance", action="store_true", help="无视调仓间隔，强制今晚完整调仓")
     ap.add_argument(
         "--tracking-report",
         action="store_true",
@@ -404,6 +407,20 @@ def main(argv=None) -> None:
     tag = pd.Timestamp(latest).strftime("%Y%m%d")
     out_csv = os.path.join(C.OUTPUT_DIR, f"orders_{tag}.csv")
     orders.to_csv(out_csv, index=False)
+    if len(orders):
+        from live import is_rebalance_day
+        from live_state import rebalance_state_path_for, save_rebalance_state
+
+        if is_rebalance_day(
+            panel,
+            latest,
+            args.risk_state,
+            every=dec_params.get("rebalance_every"),
+            force=bool(dec_params.get("force_rebalance", False)),
+        ):
+            save_rebalance_state(
+                rebalance_state_path_for(args.risk_state), str(pd.Timestamp(latest).date())
+            )
 
     cost = estimate_order_cost(orders)
     n_buy = int((orders["side"] == "buy").sum()) if len(orders) else 0
