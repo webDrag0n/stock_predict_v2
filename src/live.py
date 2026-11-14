@@ -550,6 +550,7 @@ def make_orders_from_state(
     risk_state_path: str | None = None,
     panel: pd.DataFrame | None = None,
     cash: float | None = None,
+    ref_prices: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     """用共享 decide_orders 生成"明日可执行"逐笔订单（与回测同一决策代码）。
 
@@ -573,6 +574,8 @@ def make_orders_from_state(
               原始 close)，如实入账驱动 vol/dd 两层；未提供时记录醒目警告
               （logger.warning）并跳过 vol/dd 层的状态更新（不再静默喂固定
               capital 假数据）。
+        ref_prices: holdings.csv 中的 ref_close；完整面板没有有效原始 close 时，
+                    用于初始化持仓 last_price 并生成跌出横截面的清退单。
     """
     from trading import PortfolioState, decide_orders
     from live_state import (
@@ -617,6 +620,30 @@ def make_orders_from_state(
         total_value = float(capital)
         total_value_known = False
     state = PortfolioState(cash=cash, holdings=dict(current))
+    price_panel = panel if panel is not None else today
+    references = ref_prices or {}
+    for held_sym, shares in current.items():
+        if shares <= 0:
+            continue
+        price = None
+        if {"symbol", "date", "close"}.issubset(price_panel.columns):
+            rows = price_panel.loc[price_panel["symbol"] == held_sym, ["date", "close"]].copy()
+            rows["close"] = pd.to_numeric(rows["close"], errors="coerce")
+            rows = rows[rows["close"] > 0].sort_values("date")
+            if len(rows):
+                price = float(rows.iloc[-1]["close"])
+        if price is None:
+            fallback = references.get(held_sym)
+            if fallback is not None and pd.notna(fallback) and float(fallback) > 0:
+                price = float(fallback)
+        if price is None:
+            logger.warning(
+                "持仓 %s 无有效原始 close/ref_close，跳过 last_price 初始化；"
+                "无法生成跌出横截面清退单",
+                held_sym,
+            )
+        else:
+            state.last_price[held_sym] = price
 
     latest = today["date"].max()
     risk_panel = panel if panel is not None else today

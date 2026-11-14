@@ -72,6 +72,18 @@ def _load_holdings(path: str) -> dict[str, int]:
     return dict(zip(df["symbol"], df["shares"].astype(int)))
 
 
+def _load_ref_prices(path: str) -> dict[str, float]:
+    df = load_holdings_table(path)
+    if not len(df):
+        return {}
+    values = pd.to_numeric(df["ref_close"], errors="coerce")
+    return {
+        str(symbol): float(value)
+        for symbol, value in zip(df["symbol"], values)
+        if pd.notna(value) and value > 0
+    }
+
+
 def _load_cash(path: str) -> float | None:
     """读取 account.csv 的 cash 列（取最后一行非空值）。无文件/无列 → None。"""
     if not os.path.exists(path):
@@ -391,6 +403,7 @@ def main(argv=None) -> None:
         risk_state_path=args.risk_state,
         panel=panel,
         cash=cash,
+        ref_prices=_load_ref_prices(args.holdings),
     )
 
     # 4) 输出订单（assumed_fill 列说明 --commit 的成交假设）
