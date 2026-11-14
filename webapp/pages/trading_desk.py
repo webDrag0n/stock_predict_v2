@@ -1624,9 +1624,9 @@ def _row_style(blocked: bool, done: bool, rejected: bool) -> dict:
         "fontSize": "12.5px",
     }
     if blocked:
-        style.update({"opacity": "0.45", "backgroundColor": "#f3f4f6"})
+        style.update({"opacity": "0.45", "backgroundColor": "#f9fafb"})
     elif rejected:
-        style.update({"opacity": "0.65", "backgroundColor": "#fef9c3"})
+        style.update({"opacity": "0.65", "backgroundColor": "#fffaeb"})
     elif done:
         style.update({"opacity": "0.45", "textDecoration": "line-through"})
     return style

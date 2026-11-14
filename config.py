@@ -149,7 +149,15 @@ if sum(MULTI_HORIZON_WEIGHTS) > 0:
 #                 ranking score (not return space).
 #   "multi_fusion": per-horizon fusion of a GBM leg and an ic_linear leg, then
 #                 rank-average across horizons. Maximizes model diversity.
-MODEL_OBJECTIVE = os.environ.get("MODEL_OBJECTIVE", "ret_weighted")
+# 2026-11-06: default ret_weighted → fusion. Same-panel walk-forward A/B/C
+# (9 windows, 2024-03~2026-08, outputs/experiments/): ret_weighted PredIC -0.024
+# (1/4 windows positive, per the older 802-day panel); fusion +0.102 (9/9, ICIR
+# +0.854, Sharpe +2.56); fusion+select_features +0.107 (9/9) with slightly lower
+# PnL; multi_fusion +0.114 mean but only 7/8 windows positive and Sharpe +1.91.
+# Diagnosis (outputs/diag_model_vs_factor.csv): the GBM-only objective lost to
+# the best single factor in 4/4 windows — the bottleneck was the combiner, and
+# fusion's rank-average with the ic_linear leg fixes it.
+MODEL_OBJECTIVE = os.environ.get("MODEL_OBJECTIVE", "fusion")
 # "l2" | "lambdarank" | "ic_linear" | "fusion" | "ret_weighted" | "multi_ret_weighted" | "multi_fusion"
 
 # Size-neutralize the ic_linear factors: regress each on ln_mv per date and keep

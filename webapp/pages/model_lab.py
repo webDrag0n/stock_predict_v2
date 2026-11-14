@@ -355,6 +355,277 @@ def _staging_list(entries: tuple[dict, ...]):
     return html.Div(cards)
 
 
+# --- C0. 模型对比视图 --------------------------------------------------------------
+def _fmt_metric(v) -> str:
+    """指标值 → 短格式；非数值原样/-。"""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        if abs(v) >= 100:
+            return f"{v:,.0f}"
+        return f"{v:+.3g}" if abs(v) < 10 else f"{v:.2f}"
+    return str(v) if v is not None else "-"
+
+
+def _delta_span(delta, better, side) -> html.Span:
+    """Δ 值着色：正绿负红；更优一侧加粗。"""
+    if delta is None:
+        return html.Span("-", style={"color": PALETTE["muted"]})
+    color = PALETTE["strat"] if delta > 0 else (PALETTE["loss"] if delta < 0 else PALETTE["muted"])
+    return html.Span(
+        f"{delta:+.3g}",
+        style={"color": color, "fontWeight": 600},
+    )
+
+
+def _short_title(r) -> tuple[str, str]:
+    """(短表头, 完整 id)：表头用短名防溢出，完整 id 放 title 悬停可见。"""
+    role = "Champion" if r["role"] == "champion" else "Staging"
+    return f"{'A' if r.get('_side') == 'a' else 'B'} · {role}", r["id"]
+
+
+def _compare_view(ref_a: str | None, ref_b: str | None, view: str = "table"):
+    """两模型并排对比：ΔKPI 条 + 指标（数值表/对比图）+ 配方 diff 表。缺一侧给空态。"""
+    if not ref_a or not ref_b or ref_a == ref_b:
+        return dbc.Alert("选择两个不同的模型开始对比（左侧默认 champion，右侧默认最新候选）。", color="secondary", className="mb-0")
+    ra, rb = dataio.model_record(ref_a), dataio.model_record(ref_b)
+    if not ra or not rb:
+        return dbc.Alert("所选模型档案不存在（可能刚被删除）。", color="warning", className="mb-0")
+    ra["_side"], rb["_side"] = "a", "b"
+    ha, hb = _short_title(ra), _short_title(rb)
+
+    # KPI 条：Sharpe / 回撤 / 胜率 的 B−A 差
+    rows = dataio.metric_rows(ra, rb)
+    kpis = []
+    for r in rows:
+        if r["key"] not in ("sharpe", "max_drawdown", "hit_rate"):
+            continue
+        d = r["delta"]
+        arrow = "▲" if (d or 0) > 0 else ("▼" if (d or 0) < 0 else "＝")
+        good = (r["better"] == "b")
+        color = PALETTE["strat"] if good and d else (PALETTE["loss"] if d and r["better"] == "a" else PALETTE["muted"])
+        kpis.append(
+            html.Div(
+                [
+                    html.Div(r["label"], style={"fontSize": "11px", "color": PALETTE["muted"]}),
+                    html.Div(
+                        f"{arrow} {d:+.3g}" if d is not None else "-",
+                        style={"fontSize": "17px", "fontWeight": 700, "color": color},
+                    ),
+                    html.Div(f"{_fmt_metric(r['a'])} → {_fmt_metric(r['b'])}", style={"fontSize": "11px", "color": PALETTE["muted"]}),
+                ],
+                className="cmp-kpi",
+            )
+        )
+    kpi_strip = html.Div(kpis, className="cmp-kpi-strip") if kpis else None
+
+    # 指标区：数值表 / 对比图
+    if view == "chart":
+        metric_body = dcc.Graph(
+            figure=_metric_chart(ra, rb), config={"displayModeBar": False}, style={"height": "300px"}
+        )
+    else:
+        metric_body = html.Div(
+            dbc.Table(
+                [
+                    html.Thead(
+                        html.Tr(
+                            [
+                                html.Th("指标", style={"width": "26%"}),
+                                html.Th(ha[0], title=ha[1], style={"width": "26%"}),
+                                html.Th(hb[0], title=hb[1], style={"width": "26%"}),
+                                html.Th("Δ (B−A)", style={"width": "22%"}),
+                            ]
+                        )
+                    ),
+                    html.Tbody(
+                        [
+                            html.Tr(
+                                [
+                                    html.Td(r["label"]),
+                                    html.Td(_fmt_metric(r["a"]), style={"fontWeight": 700 if r["better"] == "a" else 400}),
+                                    html.Td(_fmt_metric(r["b"]), style={"fontWeight": 700 if r["better"] == "b" else 400}),
+                                    html.Td(_delta_span(r["delta"], r["better"], "b")),
+                                ],
+                                className="cmp-row-better" if r["better"] else "",
+                            )
+                            for r in rows
+                        ]
+                    ),
+                ],
+                bordered=True, hover=True, size="sm", className="cmp-table",
+            ),
+            className="cmp-table-wrap",
+        )
+
+    # 配方 diff
+    diffs = dataio.recipe_diff(ra["recipe"], rb["recipe"])
+    fd = dataio.feat_diff(ra["recipe"], rb["recipe"])
+    diff_rows = [d for d in diffs if not d["same"]]
+    same_rows = [d for d in diffs if d["same"]]
+
+    def _recipe_tr(d, dim=False):
+        va, vb = str(d["a"]), str(d["b"])
+        return html.Tr(
+            [
+                html.Td(html.Code(d["key"], style={"fontSize": "11px"}), style={"width": "30%"}),
+                html.Td(va, title=va, className="cmp-val", style={"width": "35%"}),
+                html.Td(vb, title=vb, className="cmp-val", style={"width": "35%"}),
+            ],
+            className="cmp-row-diff" if not dim else "",
+            style={"opacity": 0.55} if dim else {},
+        )
+
+    feat_line = (
+        f"特征：A {fd['n_a']} 个 / B {fd['n_b']} 个 · "
+        f"仅 B 有 {len(fd['only_b'])} 个（{', '.join(fd['only_b'][:8])}{'…' if len(fd['only_b']) > 8 else ''}）· "
+        f"仅 A 有 {len(fd['only_a'])} 个"
+    )
+    recipe_tbl = html.Div(
+        [
+            html.Div(feat_line, className="cmp-feat-line"),
+            html.Div(
+                dbc.Table(
+                    [
+                        html.Thead(
+                            html.Tr(
+                                [
+                                    html.Th("参数", style={"width": "30%"}),
+                                    html.Th(ha[0], title=ha[1], style={"width": "35%"}),
+                                    html.Th(hb[0], title=hb[1], style={"width": "35%"}),
+                                ]
+                            )
+                        ),
+                        html.Tbody(
+                            [_recipe_tr(d) for d in diff_rows]
+                            + [_recipe_tr(d, dim=True) for d in same_rows]
+                        ),
+                    ],
+                    bordered=True, hover=True, size="sm", className="cmp-table",
+                ),
+                className="cmp-table-wrap",
+            ),
+        ]
+    )
+    reason = (rb.get("evaluation") or {}).get("reason")
+    reason_alert = (
+        dbc.Alert(f"门控结论：{reason}", color="info", className="py-1 px-2 mt-2 mb-0", style={"fontSize": "12px"})
+        if reason else None
+    )
+    src_notes = [
+        f"{'A' if r is ra else 'B'} 侧指标来自最近一次门控重放的冠军侧记录"
+        for r in (ra, rb)
+        if r.get("metrics_src") == "latest_gate_replay"
+    ]
+    src_line = (
+        html.Div("；".join(src_notes), style={"fontSize": "11px", "color": PALETTE["muted"], "marginTop": "6px"})
+        if src_notes else None
+    )
+    return html.Div(
+        [
+            kpi_strip,
+            src_line,
+            dbc.Row(
+                [
+                    dbc.Col(
+                        [
+                            html.Div("效果指标", className="control-label"),
+                            metric_body,
+                        ],
+                        md=5,
+                    ),
+                    dbc.Col(
+                        [
+                            html.Div("配方参数 diff（高亮=有差异）", className="control-label"),
+                            recipe_tbl,
+                        ],
+                        md=7,
+                    ),
+                ],
+                className="g-3",
+            ),
+            reason_alert,
+        ]
+    )
+
+
+def _metric_chart(ra: dict, rb: dict) -> go.Figure:
+    """指标对比图：横向发散条形，x = (B−A)/max(|A|,|B|) 的相对差异百分比。
+
+    量纲不同的指标不能直接画绝对值，用相对差异统一坐标；颜色按「谁更优」
+    （绿=B 优，红=A 优，灰=无方向/打平），bar 上标注原始值 A → B。
+    """
+    rows = [
+        r for r in dataio.metric_rows(ra, rb)
+        if isinstance(r["a"], (int, float)) and isinstance(r["b"], (int, float))
+    ]
+    if not rows:
+        return empty_fig("两模型都缺少可比的数值指标", 300)
+    labels, rels, colors, texts = [], [], [], []
+    for r in rows:
+        denom = max(abs(r["a"]), abs(r["b"]), 1e-9)
+        rel = max(-100.0, min(100.0, (r["b"] - r["a"]) / denom * 100))
+        labels.append(r["label"])
+        rels.append(rel)
+        colors.append(
+            PALETTE["strat"] if r["better"] == "b"
+            else PALETTE["loss"] if r["better"] == "a"
+            else PALETTE["faint"]
+        )
+        texts.append(f"{_fmt_metric(r['a'])} → {_fmt_metric(r['b'])}")
+    fig = base_fig("指标相对差异（B vs A）", height=300)
+    fig.add_trace(
+        go.Bar(
+            y=labels, x=rels, orientation="h",
+            marker_color=colors, text=texts, textposition="outside",
+            textfont=dict(size=10.5, color=PALETTE["muted"]),
+            hovertemplate="%{y}: %{x:+.1f}%（%{text}）<extra></extra>",
+        )
+    )
+    fig.add_vline(x=0, line_color=PALETTE["ink"], line_width=1)
+    fig.update_xaxes(title="相对差异 %", range=[-110, 110], ticksuffix="%")
+    fig.update_layout(showlegend=False, margin=dict(l=70, r=30, t=40, b=40))
+    return fig
+
+
+def _compare_card():
+    """「模型对比」卡片：两个下拉 + 对比输出区。"""
+    return html.Div(
+        [
+            html.Div(
+                "模型对比（参数 × 效果并排）",
+                className="control-label",
+                style={"fontSize": "15px", "fontWeight": 600, "marginBottom": "8px"},
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(dcc.Dropdown(id="mlab-cmp-a", clearable=False, placeholder="模型 A"), md=5),
+                    dbc.Col(
+                        html.Div("VS", style={"textAlign": "center", "fontWeight": 700, "color": PALETTE["muted"], "paddingTop": "6px"}),
+                        md=2,
+                    ),
+                    dbc.Col(dcc.Dropdown(id="mlab-cmp-b", clearable=False, placeholder="模型 B"), md=5),
+                ],
+                className="g-2",
+                style={"marginBottom": "10px"},
+            ),
+            dbc.RadioItems(
+                id="mlab-cmp-view",
+                options=[
+                    {"label": "数值表", "value": "table"},
+                    {"label": "对比图", "value": "chart"},
+                ],
+                value="table",
+                inline=True,
+                className="cmp-toggle",
+                inputClassName="btn-check",
+                labelClassName="btn btn-sm btn-outline-secondary",
+                labelCheckedClassName="active",
+            ),
+            html.Div(id="mlab-cmp-out"),
+        ],
+        className="chart-card",
+    )
+
+
 # --- canonical walkforward 产物 -------------------------------------------------
 def _canonical_wf() -> dict | None:
     """outputs/walkforward/meta.json；pos_ratio 缺失时从 window_metrics.parquet 兜底现算。
@@ -1072,6 +1343,11 @@ def layout():
                 className="g-3",
             ),
             dbc.Row(
+                dbc.Col(_compare_card(), md=12),
+                className="g-3",
+                style={"marginTop": "4px"},
+            ),
+            dbc.Row(
                 dbc.Col(_create_card(), md=12),
                 className="g-3",
                 style={"marginTop": "4px"},
@@ -1256,6 +1532,34 @@ def register(app):
             toggle_children,
             toggle_style,
         )
+
+    @app.callback(
+        Output("mlab-cmp-a", "options"),
+        Output("mlab-cmp-b", "options"),
+        Output("mlab-cmp-a", "value"),
+        Output("mlab-cmp-b", "value"),
+        Input("mlab-poll", "n_intervals"),
+        State("mlab-cmp-a", "value"),
+        State("mlab-cmp-b", "value"),
+    )
+    def _cmp_options(_n, va, vb):
+        """对比下拉框选项：champion + 全部 staging；默认 A=champion、B=最新候选。"""
+        opts = dataio.model_options()
+        vals = [o["value"] for o in opts]
+        if va not in vals:
+            va = "champion" if "champion" in vals else (vals[0] if vals else None)
+        if vb not in vals or vb == va:
+            vb = next((v for v in vals if v != va), None)
+        return opts, opts, va, vb
+
+    @app.callback(
+        Output("mlab-cmp-out", "children"),
+        Input("mlab-cmp-a", "value"),
+        Input("mlab-cmp-b", "value"),
+        Input("mlab-cmp-view", "value"),
+    )
+    def _cmp_render(a, b, view):
+        return _compare_view(a, b, view or "table")
 
     @app.callback(
         Output("mlab-runs-show-all", "data"),

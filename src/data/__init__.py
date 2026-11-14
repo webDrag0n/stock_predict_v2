@@ -1569,6 +1569,7 @@ def list_factor_columns(panel: pd.DataFrame) -> list[str]:
         "open",
         "high",
         "low",
+        "pct_chg",
         "bb_upper_20",
         "bb_lower_20",
     }

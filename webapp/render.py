@@ -255,8 +255,8 @@ def _table(spec: dict):
                     "padding": "6px 10px",
                     "textAlign": "right",
                 },
-                style_header={"fontWeight": 600, "backgroundColor": "#f3f4f6"},
-                style_data={"borderBottom": "1px solid #eee"},
+                style_header={"fontWeight": 600, "backgroundColor": "#f9fafb"},
+                style_data={"borderBottom": "1px solid #e4e7ec"},
             ),
         ]
     )
@@ -301,8 +301,8 @@ def render_step(report: dict):
                 style={
                     "whiteSpace": "pre-wrap",
                     "fontSize": "12px",
-                    "background": "#fef2f2" if is_err else "#fffbeb",
-                    "color": "#991b1b" if is_err else "#92400e",
+                    "background": "#fef3f2" if is_err else "#fffaeb",
+                    "color": "#b42318" if is_err else "#b54708",
                     "padding": "10px",
                     "borderRadius": "6px",
                     "marginBottom": "8px",

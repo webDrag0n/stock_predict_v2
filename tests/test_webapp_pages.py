@@ -73,9 +73,9 @@ def test_app_shell_routes_and_status_bar(monkeypatch):
     assert app_module._nav_active("/session/x", "/models")
     assert not app_module._nav_active("/runs/x", "/")
     assert not app_module._nav_active("/runs/x", "/factors")
-    # 侧边栏副行已中文化
-    subs = [sub for _, _, sub in app_module.NAV_ITEMS]
-    assert subs == ["每日出单与执行", "训练·评估·回测", "因子研发与体检", "个股与全市场行情"]
+    # 侧边栏副行为英文小字（NAV_ITEMS: href, 中文名, 英文副标题, 图标 SVG）
+    subs = [en for _, _, en, _ in app_module.NAV_ITEMS]
+    assert subs == ["Trading Desk", "Model Lab", "Factor Workbench", "Market Explorer"]
 
 
 @pytest.fixture

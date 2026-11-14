@@ -574,6 +574,133 @@ factor_ic_decay.cache_clear = _csv_cached.cache_clear
 factor_corr.cache_clear = _csv_cached.cache_clear
 
 
+# --- 模型对比（模型实验室「模型对比」视图） --------------------------------------
+# 规范化指标键：evaluation.json candidate/champion 与 modeleval KPI 的公共子集，
+# (键, 中文标签, 是否越大越好)。渲染层按此顺序出表。
+MODEL_METRIC_KEYS: tuple[tuple[str, str, bool], ...] = (
+    ("sharpe", "Sharpe", True),
+    ("sortino", "Sortino", True),
+    ("max_drawdown", "最大回撤%", True),
+    ("total_return", "总收益%", True),
+    ("alpha_ann", "年化Alpha", True),
+    ("beta", "Beta", False),
+    ("hit_rate", "胜率", True),
+    ("t_nw", "t(NW)", False),
+    ("n_days", "评估天数", False),
+)
+
+# 配方对比时跳过的大字段（单独按集合差异展示，不进逐行 diff 表）
+_RECIPE_SKIP_KEYS = ("feat_cols",)
+
+
+def model_record(ref: str) -> dict | None:
+    """按引用取模型档案：ref='champion' 或 staging 目录名。
+
+    返回 {ref, id, role, manifest, evaluation, recipe, metrics}；不存在返回 None。
+    metrics 取 evaluation.json 里本角色一侧（champion 取 champion 侧、staging 取
+    candidate 侧）——即「该模型在门控重放中的表现」。
+    """
+    if ref == "champion":
+        man = champion_manifest()
+        if not man:
+            return None
+        ev = _read_json(_p(MODELS, "champion", "evaluation.json")) or {}
+        metrics = ev.get("champion") or {}
+        metrics_src = "evaluation"
+        if not metrics:
+            # champion 目录通常不落 evaluation.json；门控结论在 manifest.promotion
+            promo = man.get("promotion") or {}
+            metrics = promo.get("champion_metrics") or {}
+            metrics_src = "promotion"
+        if not metrics:
+            # bootstrap 晋升无指标：取最新一次 staging 门控评估的 champion 侧重放
+            for e in reversed(staging_manifests()):
+                c = ((e.get("evaluation") or {}).get("champion") or {})
+                if c:
+                    metrics, metrics_src = c, "latest_gate_replay"
+                    break
+        return {
+            "ref": "champion",
+            "id": man.get("model_id", "champion"),
+            "role": "champion",
+            "manifest": man,
+            "evaluation": ev,
+            "recipe": man.get("config_snapshot") or {},
+            "metrics": metrics,
+            "metrics_src": metrics_src,
+        }
+    for e in staging_manifests():
+        if e.get("id") != ref:
+            continue
+        man = e.get("manifest") or {}
+        ev = e.get("evaluation") or {}
+        return {
+            "ref": ref,
+            "id": man.get("model_id", ref),
+            "role": "staging",
+            "manifest": man,
+            "evaluation": ev,
+            "recipe": man.get("config_snapshot") or {},
+            "metrics": ev.get("candidate") or {},
+        }
+    return None
+
+
+def model_options() -> list[dict]:
+    """对比下拉框选项：champion + 全部 staging（新的在前）。"""
+    opts = []
+    if champion_manifest():
+        opts.append({"label": "Champion（线上）", "value": "champion"})
+    for e in reversed(staging_manifests()):
+        opts.append({"label": f"Staging · {e['id']}", "value": e["id"]})
+    return opts
+
+
+def recipe_diff(a: dict, b: dict) -> list[dict]:
+    """两份 config_snapshot 的逐键对比：[{key, a, b, same}]。feat_cols 跳过（走 feat_diff）。"""
+    keys = sorted((set(a) | set(b)) - set(_RECIPE_SKIP_KEYS))
+    rows = []
+    for k in keys:
+        va, vb = a.get(k), b.get(k)
+        rows.append({"key": k, "a": va, "b": vb, "same": va == vb})
+    return rows
+
+
+def feat_diff(a: dict, b: dict) -> dict:
+    """feat_cols 集合差异：{n_a, n_b, only_a, only_b}（only_* 为排序后的列表）。"""
+    fa, fb = set(a.get("feat_cols") or []), set(b.get("feat_cols") or [])
+    return {
+        "n_a": len(fa),
+        "n_b": len(fb),
+        "only_a": sorted(fa - fb),
+        "only_b": sorted(fb - fa),
+    }
+
+
+def metric_rows(ra: dict | None, rb: dict | None) -> list[dict]:
+    """两个模型记录的指标对比行：[{key,label,a,b,delta,better}]。
+
+    delta = b - a（数值型才给）；better ∈ 'a'|'b'|None（依 MODEL_METRIC_KEYS 的方向，
+    max_drawdown 越接近 0 越好，单独处理）。
+    """
+    ma = (ra or {}).get("metrics") or {}
+    mb = (rb or {}).get("metrics") or {}
+    rows = []
+    for key, label, higher_better in MODEL_METRIC_KEYS:
+        va, vb = ma.get(key), mb.get(key)
+        delta, better = None, None
+        if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
+            delta = vb - va
+            if key == "max_drawdown":
+                better = "b" if vb > va else ("a" if va > vb else None)
+            elif higher_better and delta != 0:
+                better = "b" if delta > 0 else "a"
+        rows.append(
+            {"key": key, "label": label, "a": va, "b": vb, "delta": delta, "better": better}
+        )
+    return rows
+
+
 def warm_load() -> dict:
     """Pre-load the light caches at startup; return a small status dict."""
     seeds = available_seeds()

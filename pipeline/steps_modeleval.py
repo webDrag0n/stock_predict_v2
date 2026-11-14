@@ -52,7 +52,10 @@ def data_import(ctx: ctxmod.StepContext) -> dict:
     model_ref = str(p.get("model_ref") or "rolling")
 
     ctx.report_progress("数据加载中", 0, 2, "load_factor_panel")
-    panel = load_factor_panel(verbose=True)
+    # 冻结模型（champion/staging）按工件保存的 feat_cols 打分：实盘训练的工件
+    # 可能含 pct_chg 等交易列（历史 list_factor_columns 未排除），须保留交易列
+    # 才能原样打分；rolling 路径重新训练，特征取自本面板，无需交易列。
+    panel = load_factor_panel(verbose=True, keep_trade_cols=(model_ref != "rolling"))
     factors = list_factor_columns(panel)
 
     if model_ref == "rolling":

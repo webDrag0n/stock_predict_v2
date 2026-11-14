@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 
 from dash import dcc, html
@@ -36,11 +37,27 @@ __all__ = [
     "term",
     "terms",
     "next_step_alert",
+    "svg_icon",
     "MODEL_DISPLAY",
     "model_label",
     "model_blurb",
     "humanize_model_text",
 ]
+
+def svg_icon(svg: str, cls: str = "", size: int | None = None) -> html.Img:
+    """内联 SVG 字符串 → <img data:URI>。
+
+    不能用 dcc.Markdown(dangerously_allow_html=True) 渲染 SVG：其 HTML 解析
+    会剥掉 <svg> 根标签（留下孤儿 path/ellipse 不可见）。data:URI <img> 是
+    Dash 里渲染内联 SVG 的可靠通道。size=None 时用 SVG 自带宽高。
+    """
+    if "<svg" in svg and "xmlns" not in svg:
+        # data:URI 里的 SVG 必须带命名空间，否则浏览器按坏图处理
+        svg = svg.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"', 1)
+    uri = "data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode()
+    kw = {"width": size, "height": size} if size else {}
+    return html.Img(src=uri, className=cls, alt="", **kw)
+
 
 # --- 工作流面包屑 --------------------------------------------------------------
 # 主研究工作流：因子研发 → 模型训练与评估 → 回测验证 → 交易执行。

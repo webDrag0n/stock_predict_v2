@@ -23,15 +23,16 @@ import dash_bootstrap_components as dbc
 import pandas as pd
 
 from . import dataio
+from . import components
 from . import sessions as sessions_mgr
-from .pages import trading_desk, model_lab, factor_workbench, session_detail, market_explorer
+from .pages import trading_desk, model_lab, factor_workbench, session_detail, market_explorer, pipeline_lab
 
 # --- app -------------------------------------------------------------------
 app = dash.Dash(
     __name__,
     title="QuantLab — A股量化分析平台",
     external_stylesheets=[
-        dbc.themes.FLATLY,
+        dbc.themes.BOOTSTRAP,
         "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",
     ],
     suppress_callback_exceptions=True,
@@ -57,11 +58,26 @@ else:
     dataio.preheat_async()
 
 # --- 侧边栏导航 --------------------------------------------------------------
+# 线性图标（16px stroke SVG），现代扁平风格的低噪声导航
+_ICONS = {
+    "desk": '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg>',
+    "pipeline": '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="12" r="2"/><path d="M7 12h10"/><circle cx="12" cy="12" r="2"/></svg>',
+    "models": '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6M10 3v6.3L4.7 18a2 2 0 0 0 1.8 3h11a2 2 0 0 0 1.8-3L14 9.3V3"/><path d="M7.5 14h9"/></svg>',
+    "factors": '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 4H6l6 8-6 8h12"/></svg>',
+    "market": '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-6 4 3 6-8 3 4"/><path d="M3 21h18"/></svg>',
+}
+
+_BRAND_MARK = (
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ffffff" '
+    'stroke-width="2.6" stroke-linecap="round"><path d="M4 19V10M10 19V5M16 19v-8M21 19H3"/></svg>'
+)
+
 NAV_ITEMS = [
-    ("/", "交易台", "每日出单与执行"),
-    ("/models", "模型实验室", "训练·评估·回测"),
-    ("/factors", "因子工作台", "因子研发与体检"),
-    ("/market", "行情观察", "个股与全市场行情"),
+    ("/pipeline", "流水线", "Pipeline", _ICONS["pipeline"]),
+    ("/", "交易台", "Trading Desk", _ICONS["desk"]),
+    ("/models", "模型实验室", "Model Lab", _ICONS["models"]),
+    ("/factors", "因子工作台", "Factor Workbench", _ICONS["factors"]),
+    ("/market", "行情观察", "Market Explorer", _ICONS["market"]),
 ]
 
 
@@ -74,38 +90,54 @@ def _nav_active(pathname: str, href: str) -> bool:
     return pathname.startswith(href)
 
 
+def _icon(svg: str, cls: str):
+    """内联 SVG 图标（components.svg_icon：data:URI <img> 通道，Markdown 会剥 svg 根标签）。"""
+    return components.svg_icon(svg, cls)
+
+
 def _sidebar():
-    links = [
-        dbc.NavLink(
-            html.Div(
-                [
-                    html.Span(zh, className="side-zh"),
-                    html.Span(en, className="side-en"),
-                ]
-            ),
-            href=href,
-            active=_nav_active("/", href),  # 初始渲染高亮首页；之后由回调维护
-            id={"type": "nav-link", "href": href},
-            className="side-link",
+    """品牌区 + 主导航（线性图标 + 中英双语）+ 底部脚注。"""
+    links = []
+    for href, zh, en, icon in NAV_ITEMS:
+        links.append(
+            dbc.NavLink(
+                html.Div(
+                    [
+                        _icon(icon, "side-icon"),
+                        html.Span(
+                            [
+                                html.Span(zh, className="side-zh"),
+                                html.Span(en, className="side-en"),
+                            ],
+                            className="side-text",
+                        ),
+                    ]
+                ),
+                href=href,
+                active=_nav_active("/", href),  # 初始渲染高亮首页；之后由回调维护
+                id={"type": "nav-link", "href": href},
+                className="side-link",
+            )
         )
-        for href, zh, en in NAV_ITEMS
-    ]
     return html.Div(
         [
             html.Div(
                 [
-                    html.Span("📈", style={"fontSize": "22px", "marginRight": "8px"}),
+                    _icon(_BRAND_MARK, "brand-mark"),
                     html.Span("QuantLab", className="brand-title"),
                 ],
                 className="brand-wrap",
-                style={"padding": "18px 18px 4px"},
             ),
+            html.Div("A股全市场量化分析平台", className="brand-sub"),
+            html.Div("工作台", className="side-caption"),
+            dbc.Nav(links, vertical=True, className="side-nav"),
             html.Div(
-                "A股全市场量化分析平台",
-                className="brand-sub",
-                style={"padding": "0 18px 14px"},
+                [
+                    html.Div("数据 → 因子 → 模型 → 交易"),
+                    html.Div("v2 · 配套 daily_run.sh", style={"marginTop": "2px"}),
+                ],
+                className="side-footer",
             ),
-            dbc.Nav(links, vertical=True, pills=True, className="side-nav"),
         ],
         className="sidebar",
     )
@@ -185,6 +217,7 @@ app.layout = html.Div(
 
 PAGES = {
     "/": trading_desk,
+    "/pipeline": pipeline_lab,
     "/models": model_lab,
     "/factors": factor_workbench,
     "/market": market_explorer,
@@ -227,10 +260,10 @@ def _refresh_status(_pathname):
 )
 def _highlight_nav(pathname):
     pathname = pathname or "/"
-    return [_nav_active(pathname, href) for href, _, _ in NAV_ITEMS]
+    return [_nav_active(pathname, href) for href, *_ in NAV_ITEMS]
 
 
 # register each page's callbacks
-for _mod in (trading_desk, model_lab, factor_workbench, session_detail, market_explorer):
+for _mod in (trading_desk, model_lab, factor_workbench, session_detail, market_explorer, pipeline_lab):
     if hasattr(_mod, "register"):
         _mod.register(app)

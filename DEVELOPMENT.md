@@ -95,7 +95,7 @@ uv run python tests/test_backtest_synthetic.py
 ### 2.2 跑全市场 walk-forward
 
 ```bash
-FORWARD_WINDOW=20 TRAIN_WINDOW=500 MODEL_OBJECTIVE=ret_weighted \
+FORWARD_WINDOW=20 TRAIN_WINDOW=500 MODEL_OBJECTIVE=fusion \
 UNIVERSE_MODE=all USE_IMPACT_COST=1 \
 uv run python scripts/run_walkforward.py
 ```
@@ -301,7 +301,7 @@ uv run ruff check src/ tests/ pipeline/ webapp/ scripts/ --fix
 uv run python tests/test_backtest_synthetic.py
 
 # 全市场 WF
-FORWARD_WINDOW=20 TRAIN_WINDOW=500 MODEL_OBJECTIVE=ret_weighted \
+FORWARD_WINDOW=20 TRAIN_WINDOW=500 MODEL_OBJECTIVE=fusion \
 UNIVERSE_MODE=all uv run python scripts/run_walkforward.py
 
 # 前端

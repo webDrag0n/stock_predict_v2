@@ -1352,11 +1352,7 @@ def _overview_layout() -> dbc.Container:
                             {"if": {"column_id": "近期衰减"}, "fontFamily": "monospace"},
                             {"if": {"column_id": "冗余簇"}, "fontSize": 11},
                         ],
-                        style_header={
-                            "backgroundColor": PALETTE["strat"],
-                            "color": "white",
-                            "fontWeight": 700,
-                        },
+                        style_header={"fontWeight": 600},
                         style_data_conditional=[
                             {
                                 "if": {"filter_query": "{ICIR} > 0.3", "column_id": "ICIR"},

@@ -191,7 +191,7 @@ def _retry_block(mode: str | None):
         children.append(
             html.Span(
                 f"「{registry.MODE_LABELS.get(mode, mode)}」模式已下线，请改用现有模式重建任务。",
-                style={"fontSize": "12px", "color": "#7f1d1d", "marginLeft": "8px"},
+                style={"fontSize": "12px", "color": "#b42318", "marginLeft": "8px"},
             )
         )
     return html.Div(children, style={"marginTop": "8px"})
@@ -337,7 +337,7 @@ def _render_detail(sid: str | None):
                         html.Div(
                             [
                                 html.Strong(f"❌ 失败：{exc_type}"),
-                                html.Span(f"  ·  {exc_msg}", style={"color": "#7f1d1d"}),
+                                html.Span(f"  ·  {exc_msg}", style={"color": "#b42318"}),
                             ],
                             style={"marginBottom": "6px"},
                         ),
@@ -345,7 +345,7 @@ def _render_detail(sid: str | None):
                             where,
                             style={
                                 "fontSize": "12px",
-                                "color": "#7f1d1d",
+                                "color": "#b42318",
                                 "marginBottom": "6px",
                             },
                         ),

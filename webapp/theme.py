@@ -9,32 +9,32 @@ from __future__ import annotations
 import plotly.graph_objects as go
 import plotly.io as pio
 
-# --- palette ---------------------------------------------------------------
+# --- palette（与 assets/custom.css 设计令牌同源）----------------------------
 PALETTE = {
-    "strat": "#1a7f37",  # strategy green
-    "bench": "#ff7f0e",  # benchmark orange
-    "alpha": "#7b3fb5",  # alpha purple
-    "loss": "#d62728",  # drawdown / negative red
-    "impact": "#c2410c",  # market-impact cost
-    "commission": "#2563eb",  # commission cost
-    "up": "#16a34a",  # candle up
-    "down": "#dc2626",  # candle down
-    "faint": "#9ca3af",  # per-seed faint
-    "grid": "#eceff3",
-    "ink": "#1f2937",  # primary text
-    "muted": "#6b7280",
+    "strat": "#067647",  # strategy green
+    "bench": "#ea7a08",  # benchmark orange
+    "alpha": "#6941c6",  # alpha purple
+    "loss": "#d92d20",  # drawdown / negative red
+    "impact": "#b54708",  # market-impact cost
+    "commission": "#175cd3",  # commission cost
+    "up": "#12b76a",  # candle up
+    "down": "#f04438",  # candle down
+    "faint": "#98a2b3",  # per-seed faint
+    "grid": "#eef0f3",
+    "ink": "#101828",  # primary text
+    "muted": "#667085",
     "panel": "#ffffff",
-    "bg": "#f7f8fa",
+    "bg": "#f5f6f8",
 }
 
 # diverging scale for heatmaps (red→white→green)
-DIVERGING = [[0.0, "#d62728"], [0.5, "#ffffff"], [1.0, "#1a7f37"]]
+DIVERGING = [[0.0, "#d92d20"], [0.5, "#ffffff"], [1.0, "#067647"]]
 
 
 def _make_template() -> go.layout.Template:
     t = go.layout.Template()
     t.layout = go.Layout(
-        font=dict(family="Inter, Helvetica, Arial, sans-serif", size=13, color=PALETTE["ink"]),
+        font=dict(family="Inter, Helvetica, Arial, sans-serif", size=12.5, color=PALETTE["ink"]),
         paper_bgcolor=PALETTE["panel"],
         plot_bgcolor=PALETTE["panel"],
         colorway=[
@@ -48,27 +48,31 @@ def _make_template() -> go.layout.Template:
         xaxis=dict(
             gridcolor=PALETTE["grid"],
             zerolinecolor=PALETTE["grid"],
-            linecolor="#d1d5db",
+            linecolor="#d0d5dd",
             ticks="outside",
-            tickcolor="#d1d5db",
+            tickcolor="#d0d5dd",
+            tickfont=dict(size=11.5, color=PALETTE["muted"]),
         ),
         yaxis=dict(
             gridcolor=PALETTE["grid"],
             zerolinecolor=PALETTE["grid"],
-            linecolor="#d1d5db",
+            linecolor="#d0d5dd",
             ticks="outside",
-            tickcolor="#d1d5db",
+            tickcolor="#d0d5dd",
+            tickfont=dict(size=11.5, color=PALETTE["muted"]),
         ),
-        margin=dict(l=60, r=24, t=48, b=44),
+        margin=dict(l=56, r=20, t=44, b=40),
         hovermode="x unified",
-        hoverlabel=dict(bgcolor="white", font_size=12, bordercolor=PALETTE["grid"]),
+        hoverlabel=dict(
+            bgcolor="#101828", font_size=12, font_color="#ffffff", bordercolor="#101828"
+        ),
         legend=dict(
-            bgcolor="rgba(255,255,255,0.7)",
+            bgcolor="rgba(255,255,255,0.75)",
             bordercolor=PALETTE["grid"],
             borderwidth=1,
             font=dict(size=11),
         ),
-        title=dict(font=dict(size=15, color=PALETTE["ink"]), x=0.01, xanchor="left"),
+        title=dict(font=dict(size=13.5, color=PALETTE["ink"]), x=0.01, xanchor="left"),
     )
     return t
 

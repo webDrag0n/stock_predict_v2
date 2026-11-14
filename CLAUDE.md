@@ -158,7 +158,7 @@ data_cache/                # 数据与中间面板缓存
 |---|---|---|
 | `FORWARD_WINDOW` | 前瞻收益窗口（交易日） | 20 |
 | `TRAIN_WINDOW` | 滚动训练长度 | 500 |
-| `MODEL_OBJECTIVE` | 模型目标 | `ret_weighted` |
+| `MODEL_OBJECTIVE` | 模型目标 | `fusion` |
 | `UNIVERSE_MODE` | 股票池模式 | `all`（全市场） |
 | `USE_AK_VALUE` | akshare 东财估值因子（ep/bp/sp/ln_mv），全市场模式唯一可用基本面源；首次全市场回填约 45~60min，之后每日增量 | 1 |
 | `TOPK_RATIO` | long_topk 持仓比例 | 0.15 |
@@ -206,10 +206,10 @@ data_cache/                # 数据与中间面板缓存
 ### 4.4 模型目标
 
 - `l2`：直接回归远期收益，预测在收益空间。
-- `ret_weighted`：**默认**。L2 回归但样本权重 ∝ 当日远期收益排名，把拟合重点放到 long_topk 能捕获的头部。
+- `ret_weighted`：L2 回归但样本权重 ∝ 当日远期收益排名，把拟合重点放到 long_topk 能捕获的头部。
 - `lambdarank`：学习排序，直接优化截面排序。
 - `ic_linear`：IC 加权线性因子 blend，输出排序分。
-- `fusion`：GBM 与 ic_linear 的 rank 平均。
+- `fusion`：**默认**。GBM 与 ic_linear 的 rank 平均（2026-11 同面板对照实验：PredIC +0.102、9/9 窗口为正，显著优于 ret_weighted 的 -0.024）。
 
 只有 `l2` / `ret_weighted` + `SEED_COMBINE=mean` 时预测才在收益空间，价格 RMSE 才有意义。
 
