@@ -124,6 +124,8 @@ def test_stage_promote_load_champion(model_dir):
     assert os.path.exists(os.path.join(sdir, "manifest.json"))
     assert os.path.exists(os.path.join(sdir, "ensemble_state.pkl"))
     assert manifest["fingerprint"] == model_store.fingerprint_of(FEATS, PARAMS)
+    assert manifest["trained_at"]
+    assert manifest["label_maturity_gap_days"] == C.FORWARD_WINDOW + C.EMBARGO_DAYS
 
     model_store.promote(manifest["model_id"], promotion_record={"reason": "t", "decided_at": "now"})
     loaded = model_store.load_champion()
@@ -155,6 +157,8 @@ def test_refresh_champion_keeps_promotion_record(model_dir):
     assert m["promotion"]["reason"] == "t"
     assert m["fingerprint"] == model_store.fingerprint_of(FEATS, PARAMS)
     assert m["refreshed_at"]
+    assert m["trained_at"]
+    assert m["label_maturity_gap_days"] == C.FORWARD_WINDOW + C.EMBARGO_DAYS
 
 
 def test_load_champion_missing_and_corrupt(model_dir):

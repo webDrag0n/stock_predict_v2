@@ -35,6 +35,8 @@ def env_overrides(params: dict) -> dict:
     for key, envname in PARAM_ENV.items():
         if key in params and params[key] is not None:
             env[envname] = str(params[key])
+    if "n_seeds" in params and params["n_seeds"] is not None:
+        env["ENSEMBLE_N_SEEDS"] = str(params["n_seeds"])
     if "use_impact" in params:
         env["USE_IMPACT_COST"] = "1" if params["use_impact"] else "0"
     if "use_bb_timing" in params:

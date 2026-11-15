@@ -112,7 +112,7 @@ MULTI_HORIZON_WINDOWS = [
 ]
 MULTI_HORIZON_WEIGHTS = [
     float(x.strip())
-    for x in os.environ.get("MULTI_HORIZON_WEIGHTS", "0.25,0.35,0.40").split(",")
+    for x in os.environ.get("MULTI_HORIZON_WEIGHTS", "0.25,0.25,0.25,0.25").split(",")
     if x.strip()
 ]
 # Normalize weights to sum to 1.
@@ -328,12 +328,9 @@ REGIME_IC_FEATURES = os.environ.get("REGIME_IC_FEATURES", "0") == "1"
 # --- Strategy --------------------------------------------------------------
 # Default tradeable strategy for A-share retail: long the top-K% names.
 STRATEGY = "long_topk"  # "long_topk" | "tanh" | "cross_sectional"(research-only)
-# Phase-2b sweep (2026-06) on the corrected periodic-rebalance backtest found
-# topk=0.15 the sweet spot: concentrated enough to capture the head-concentrated
-# ret_weighted edge, without the over-concentration of 0.05 (whose drawdown
-# blows out). The whole 0.05–0.30 grid stays Sharpe 1.31–1.48, so the strategy
-# is insensitive here (robust). NOTE: tuned on the OOS test set (mild snooping),
-# so treat +1.48 as a slight optimistic bound; ~1.42 is the honest expectation.
+# TOPK_RATIO controls the candidate pool in the current daily-replay engine.
+# Earlier tuning used deleted engines; current metrics and robustness should be
+# read from outputs/walkforward/meta.json rather than those historical numbers.
 TOPK_RATIO = float(os.environ.get("TOPK_RATIO", "0.15"))  # top fraction long
 TANH_SCALE = 5.0  # steepness of tanh sizing
 GROSS_LEVERAGE = 1.0  # total gross exposure per day
@@ -435,9 +432,9 @@ N_SEEDS = int(os.environ.get("N_SEEDS", "3"))
 # whole-market ~5700-stock panel it is both slow and memory-heavy, so it is now
 # opt-in.  Re-enable it with ENSEMBLE_MODELS=attn,gbm_l2,ic_linear.
 ENSEMBLE_MODELS = os.environ.get("ENSEMBLE_MODELS", "gbm_l2,ic_linear")
-# 增量集成的 seed 数：每日续训成本敏感，默认 1（N_SEEDS env 同时覆盖此处与
-# walkforward 的 bagging seed 数——两条路径历史上都读这个 env，故保留同名）。
-ENSEMBLE_N_SEEDS = int(os.environ.get("N_SEEDS", "1"))
+# 增量集成的 seed 数：每日续训成本敏感，默认 1。与 walkforward 的 N_SEEDS
+# 独立配置；会话表单经 param_env 显式同步写入两个环境变量。
+ENSEMBLE_N_SEEDS = int(os.environ.get("ENSEMBLE_N_SEEDS", "1"))
 # 每次增量更新、每个【新成熟交易日】续训的树数（续训量随新数据量伸缩）；
 # 两次全量重建之间总树数硬上限 = FULL_TREES * 2，超限提前触发全量重建。
 INCR_TREES = int(os.environ.get("INCR_TREES", "60"))
@@ -688,17 +685,26 @@ def _validate() -> None:
     - multi_* 目标下每个 horizon 各训一个模型，最长 horizon 的标签需要
       max(MULTI_HORIZON_WINDOWS) 的 embargo；不足时显式报错（不静默放大，
       因为 IC 定权/特征成熟逻辑也依赖统一 fw 口径）。
+    - multi_* 目标还要求 len(MULTI_HORIZON_WEIGHTS) ==
+      len(MULTI_HORIZON_WINDOWS) + 1（含 FORWARD_WINDOW 对应权重）。
     """
     assert EMBARGO_DAYS >= FORWARD_WINDOW, (
         f"EMBARGO_DAYS={EMBARGO_DAYS} < FORWARD_WINDOW={FORWARD_WINDOW}："
         "训练段尾部标签会偷看 OOS 窗口价格（前视泄露）"
     )
-    if MODEL_OBJECTIVE.startswith("multi_") and MULTI_HORIZON_WINDOWS:
-        longest = max(MULTI_HORIZON_WINDOWS)
-        assert EMBARGO_DAYS >= longest, (
-            f"multi 目标要求 EMBARGO_DAYS={EMBARGO_DAYS} >= "
-            f"max(MULTI_HORIZON_WINDOWS)={longest}，否则长 horizon 标签泄露"
+    if MODEL_OBJECTIVE.startswith("multi_"):
+        expected_weights = len(MULTI_HORIZON_WINDOWS) + 1
+        assert len(MULTI_HORIZON_WEIGHTS) == expected_weights, (
+            f"MULTI_HORIZON_WEIGHTS 长度 {len(MULTI_HORIZON_WEIGHTS)} != "
+            f"MULTI_HORIZON_WINDOWS 长度 {len(MULTI_HORIZON_WINDOWS)} + 1 "
+            f"= {expected_weights}"
         )
+        if MULTI_HORIZON_WINDOWS:
+            longest = max(MULTI_HORIZON_WINDOWS)
+            assert EMBARGO_DAYS >= longest, (
+                f"multi 目标要求 EMBARGO_DAYS={EMBARGO_DAYS} >= "
+                f"max(MULTI_HORIZON_WINDOWS)={longest}，否则长 horizon 标签泄露"
+            )
 
 
 _validate()

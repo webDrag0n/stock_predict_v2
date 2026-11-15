@@ -10,7 +10,7 @@ A-share 量化研究系统：数据 → 因子 → 模型 → 策略 → 回测/
 
 这不是一个“开箱即用的赚钱机器”。经过多轮端到端验证，当前系统的主结论是：
 
-- **稳健 alpha 极其微弱**：在防泄露、 realistic cost、全市场 (~5700 只) 条件下，ret_weighted 目标 + 全量因子库的长期样本外 alpha 约 **+13.8%/年，NW-t ≈ 2.80**（3 个独立 seed 稳健显著）。但这是经过大量试错后才收敛到的结果。
+- **稳健 alpha 极其微弱**：在防泄露、真实成本、全市场条件下，长期样本外表现以 `outputs/walkforward/meta.json` 的最新结果为准。Sharpe、年化 alpha、NW-t、PredIC 与正窗口占比会随数据快照和重跑变化，不沿用旧固定数字。
 - **常见捷径都会虚高**：小股票池 (49/300 只)、未复权价格、每日重叠调仓、偷看测试集选策略等都会让 Sharpe/alpha 虚高数倍，必须逐项修正。
 - **信号站得住，但容量有限**：alpha 主要来源于小盘错误定价，容量天花板约 **¥1500 万**；流动性倾斜会摧毁 alpha。
 - **默认引擎是每日重放回测**：`src/backtest_daily.py` 逐日重放每日决策 + 次日撮合，与实盘 `predict_tomorrow.py` / `pipeline` 次日交易共用同一套 `src/trading.py` 决策代码，保证回测=实盘同分布。（旧的事件驱动引擎 `src/backtest_event.py` 含一日前视，已随阶段 5 删除；**基于它得出的历史结论一律作废**。）
@@ -209,7 +209,7 @@ data_cache/                # 数据与中间面板缓存
 - `ret_weighted`：L2 回归但样本权重 ∝ 当日远期收益排名，把拟合重点放到 long_topk 能捕获的头部。
 - `lambdarank`：学习排序，直接优化截面排序。
 - `ic_linear`：IC 加权线性因子 blend，输出排序分。
-- `fusion`：**默认**。GBM 与 ic_linear 的 rank 平均（2026-11 同面板对照实验：PredIC +0.102、9/9 窗口为正，显著优于 ret_weighted 的 -0.024）。
+- `fusion`：**默认**。GBM 与 ic_linear 的 rank 平均。最新 PredIC、正窗口占比及与其他目标的对比以 `outputs/walkforward/meta.json` 为准，数字会随重跑变化。
 
 只有 `l2` / `ret_weighted` + `SEED_COMBINE=mean` 时预测才在收益空间，价格 RMSE 才有意义。
 

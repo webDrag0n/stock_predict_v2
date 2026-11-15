@@ -202,7 +202,7 @@ def load_champion_manifest() -> dict | None:
 def stage_candidate(
     ens, feat_cols: list[str], params: dict, extra: dict | None = None
 ) -> tuple[str, dict]:
-    """候选落盘到 staging/<model_id>/。返回 (staging_dir, manifest)。"""
+    """候选落盘 staging。train_end_date 是最后成熟标签日，trained_at 是实际训练时间。"""
     fp = fingerprint_of(feat_cols, params)
     mid = _new_model_id(fp)
     manifest = {
@@ -213,6 +213,8 @@ def stage_candidate(
         "train_end_date": (
             str(ens._last_trained_date)[:10] if ens._last_trained_date is not None else None
         ),
+        "trained_at": datetime.now().isoformat(),
+        "label_maturity_gap_days": int(C.FORWARD_WINDOW + C.EMBARGO_DAYS),
         "weights": {m: round(float(w), 6) for m, w in ens.weights.items()},
         "promotion": None,
     }
@@ -236,6 +238,8 @@ def refresh_champion(ens, feat_cols: list[str], params: dict) -> None:
         "train_end_date": (
             str(ens._last_trained_date)[:10] if ens._last_trained_date is not None else None
         ),
+        "trained_at": datetime.now().isoformat(),
+        "label_maturity_gap_days": int(C.FORWARD_WINDOW + C.EMBARGO_DAYS),
         "weights": {m: round(float(w), 6) for m, w in ens.weights.items()},
         "promotion": old.get("promotion"),
     }

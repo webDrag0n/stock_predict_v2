@@ -16,6 +16,7 @@ import os
 from datetime import datetime
 
 import pandas as pd
+import config as C
 from dash import ALL, Input, Output, State, ctx, dcc, html, no_update
 import dash_bootstrap_components as dbc
 
@@ -103,16 +104,18 @@ def _status_validate() -> tuple[str, str]:
 
 
 def _status_gate() -> tuple[str, str]:
-    """champion 年龄：≥84 自然日黄灯（与模型实验室口径一致）。"""
+    """champion 年龄与夜间重训同为交易日口径，≥80% 黄、>100% 红。"""
     try:
         man = dataio.champion_manifest()
         if not man:
             return "bad", "无 champion"
-        created = pd.to_datetime(man.get("created_at"), errors="coerce")
-        if pd.isna(created):
-            return "idle", f"champion {man.get('model_id', '?')}"
-        age = (pd.Timestamp.now() - created.tz_localize(None)).days
-        return ("warn" if age >= 84 else "ok"), f"champion 已服役 {age} 天"
+        report = dataio.tracking_report() or {}
+        age = (report.get("champion") or {}).get("age_days")
+        if age is None or age < 0:
+            return "idle", f"champion {man.get('model_id', '?')} · 年龄待跟踪"
+        max_age = int(C.MAX_MODEL_AGE_DAYS)
+        level = "bad" if age > max_age else ("warn" if age >= max_age * 0.8 else "ok")
+        return level, f"champion 已 {age} 个交易日未重训（阈值 {max_age}）"
     except Exception:
         return "idle", "状态未知"
 

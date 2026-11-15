@@ -75,7 +75,7 @@ PIPELINE_STAGES: list[dict] = [
         "mode": None,
         "param_keys": [],
         "desc": "候选 vs 冠军双回放对比，达标才允许替换线上 champion",
-        "status_hint": "当前 champion 年龄；超龄（>84 自然日）亮黄灯",
+        "status_hint": "当前 champion 交易日年龄；≥80% MAX_MODEL_AGE_DAYS 亮黄、超龄亮红",
     },
     {
         "id": "trade",

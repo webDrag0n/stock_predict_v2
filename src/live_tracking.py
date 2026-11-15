@@ -261,6 +261,8 @@ def compute_report(
         "champion": {
             "model_id": champion_manifest.get("model_id"),
             "train_end_date": champion_manifest.get("train_end_date"),
+            "trained_at": champion_manifest.get("trained_at"),
+            "label_maturity_gap_days": champion_manifest.get("label_maturity_gap_days"),
             "age_days": age,
             "promoted_at": promo.get("decided_at"),
             "promotion_reason": promo.get("reason"),
