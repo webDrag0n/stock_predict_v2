@@ -80,6 +80,8 @@ uv run python predict_tomorrow.py \
     --max-positions "$MAX_POS" \
     --max-weight "$MAX_WEIGHT" \
     --min-notional "$MIN_NOTIONAL" \
+    --allowed-boards main \
+    --skip-unaffordable \
     2>&1 | tee -a "$LOG"
 rc=${PIPESTATUS[0]}
 set -e

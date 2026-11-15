@@ -159,6 +159,12 @@ def _decision_params(args) -> dict:
         p["use_bb_timing"] = bool(args.use_bb_timing)
     if args.order_price_mode:
         p["order_price_mode"] = str(args.order_price_mode)
+    if getattr(args, "allowed_boards", ""):
+        p["allowed_boards"] = [
+            board.strip() for board in args.allowed_boards.split(",") if board.strip()
+        ]
+    if getattr(args, "skip_unaffordable", False):
+        p["skip_unaffordable"] = True
     if getattr(args, "force_rebalance", False):
         p["force_rebalance"] = True
     return p
@@ -217,6 +223,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=C.DAILY_MIN_NOTIONAL,
         help=f"最小订单金额（默认 {C.DAILY_MIN_NOTIONAL}）",
+    )
+    ap.add_argument(
+        "--allowed-boards",
+        default="",
+        help="允许买入的板块，逗号分隔：main,chinext,star,bse；默认不限",
+    )
+    ap.add_argument(
+        "--skip-unaffordable", action="store_true", help="跳过一手都买不起的候选并向后补位"
     )
     ap.add_argument(
         "--price-col",

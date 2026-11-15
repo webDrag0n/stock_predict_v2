@@ -94,7 +94,27 @@ def main() -> None:
     ap.add_argument("--compare", action="store_true", help="对比 全特征 vs 窗口内因子选择")
     ap.add_argument("--strategy", default="long_topk")
     ap.add_argument("--engine", choices=["windowed", "incremental"], default="windowed")
+    ap.add_argument("--capital", type=float, default=None)
+    ap.add_argument("--max-positions", type=int, default=None)
+    ap.add_argument("--max-weight", type=float, default=None)
+    ap.add_argument("--min-notional", type=float, default=None)
+    ap.add_argument("--allowed-boards", default="")
+    ap.add_argument("--skip-unaffordable", action="store_true")
     args = ap.parse_args()
+
+    if args.capital is not None:
+        C.INITIAL_CAPITAL = float(args.capital)
+    replay_params = {}
+    for key in ("max_positions", "max_weight", "min_notional"):
+        value = getattr(args, key)
+        if value is not None:
+            replay_params[key] = value
+    if args.allowed_boards:
+        replay_params["allowed_boards"] = [
+            board.strip() for board in args.allowed_boards.split(",") if board.strip()
+        ]
+    if args.skip_unaffordable:
+        replay_params["skip_unaffordable"] = True
 
     os.makedirs(C.OUTPUT_DIR, exist_ok=True)
     print("加载命名因子面板...")
@@ -117,7 +137,12 @@ def main() -> None:
     for tag, sel in runs:
         print(f"--- 运行: {tag} ---")
         res = run_walkforward(
-            panel, factors, select_features=sel, strategy=args.strategy, engine=args.engine
+            panel,
+            factors,
+            select_features=sel,
+            strategy=args.strategy,
+            engine=args.engine,
+            replay_params=replay_params,
         )
         results[tag] = res
         _summarize(tag, res)

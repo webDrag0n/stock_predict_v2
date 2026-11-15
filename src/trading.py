@@ -134,6 +134,17 @@ class PortfolioState:
 
 
 # ---------------------------------------------------------------------------
+def board_of(symbol: str) -> str:
+    code = str(symbol).split(".")[0]
+    if code.startswith("688"):
+        return "star"
+    if code.startswith(("300", "301")):
+        return "chinext"
+    if code.startswith(("8", "4", "920")):
+        return "bse"
+    return "main"
+
+
 def _board_limit_pct(symbol: str, is_st: bool | None = None) -> float:
     """根据代码前缀与 ST 状态返回涨跌停幅度（小数）。"""
     if is_st:
@@ -292,7 +303,9 @@ def decide_orders(
         today    : 决策日 asof 的横截面（每行一只股），需含 symbol、close/adj_close，
                    择时还需 bb_upper_20/bb_lower_20/rsi_14/limit_flag/pct_chg（缺则跳过对应门）。
         score    : 与 today 行对齐的 ensemble 融合排序分（越大越看好）。
-        params   : 覆盖 config 默认（topk/max_positions/bb/rsi/价格模式等）。
+        params   : 覆盖 config 默认（topk/max_positions/bb/rsi/价格模式等）；
+                   allowed_boards 仅限制买入候选板块，skip_unaffordable=True 时
+                   跳过一手都买不起的候选并向后补位，二者默认均不改变旧行为。
         asof_date: 决策日（用于 T+1 锁仓的建仓日标记）。
         price_col: 用于估值/目标金额计算的价列，实盘建议传 "adj_close"。
 
@@ -408,7 +421,20 @@ def decide_orders(
     if not use_bb:
         # 目标池：score 最高的 min(max_pos, |in_pool|) 只
         pool_idx = [i for i in range(n) if in_pool[i] and close[i] == close[i] and close[i] > 0]
+        allowed_boards = p.get("allowed_boards")
+        if allowed_boards is not None:
+            allowed = {str(board) for board in allowed_boards}
+            pool_idx = [i for i in pool_idx if board_of(sym[i]) in allowed]
         pool_idx.sort(key=lambda i: rank_pct[i])
+        if bool(p.get("skip_unaffordable", False)):
+            affordable = []
+            for i in pool_idx:
+                shares = int(np.floor(target_notional / close[i] / LOT) * LOT)
+                if shares > 0:
+                    affordable.append(i)
+                if max_pos > 0 and len(affordable) >= max_pos:
+                    break
+            pool_idx = affordable
         if max_pos > 0:
             pool_idx = pool_idx[:max_pos]
 
