@@ -3,15 +3,17 @@
 触发时机：每晚 predict_tomorrow / webapp train_predict 训练完候选后，比较
 候选配方指纹与 champion 指纹（model_store.fingerprint_of）：
 
-  · 无 champion        → 首次引导，候选直接晋升（reason="bootstrap"）；
+  · 无 champion        → 先跑单配方回放记录回测预期，再首次引导晋升
+                           （reason="bootstrap"；回放失败只告警，不阻断）；
   · 指纹相同           → 同一配方的滚动重训，原位刷新 champion 工件，不评估；
   · 指纹不同           → 完整门控：
       1. 候选落盘 models/staging/<model_id>/；
       2. evaluate_pair：两个配方各自跑一遍最近 PROMOTE_EVAL_DAYS 个交易日的
          完整每日重放（run_daily_replay 正常逐日重训路径，非冻结模型——冻结
          artifact 回放会让训练窗更晚的候选在窗口前段处于样本内，不诚实）；
-      3. should_promote：候选 Sharpe > champion Sharpe + PROMOTE_SHARPE_MARGIN
-         且候选最大回撤不劣于 champion 回撤 − PROMOTE_DD_TOLERANCE；
+      3. should_promote：候选 Sharpe > champion Sharpe + PROMOTE_SHARPE_MARGIN，
+         候选最大回撤不劣于 champion 回撤 − PROMOTE_DD_TOLERANCE，且双方日收益
+         配对差值的 Newey–West t ≥ PROMOTE_MIN_T（旧调用不传收益时跳过）；
       4. 通过 → promote（旧 champion 归档 archive/）；不通过 → 候选留档
          staging + evaluation.json，champion 不变。
 
@@ -25,6 +27,7 @@ run_gate 的"配方不同"分支复用它（auto_promote=True）。
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 import numpy as np
@@ -34,6 +37,8 @@ import config as C
 import model_store
 from backtest_daily import run_daily_replay
 from perf_metrics import compute_performance, scalar_metrics
+
+logger = logging.getLogger(__name__)
 
 # 配方参数键：champion manifest config_snapshot → run_daily_replay params
 _RECIPE_KEYS = (
@@ -83,7 +88,7 @@ def _replay_metrics(
     lags: int,
     progress: bool,
 ) -> dict:
-    """单配方完整重放 + 标量指标。"""
+    """单配方完整重放，返回标量指标与内存态 strat_ret 日收益列表。"""
     res = run_daily_replay(
         panel,
         feat_cols,
@@ -94,7 +99,26 @@ def _replay_metrics(
         progress=progress,
     )
     perf = compute_performance(res["daily"], panel, res["meta"]["initial_cash"], lags=lags)
-    return scalar_metrics(perf)
+    metrics = scalar_metrics(perf)
+    metrics["strat_ret"] = np.asarray(perf["strat_ret"], dtype=float).tolist()
+    return metrics
+
+
+def paired_diff_t(ret_a, ret_b, lags) -> float:
+    a = np.asarray(ret_a, dtype=float)
+    b = np.asarray(ret_b, dtype=float)
+    d = a - b
+    n = len(d)
+    lags = int(lags)
+    if n < lags + 5:
+        return 0.0
+    mean = float(d.mean())
+    centered = d - mean
+    long_var = float(centered @ centered) / n
+    for lag in range(1, lags + 1):
+        weight = 1.0 - lag / (lags + 1.0)
+        long_var += 2.0 * weight * float(centered[lag:] @ centered[:-lag]) / n
+    return float(mean / np.sqrt(max(long_var, 1e-18) / n))
 
 
 def evaluate_pair(
@@ -112,7 +136,8 @@ def evaluate_pair(
 
     两遍只有配方参数（ensemble 腿/超参）不同；决策/成本/风控参数、初始资金、
     评估窗口完全一致。窗口起点按两边较大的 train_window 预热，保证两个配方
-    的决策日集合相同。
+    的决策日集合相同。candidate_ret/champion_ret 仅用于内存中的配对检验，
+    stage_and_evaluate 写 evaluation.json 前会剔除这两个大字段。
     """
     eval_days = int(eval_days or getattr(C, "PROMOTE_EVAL_DAYS", 120))
     initial_cash = float(initial_cash or C.INITIAL_CAPITAL)
@@ -135,6 +160,8 @@ def evaluate_pair(
             panel, feat_cols, p, start_date, end_date, initial_cash, lags, progress
         )
         out[tag]["params"] = _recipe_params(recipe)
+    for tag in ("candidate", "champion"):
+        out[f"{tag}_ret"] = out[tag].pop("strat_ret")
     return out
 
 
@@ -143,11 +170,11 @@ def should_promote(
     champ_metrics: dict,
     sharpe_margin: float | None = None,
     dd_tolerance: float | None = None,
+    cand_ret=None,
+    champ_ret=None,
+    lags: int | None = None,
 ) -> tuple[bool, str]:
-    """门控判定：Sharpe 更高（+margin）且最大回撤不劣于 champion − tolerance。
-
-    max_drawdown 为百分数（如 -12.3，越小越差）；dd_tolerance 为分数（0.02=2pp）。
-    """
+    """Sharpe、回撤与可选配对 t 检验的联合门控；旧调用不传收益时跳过 t 检验。"""
     margin = float(
         getattr(C, "PROMOTE_SHARPE_MARGIN", 0.0) if sharpe_margin is None else sharpe_margin
     )
@@ -159,6 +186,13 @@ def should_promote(
     d_dd = cand_metrics["max_drawdown"] - champ_metrics["max_drawdown"]
     ok_sharpe = ds > margin
     ok_dd = d_dd >= -tol
+    ok_t = True
+    t_value = None
+    min_t = float(getattr(C, "PROMOTE_MIN_T", 1.0))
+    if min_t > 0 and cand_ret is not None and champ_ret is not None:
+        lag_count = int(getattr(C, "REBALANCE_DAYS", 20) if lags is None else lags)
+        t_value = paired_diff_t(cand_ret, champ_ret, lag_count)
+        ok_t = t_value >= min_t
     reasons = []
     if not ok_sharpe:
         reasons.append(
@@ -170,15 +204,48 @@ def should_promote(
             f"最大回撤 {cand_metrics['max_drawdown']:+.1f}% 劣于 champion "
             f"{champ_metrics['max_drawdown']:+.1f}% − 容忍 {tol:.1f}pp"
         )
-    if ok_sharpe and ok_dd:
-        reasons.append(
+    if not ok_t:
+        reasons.append(f"配对差值 t={t_value:.2f} 低于门槛 {min_t:.2f}")
+    if ok_sharpe and ok_dd and ok_t:
+        message = (
             f"Sharpe {cand_metrics['sharpe']:+.2f} > "
             f"{champ_metrics['sharpe']:+.2f}"
             + (f" + 门槛 {margin:.2f}" if margin > 0 else "")
             + f"，回撤 {cand_metrics['max_drawdown']:+.1f}% vs "
             f"{champ_metrics['max_drawdown']:+.1f}% 在容忍内"
         )
-    return ok_sharpe and ok_dd, "；".join(reasons)
+        if t_value is not None:
+            message += f"，配对差值 t={t_value:.2f} ≥ 门槛 {min_t:.2f}"
+        reasons.append(message)
+    return ok_sharpe and ok_dd and ok_t, "；".join(reasons)
+
+
+def _bootstrap_metrics(
+    panel,
+    feat_cols,
+    cand_params,
+    eval_days,
+    decision_params,
+    progress,
+    progress_cb,
+) -> dict:
+    warmup = int(cand_params.get("train_window") or C.TRAIN_WINDOW)
+    start_date, end_date = _eval_window(panel, eval_days, warmup)
+    params = {"warmup_days": warmup, **dict(decision_params or {}), **_recipe_params(cand_params)}
+    if progress_cb is not None:
+        params["progress_cb"] = progress_cb
+    metrics = _replay_metrics(
+        panel,
+        feat_cols,
+        params,
+        start_date,
+        end_date,
+        float(C.INITIAL_CAPITAL),
+        int(getattr(C, "REBALANCE_DAYS", 20)),
+        progress,
+    )
+    metrics.pop("strat_ret", None)
+    return metrics
 
 
 def stage_and_evaluate(
@@ -222,9 +289,20 @@ def stage_and_evaluate(
         decided_at = datetime.now().isoformat(timespec="seconds")
         if auto_promote:
             reason = "bootstrap（首个 champion，未经对比直接晋升）"
-            model_store.promote(
-                staging_id, promotion_record={"reason": reason, "decided_at": decided_at}
-            )
+            record = {"reason": reason, "decided_at": decided_at}
+            try:
+                record["candidate_metrics"] = _bootstrap_metrics(
+                    panel,
+                    feat_cols,
+                    cand_params,
+                    eval_days,
+                    decision_params,
+                    progress,
+                    progress_cb,
+                )
+            except Exception as exc:
+                logger.warning("bootstrap 单配方回测失败，仍按原流程晋升：%s", exc)
+            model_store.promote(staging_id, promotion_record=record)
             decision = "promoted"
         else:
             reason = "无 champion 可对比：候选已留档 staging，待人工评审后手动晋升"
@@ -267,7 +345,12 @@ def stage_and_evaluate(
         progress=progress,
         progress_cb=progress_cb,
     )
-    ok, reason = should_promote(evaluation["candidate"], evaluation["champion"])
+    ok, reason = should_promote(
+        evaluation["candidate"],
+        evaluation["champion"],
+        cand_ret=evaluation["candidate_ret"],
+        champ_ret=evaluation["champion_ret"],
+    )
     evaluation.update(
         {
             "decision": "promoted" if (ok and auto_promote) else ("staged" if ok else "rejected"),
@@ -277,7 +360,10 @@ def stage_and_evaluate(
             "champion_id": champ_manifest.get("model_id"),
         }
     )
-    model_store.write_evaluation(staging_dir, evaluation)
+    model_store.write_evaluation(
+        staging_dir,
+        {key: value for key, value in evaluation.items() if not key.endswith("_ret")},
+    )
     promoted = False
     if ok and auto_promote:
         model_store.promote(
@@ -344,6 +430,18 @@ def run_gate(
             "reason": "bootstrap（首个 champion，未经对比直接晋升）",
             "decided_at": datetime.now().isoformat(timespec="seconds"),
         }
+        try:
+            record["candidate_metrics"] = _bootstrap_metrics(
+                panel,
+                feat_cols,
+                cand_params,
+                eval_days,
+                decision_params,
+                progress,
+                progress_cb,
+            )
+        except Exception as exc:
+            logger.warning("bootstrap 单配方回测失败，仍按原流程晋升：%s", exc)
         model_store.promote(manifest["model_id"], promotion_record=record)
         return {
             "action": "bootstrap",

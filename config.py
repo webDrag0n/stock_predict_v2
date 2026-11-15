@@ -452,13 +452,15 @@ IC_WEIGHT_EMA_HALFLIFE = float(os.environ.get("IC_WEIGHT_EMA_HALFLIFE", "5"))
 # --- Model gate（champion/staging 晋升机制，src/model_store + src/model_gate）--
 # 每晚训练完候选后比较配方指纹：与 champion 相同 → 原位刷新工件（零开销）；
 # 不同 → 候选落盘 models/staging/，双方各跑一遍最近 PROMOTE_EVAL_DAYS 个交易日的
-# 完整每日重放，Sharpe 更高且回撤不劣于 champion − PROMOTE_DD_TOLERANCE 才晋升，
-# 否则 champion 不变、候选留档 + evaluation.json。USE_MODEL_GATE=0 退回旧行为
+# 完整每日重放，Sharpe 更高、回撤不劣于 champion − PROMOTE_DD_TOLERANCE，且
+# 配对收益差 t ≥ PROMOTE_MIN_T 才晋升；否则 champion 不变、候选留档 +
+# evaluation.json（不含大型收益序列）。USE_MODEL_GATE=0 退回旧行为
 # （每晚重训直接用，等同 --no-gate）。
 USE_MODEL_GATE = os.environ.get("USE_MODEL_GATE", "1") == "1"
 PROMOTE_EVAL_DAYS = int(os.environ.get("PROMOTE_EVAL_DAYS", "120"))
 PROMOTE_SHARPE_MARGIN = float(os.environ.get("PROMOTE_SHARPE_MARGIN", "0"))
 PROMOTE_DD_TOLERANCE = float(os.environ.get("PROMOTE_DD_TOLERANCE", "0.02"))
+PROMOTE_MIN_T = float(os.environ.get("PROMOTE_MIN_T", "1.0"))
 ARCHIVE_KEEP = int(os.environ.get("ARCHIVE_KEEP", "5"))
 
 # --- Adaptive retrain + live tracking（src/retrain_trigger + src/live_tracking）

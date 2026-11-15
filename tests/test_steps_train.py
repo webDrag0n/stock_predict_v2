@@ -176,7 +176,12 @@ def test_gate_eval_with_champion_never_promotes(train_ctx):
     # 判定与指标一致（should_promote 只是指标判定，不代表已晋升）
     from model_gate import should_promote
 
-    ok_expected, _ = should_promote(res["candidate"], res["champion"])
+    ok_expected, _ = should_promote(
+        res["candidate"],
+        res["champion"],
+        cand_ret=res["evaluation"]["candidate_ret"],
+        champ_ret=res["evaluation"]["champion_ret"],
+    )
     assert res["should_promote"] == ok_expected
 
     # staging 留档：manifest.json + evaluation.json

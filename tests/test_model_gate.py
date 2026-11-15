@@ -19,7 +19,7 @@ import pytest
 import config as C
 import model_store
 from ensemble import IncrementalEnsemble
-from model_gate import run_gate, should_promote
+from model_gate import paired_diff_t, run_gate, should_promote
 
 FEATS = ["feature_00", "feature_01"]
 PARAMS = {
@@ -157,15 +157,22 @@ def test_run_gate_config_change_triggers_evaluation(model_dir):
             assert np.isfinite(ev[side][k]) or k == "alpha_ann"
 
     # 判定与 should_promote 一致
-    ok_expected, _ = should_promote(ev["candidate"], ev["champion"])
+    ok_expected, _ = should_promote(
+        ev["candidate"],
+        ev["champion"],
+        cand_ret=ev["candidate_ret"],
+        champ_ret=ev["champion_ret"],
+    )
     assert (g2["action"] == "promoted") == ok_expected
 
-    # 候选留档 + evaluation.json
+    # 候选留档 + evaluation.json；收益序列只在内存中传递
+    assert len(ev["candidate_ret"]) == len(ev["champion_ret"])
     sdir = model_store.staging_dir_for(g2["candidate_id"])
     assert os.path.isdir(sdir)
     with open(os.path.join(sdir, "evaluation.json"), encoding="utf-8") as f:
         saved = json.load(f)
     assert saved["decision"] == g2["action"]
+    assert "candidate_ret" not in saved and "champion_ret" not in saved
 
     # champion 归属与 use_candidate_for_live 一致
     champ_now = model_store.load_champion_manifest()["model_id"]
@@ -176,6 +183,59 @@ def test_run_gate_config_change_triggers_evaluation(model_dir):
         assert champ_now == old_champion
         assert g2["use_candidate_for_live"] is False
         assert g2["champion_recipe"] is not None
+
+
+def test_paired_diff_t_and_promotion_threshold(monkeypatch):
+    n = 120
+    same_a = np.random.RandomState(0).randn(n) * 0.0005
+    same_b = same_a.copy()
+    assert paired_diff_t(same_a, same_b, lags=20) == 0.0
+    assert paired_diff_t([0.001] * 10, [0.0] * 10, lags=20) == 0.0
+
+    champion = np.random.RandomState(1).randn(n) * 0.0005
+    candidate = np.random.RandomState(2).randn(n) * 0.0005 + 0.001
+    assert paired_diff_t(candidate, champion, lags=20) > 5.0
+
+    cand_metrics = {"sharpe": 1.5, "max_drawdown": -8.0}
+    champ_metrics = {"sharpe": 1.0, "max_drawdown": -10.0}
+    monkeypatch.setattr(C, "PROMOTE_MIN_T", 1.0)
+    ok, reason = should_promote(cand_metrics, champ_metrics, cand_ret=same_a, champ_ret=same_b)
+    assert not ok and "t=" in reason
+
+    ok, reason = should_promote(cand_metrics, champ_metrics, cand_ret=candidate, champ_ret=champion)
+    assert ok and "t=" in reason
+
+    monkeypatch.setattr(C, "PROMOTE_MIN_T", 0.0)
+    ok, _ = should_promote(cand_metrics, champ_metrics, cand_ret=same_a, champ_ret=same_b)
+    assert ok
+
+
+def test_bootstrap_records_backtest_expectation(monkeypatch, tmp_path):
+    import model_gate as gate
+
+    def _fake_replay(*args, **kwargs):
+        return {"sharpe": 1.23, "max_drawdown": -4.0, "strat_ret": [0.001] * 10}
+
+    monkeypatch.setattr(gate, "_replay_metrics", _fake_replay)
+    panel = _make_panel()
+    ens = _trained_ens(panel)
+    for mode in ("run_gate", "stage_and_evaluate"):
+        monkeypatch.setattr(C, "MODEL_DIR", str(tmp_path / mode))
+        if mode == "run_gate":
+            gate.run_gate(panel, FEATS, ens, PARAMS, eval_days=10, progress=False)
+        else:
+            gate.stage_and_evaluate(
+                ens,
+                panel,
+                FEATS,
+                PARAMS,
+                eval_days=10,
+                auto_promote=True,
+                progress=False,
+            )
+        promotion = model_store.load_champion_manifest()["promotion"]
+        assert promotion["candidate_metrics"]["sharpe"] == 1.23
+        assert "strat_ret" not in promotion["candidate_metrics"]
 
 
 if __name__ == "__main__":
