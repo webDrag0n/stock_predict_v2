@@ -34,6 +34,7 @@ import lightgbm as lgb
 from scipy.stats import kurtosis, skew
 
 import config as C
+from attribution import size_exposure, small_cap_benchmark
 from experiment_log import count_trials, deflated_sharpe, log_trial
 from factor_eval import select_passing_factors, daily_rank_ic
 from model_store import fingerprint_of
@@ -953,6 +954,22 @@ def save_walkforward_result(res: dict, outdir: str | None = None) -> str:
     for key in ("pre_holdout", "holdout"):
         if key in res:
             meta[key] = res[key]
+    panel_for_attribution = res.get("panel_for_attribution")
+    if (
+        panel_for_attribution is not None
+        and "ln_mv" in panel_for_attribution.columns
+        and daily is not None
+        and len(daily)
+    ):
+        strategy_returns = daily["total_value"].pct_change()
+        strategy_returns.iloc[0] = daily["total_value"].iloc[0] / C.INITIAL_CAPITAL - 1.0
+        strategy_returns.index = pd.to_datetime(daily["date"])
+        small = small_cap_benchmark(panel_for_attribution)
+        small_ann = float(small.reindex(strategy_returns.index).mean() * 252.0)
+        exposure = size_exposure(strategy_returns, panel_for_attribution)
+        exposure.to_parquet(os.path.join(outdir, "size_exposure.parquet"), index=False)
+        meta["excess_vs_smallcap_ann"] = float(metrics.get("ann_return", np.nan)) - small_ann
+        meta["mean_beta_size"] = float(exposure["beta_size"].mean())
     if oos is not None and len(oos):
         meta["universe"] = {
             "n_symbols": int(oos["symbol"].nunique()),
@@ -967,10 +984,12 @@ def save_walkforward_result(res: dict, outdir: str | None = None) -> str:
 
 def _finalize_walkforward_result(
     result: dict,
+    panel: pd.DataFrame,
     replay_params: dict | None,
     save: bool,
     verbose: bool,
 ) -> dict:
+    result["panel_for_attribution"] = panel
     oos_result = result["oos_result"]
     if C.HOLDOUT_START:
         before, holdout = _holdout_summary(
@@ -1202,7 +1221,7 @@ def run_walkforward(
                 f"增量集成 OOS 重放完成（{_fmt_dur(time.time() - t0)}）："
                 f"Sharpe={oos_metrics['sharpe']:+.2f} PredIC={ic_mean:+.4f}"
             )
-        return _finalize_walkforward_result(result, replay_params, save, verbose)
+        return _finalize_walkforward_result(result, panel, replay_params, save, verbose)
 
     oos_frames = []
     window_metrics = []
@@ -1406,7 +1425,7 @@ def run_walkforward(
         # 「为正窗口占比」门禁信号（Sharpe>0 / PredIC>0 窗口占比），meta.json 同名字段
         **pos_ratios,
     }
-    return _finalize_walkforward_result(result, replay_params, save, verbose)
+    return _finalize_walkforward_result(result, panel, replay_params, save, verbose)
 
 
 def with_ids(df: pd.DataFrame) -> pd.DataFrame:
