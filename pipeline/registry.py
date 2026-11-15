@@ -16,6 +16,8 @@ run_session.py 按 STEPS[mode] 顺序执行步骤；前端按 PARAM_SCHEMA[mode]
 
 from __future__ import annotations
 
+import config as C
+
 from . import steps_factoreval as FE
 from . import steps_modeleval as M
 from . import steps_nextday as N
@@ -97,7 +99,7 @@ _SHARED: dict[str, dict] = {
         "key": "topk",
         "label": "候选池比例 TOPK",
         "type": "number",
-        "default": 0.15,
+        "default": C.TOPK_RATIO,
         "min": 0.02,
         "max": 0.50,
         "step": 0.01,
@@ -106,7 +108,7 @@ _SHARED: dict[str, dict] = {
         "key": "max_positions",
         "label": "最大持仓数",
         "type": "number",
-        "default": 30,
+        "default": C.MAX_POSITIONS,
         "min": 1,
         "max": 200,
         "step": 1,
@@ -115,7 +117,7 @@ _SHARED: dict[str, dict] = {
         "key": "max_weight",
         "label": "单股权重上限",
         "type": "number",
-        "default": 0.10,
+        "default": C.MAX_WEIGHT_PER_NAME,
         "min": 0.01,
         "max": 1.0,
         "step": 0.01,
@@ -124,20 +126,20 @@ _SHARED: dict[str, dict] = {
         "key": "use_bb_timing",
         "label": "启用布林/RSI择时",
         "type": "bool",
-        "default": True,
+        "default": C.USE_BB_TIMING,
     },
     "order_price_mode": {
         "key": "order_price_mode",
         "label": "挂单价模型",
         "type": "select",
-        "default": "limit_bb",
+        "default": C.ORDER_PRICE_MODE,
         "options": ["limit_bb", "next_open"],
     },
     "min_notional": {
         "key": "min_notional",
         "label": "最小订单金额(元)",
         "type": "number",
-        "default": 30000,
+        "default": C.DAILY_MIN_NOTIONAL,
         "min": 0,
         "max": 1000000,
         "step": 1000,
@@ -146,7 +148,7 @@ _SHARED: dict[str, dict] = {
         "key": "use_dynamic_topk",
         "label": "启用动态TOPK",
         "type": "bool",
-        "default": False,
+        "default": C.USE_DYNAMIC_TOPK,
     },
     "dynamic_topk_ic_full": {
         "key": "dynamic_topk_ic_full",
@@ -188,7 +190,7 @@ _SHARED: dict[str, dict] = {
         "key": "use_beta_constraint",
         "label": "启用组合Beta约束",
         "type": "bool",
-        "default": False,
+        "default": C.USE_BETA_CONSTRAINT,
     },
     "max_portfolio_beta": {
         "key": "max_portfolio_beta",
@@ -203,7 +205,7 @@ _SHARED: dict[str, dict] = {
         "key": "n_seeds",
         "label": "模型 seed 数",
         "type": "number",
-        "default": 1,
+        "default": C.ENSEMBLE_N_SEEDS,
         "min": 1,
         "max": 5,
         "step": 1,
@@ -212,7 +214,7 @@ _SHARED: dict[str, dict] = {
         "key": "train_window",
         "label": "训练窗口(交易日)",
         "type": "number",
-        "default": 500,
+        "default": C.TRAIN_WINDOW,
         "min": 120,
         "max": 1500,
         "step": 30,
@@ -221,7 +223,7 @@ _SHARED: dict[str, dict] = {
         "key": "rebuild_days",
         "label": "全量重建周期(交易日)",
         "type": "number",
-        "default": 60,
+        "default": C.REBUILD_DAYS,
         "min": 10,
         "max": 250,
         "step": 10,
@@ -230,7 +232,7 @@ _SHARED: dict[str, dict] = {
         "key": "incr_trees",
         "label": "增量续训树数",
         "type": "number",
-        "default": 60,
+        "default": C.INCR_TREES,
         "min": 10,
         "max": 300,
         "step": 10,
@@ -239,7 +241,7 @@ _SHARED: dict[str, dict] = {
         "key": "ic_window",
         "label": "滚动IC定权窗口",
         "type": "number",
-        "default": 20,
+        "default": C.IC_WINDOW,
         "min": 5,
         "max": 120,
         "step": 5,
