@@ -299,7 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
 ap = build_parser()
 
 
-def main(argv=None) -> None:
+def _main(argv=None) -> None:
     # 库模块（src/data, src/live, src/ensemble 等）走标准 logging，入口统一配置
     logging.basicConfig(
         level=logging.INFO,
@@ -344,8 +344,11 @@ def main(argv=None) -> None:
             panel, args.account, max_cash_age_days=C.PREFLIGHT_MAX_CASH_AGE_DAYS
         )
         if failures:
+            from notify import send_alerts
+
             for reason in failures:
                 print(f"前置体检失败：{reason}")
+            send_alerts(failures, "夜间前置体检失败")
             raise SystemExit(3)
 
     n_label = int(panel[C.TARGET].notna().sum())
@@ -539,12 +542,26 @@ def main(argv=None) -> None:
     nav = nav_stats(args.risk_state, panel)  # 订单步骤已入账今日净值
     report = compute_report(model_store.load_champion_manifest(), ic_stats, nav, panel=panel)
     write_report(report)
+    if report["alerts"]:
+        from notify import send_alerts
+
+        send_alerts(report["alerts"], f"夜间跟踪告警 {pd.Timestamp(latest).date()}")
     append_daily_snapshot(
         latest, report["champion"].get("model_id") or "-", action, n_today, ic_stats, nav
     )
     print_summary(report)
 
     print("\n提醒：信号基于当日收盘特征，请于【次日】执行；prediction 仅用于排序选股，非涨幅预测。")
+
+
+def main(argv=None) -> None:
+    try:
+        _main(argv)
+    except Exception as exc:
+        from notify import send_alerts
+
+        send_alerts([f"{type(exc).__name__}: {exc}"], "夜间任务异常退出")
+        raise
 
 
 if __name__ == "__main__":
