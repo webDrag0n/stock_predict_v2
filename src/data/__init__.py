@@ -353,14 +353,14 @@ def _filter_tradable_universe(raw: pd.DataFrame, verbose: bool = True) -> pd.Dat
     if "volume" in df.columns:
         df = df[df["volume"] > 0]
 
-    # Liquidity floor: 20-day median amount (万元) per symbol.
+    # Liquidity floor: 20-day median amount (千元 × 0.1 → 万元) per symbol.
     min_amount = float(getattr(C, "MIN_AMOUNT_WAN", 2000))
     if "amount" in df.columns and min_amount > 0:
         df = df.sort_values(["symbol", "date"]).reset_index(drop=True)
         df["_amt_med20"] = df.groupby("symbol", group_keys=False)["amount"].transform(
             lambda x: x.rolling(20, min_periods=10).median()
         )
-        df = df[df["_amt_med20"] >= min_amount]
+        df = df[df["_amt_med20"] * 0.1 >= min_amount]
         df = df.drop(columns=["_amt_med20"])
 
     if verbose:
@@ -765,7 +765,7 @@ def load_data(
     # feature set; otherwise turning factor families on/off returns a stale cache.
     sig = hashlib.md5(
         f"{source}|{index_code}|{sorted(symbols)}|{start_date}|{end_date}|"
-        f"{C.FORWARD_WINDOW}|{C.MARKET_NEUTRAL_TARGET}|"
+        f"{C.FORWARD_WINDOW}|{C.MARKET_NEUTRAL_TARGET}|amount-unit-v2|"
         f"{C.N_FEATURES}|"
         f"{C.USE_TECHNICAL_FEATURES}|{C.USE_ORTHOGONAL_FACTORS}|"
         f"{C.USE_ALPHA158_FACTORS}|{C.USE_GTJA191_FACTORS}|{C.GTJA191_ALPHA_SUBSET}|"
@@ -965,7 +965,7 @@ def _factor_panel_signature(source: str, index_code: str, whole_market: bool) ->
     n_win, keep_span = _panel_cache_windows()
     return hashlib.md5(
         (
-            f"panel-v1|{source}|{index_code}|{whole_market}|"
+            f"panel-v1|amount-unit-v2|{source}|{index_code}|{whole_market}|"
             f"{C.FORWARD_WINDOW}|{C.MARKET_NEUTRAL_TARGET}|"
             f"{C.USE_TECHNICAL_FEATURES}|{C.USE_ORTHOGONAL_FACTORS}|"
             f"{C.USE_ALPHA158_FACTORS}|{C.USE_GTJA191_FACTORS}|{C.GTJA191_ALPHA_SUBSET}|"

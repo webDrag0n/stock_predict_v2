@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 
+import pandas as pd
 import pytest
 
 import config as C
@@ -77,3 +78,24 @@ def test_tracking_report_passes_manifest_training_metadata():
     report = compute_report(manifest, {}, {"has_nav": False}, panel=None)
     assert report["champion"]["trained_at"] == manifest["trained_at"]
     assert report["champion"]["label_maturity_gap_days"] == 40
+
+
+def test_amount_filter_converts_thousand_yuan_to_wan():
+    from data import _filter_tradable_universe
+
+    dates = pd.bdate_range("2026-01-01", periods=20)
+    rows = []
+    for symbol, amount in (("600000.SH", 2500.0), ("600001.SH", 25000.0)):
+        for date in dates:
+            rows.append(
+                {
+                    "date": date,
+                    "symbol": symbol,
+                    "close": 10.0,
+                    "volume": 1000.0,
+                    "amount": amount,
+                }
+            )
+    panel = pd.DataFrame(rows)
+    filtered = _filter_tradable_universe(panel, verbose=False)
+    assert set(filtered["symbol"]) == {"600001.SH"}
