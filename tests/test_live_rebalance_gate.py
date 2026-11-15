@@ -198,6 +198,7 @@ def test_cli_records_only_nonempty_rebalance(monkeypatch, tmp_path):
         "--min-notional",
         "1000",
         "--no-gate",
+        "--skip-preflight",
     ]
     rebal_path = rebalance_state_path_for(risk_path)
     out_csv = out_dir / f"orders_{pd.Timestamp(latest).strftime('%Y%m%d')}.csv"

@@ -539,6 +539,10 @@ DAILY_MIN_NOTIONAL = float(os.environ.get("DAILY_MIN_NOTIONAL", "30000"))
 # between cost (lower = better) and signal freshness (higher = staler).
 REBALANCE_EVERY = int(os.environ.get("REBALANCE_EVERY", "10"))
 
+USE_PREFLIGHT = os.environ.get("USE_PREFLIGHT", "1") == "1"
+PREFLIGHT_MIN_COVERAGE = float(os.environ.get("PREFLIGHT_MIN_COVERAGE", "0.9"))
+PREFLIGHT_MAX_CASH_AGE_DAYS = int(os.environ.get("PREFLIGHT_MAX_CASH_AGE_DAYS", "4"))
+
 # Risk-control layer (daily engine). The attention predictor's bare book ran beta
 # 1.6 / max-drawdown ~80% (2026-06-30): it concentrates in high-beta small-caps and
 # blew up in the 2024 micro-cap crash. This layer scales the day's effective gross

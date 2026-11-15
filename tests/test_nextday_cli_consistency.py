@@ -145,6 +145,7 @@ def test_nextday_session_matches_cli():
                     "1000",
                     "--price-col",
                     "adj_close",
+                    "--skip-preflight",
                 ]
                 pt.main()
             finally:

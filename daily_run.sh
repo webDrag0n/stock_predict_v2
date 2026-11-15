@@ -74,12 +74,21 @@ fi
 
 # --- 1) 生成明日订单 ---------------------------------------------------------
 echo "== $(date '+%F %T') 生成明日订单（日志 $LOG）=="
+set +e
 uv run python predict_tomorrow.py \
     --capital "$CAPITAL" \
     --max-positions "$MAX_POS" \
     --max-weight "$MAX_WEIGHT" \
     --min-notional "$MIN_NOTIONAL" \
     2>&1 | tee -a "$LOG"
+rc=${PIPESTATUS[0]}
+set -e
+if [ "$rc" -eq 3 ]; then
+    echo "前置体检未通过，今晚不出单（详见日志）" | tee -a "$LOG"
+    exit 3
+elif [ "$rc" -ne 0 ]; then
+    exit "$rc"
+fi
 
 echo
 echo "== 完成。明日开盘前查看 outputs/ 下最新的 orders_*.csv 执行订单；"

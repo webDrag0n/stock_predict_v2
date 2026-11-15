@@ -264,6 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--force-retrain", action="store_true", help="无视触发指标，强制今晚重训并走门控"
     )
     ap.add_argument("--force-rebalance", action="store_true", help="无视调仓间隔，强制今晚完整调仓")
+    ap.add_argument("--skip-preflight", action="store_true", help="跳过出单前数据与账户体检")
     ap.add_argument(
         "--tracking-report",
         action="store_true",
@@ -315,6 +316,17 @@ def main(argv=None) -> None:
         eval_days=args.eval_days,
         loader=load_factor_panel,
     )
+    if C.USE_PREFLIGHT and not args.skip_preflight:
+        from preflight import run_preflight
+
+        failures = run_preflight(
+            panel, args.account, max_cash_age_days=C.PREFLIGHT_MAX_CASH_AGE_DAYS
+        )
+        if failures:
+            for reason in failures:
+                print(f"前置体检失败：{reason}")
+            raise SystemExit(3)
+
     n_label = int(panel[C.TARGET].notna().sum())
     latest = panel["date"].max()
     print(
