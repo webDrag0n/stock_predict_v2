@@ -1020,7 +1020,7 @@ def _contrib_block(fid: str) -> html.Div:
             dbc.Alert(
                 [
                     "champion 中无该因子的贡献记录（champion 不存在、未入库，"
-                    "或该因子不在模型特征集）。契约产物：models/champion/ensemble_state.pkl。",
+                    "或该因子不在模型特征集）。契约产物：models/champion/ensemble_state.json。",
                 ],
                 color="secondary",
             )

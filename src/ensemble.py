@@ -554,9 +554,10 @@ class IncrementalEnsemble:
 
     # ------------------------------------------------------------- serialize
     def state_dict(self) -> dict:
-        """可 pickle 的完整状态快照（模型工件 + 定权状态 + 超参）。
+        """可序列化的完整状态快照（模型工件 + 定权状态 + 超参）。
 
-        供 model_store 落盘 champion/staging。GBM booster 存 model_to_string()
+        供 model_store 以 JSON 落盘 champion/staging（旧 pickle 兼容读取）。
+        GBM booster 存 model_to_string()
         文本（LightGBM 最稳的跨进程序列化）；attn 腿经 torch.save 存 bytes。
         不存 _pred_hist（原始预测逐日累积、体积大，实盘路径本就从 pred_hist
         parquet 重建 observe），但保留 _ic_hist/_scored_dates/weights 使

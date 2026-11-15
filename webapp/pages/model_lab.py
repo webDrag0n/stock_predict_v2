@@ -1233,7 +1233,7 @@ def _do_promote(mid: str) -> tuple[bool, str]:
     """人工晋升 staging 候选为 champion（webapp 进程内直接 import src/model_store）。
 
     run_webapp.py 已把 src/ 注入 sys.path，与 predict_tomorrow.py --promote 同路径；
-    候选缺工件（ensemble_state.pkl）等异常按失败返回，不崩回调。
+    候选缺工件（ensemble_state.json）等异常按失败返回，不崩回调。
     """
     if not scheduler.valid_sid(mid):
         return False, f"非法 model_id: {mid!r}"

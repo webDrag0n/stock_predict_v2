@@ -121,6 +121,27 @@ def test_load_champion_contrib_roundtrip(tmp_path):
     }
 
 
+def test_load_champion_contrib_json_roundtrip(tmp_path):
+    import model_store
+
+    champ = tmp_path / "champion"
+    champ.mkdir()
+    (champ / "manifest.json").write_text(
+        json.dumps({"config_snapshot": {"feat_cols": ["mom_20"]}, "train_end_date": "2026-10-21"}),
+        encoding="utf-8",
+    )
+    (champ / "ensemble_state.json").write_text(
+        json.dumps(model_store._encode_state(_fake_state())), encoding="utf-8"
+    )
+
+    df = factor_contrib.load_champion_contrib(str(tmp_path))
+    assert not df.empty
+    assert factor_contrib.champion_leg_weights(str(tmp_path)) == {
+        "ic_linear": 0.6,
+        "gbm_l2": 0.4,
+    }
+
+
 def test_load_champion_contrib_missing_and_corrupt(tmp_path):
     # champion 不存在 → 空表
     assert factor_contrib.load_champion_contrib(str(tmp_path)).empty

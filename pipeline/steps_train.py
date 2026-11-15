@@ -5,7 +5,7 @@
 与 nextday 模式的差异：不生成订单、不跑自适应触发判定；候选训练
 （live.train_candidate_ensemble，与实盘门控同一训练段）后调
 model_gate.stage_and_evaluate(auto_promote=False) —— 候选只落盘
-models/staging/<model_id>/（manifest.json + ensemble_state.pkl +
+models/staging/<model_id>/（manifest.json + ensemble_state.json +
 evaluation.json），**绝不自动晋升、绝不改动 champion**；晋升交给 webapp
 模型实验室的人工操作（model_store.promote）。
 

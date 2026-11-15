@@ -4,9 +4,10 @@
 【配置快照 + 该配置训出的最新工件 + 晋升记录】：
 
   models/
-    champion/            当前生产模型：manifest.json + ensemble_state.pkl
-    staging/<model_id>/  候选留档：manifest.json + ensemble_state.pkl + evaluation.json
+    champion/            当前生产模型：manifest.json + ensemble_state.json
+    staging/<model_id>/  候选留档：manifest.json + ensemble_state.json + evaluation.json
     archive/<model_id>/  退役冠军（保留最近 C.ARCHIVE_KEEP 个）
+  旧 ensemble_state.pkl 仅作只读回退；新工件一律写 JSON，不删除历史 pickle。
 
 model_id = 日期+配置指纹（如 20261001_ab12cd34）。指纹（fingerprint_of）覆盖
 会改变分数的一切（特征列/前瞻窗/ensemble 腿与训练超参），与 backtest_daily
@@ -19,18 +20,25 @@ score_cache 指纹同一函数（单一来源）；指纹相同 = 同一模型�
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import logging
 import os
 import pickle
 import shutil
 from datetime import datetime
 
+import numpy as np
+
 import config as C
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
 _STATE_FILE = "ensemble_state.pkl"
+_STATE_JSON = "ensemble_state.json"
 _MANIFEST_FILE = "manifest.json"
 _EVAL_FILE = "evaluation.json"
 
@@ -139,13 +147,62 @@ def _read_manifest(model_dir: str) -> dict:
         return json.load(f)
 
 
+def _encode_state(value):
+    if isinstance(value, dict):
+        return {str(key): _encode_state(item) for key, item in value.items()}
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, np.datetime64):
+        return np.datetime_as_string(value)
+    if isinstance(value, np.generic):
+        return _encode_state(value.item())
+    if isinstance(value, np.ndarray):
+        return [_encode_state(item) for item in value.tolist()]
+    if isinstance(value, (set, frozenset)):
+        return sorted(str(item) for item in value)
+    if isinstance(value, (list, tuple)):
+        return [_encode_state(item) for item in value]
+    if isinstance(value, datetime) or hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
+def _decode_state(value):
+    if isinstance(value, dict):
+        decoded = {key: _decode_state(item) for key, item in value.items()}
+        if isinstance(decoded.get("attn"), str):
+            decoded["attn"] = base64.b64decode(decoded["attn"].encode("ascii"))
+        for key in ("last_trained_date", "linear_fit_date"):
+            if decoded.get(key) is not None:
+                decoded[key] = np.datetime64(decoded[key])
+        if "scored_dates" in decoded:
+            decoded["scored_dates"] = {np.datetime64(str(item)) for item in decoded["scored_dates"]}
+        return decoded
+    if isinstance(value, list):
+        return [_decode_state(item) for item in value]
+    return value
+
+
 def save_ensemble(ens, model_dir: str, manifest: dict) -> None:
-    """把 ensemble state_dict + manifest 落盘到 model_dir（不存在则创建）。"""
+    """把 ensemble state_dict 以 JSON 文本 + manifest 落盘到 model_dir。"""
     os.makedirs(model_dir, exist_ok=True)
     manifest = dict(manifest)
     manifest["schema_version"] = SCHEMA_VERSION
-    _atomic_write_bytes(os.path.join(model_dir, _STATE_FILE), pickle.dumps(ens.state_dict()))
+    payload = json.dumps(
+        _encode_state(ens.state_dict()), ensure_ascii=False, indent=2, allow_nan=True
+    ).encode("utf-8")
+    _atomic_write_bytes(os.path.join(model_dir, _STATE_JSON), payload)
     _write_manifest(model_dir, manifest)
+
+
+def load_state_dict(model_dir: str) -> dict:
+    json_path = os.path.join(model_dir, _STATE_JSON)
+    if os.path.exists(json_path):
+        with open(json_path, encoding="utf-8") as f:
+            return _decode_state(json.load(f))
+    with open(os.path.join(model_dir, _STATE_FILE), "rb") as f:
+        logger.warning("%s 使用旧格式（pickle），下次保存将迁移为 JSON", model_dir)
+        return pickle.load(f)
 
 
 def load_ensemble(model_dir: str):
@@ -153,8 +210,7 @@ def load_ensemble(model_dir: str):
     from ensemble import IncrementalEnsemble
 
     manifest = _read_manifest(model_dir)
-    with open(os.path.join(model_dir, _STATE_FILE), "rb") as f:
-        state = pickle.load(f)
+    state = load_state_dict(model_dir)
     feat_cols = (manifest.get("config_snapshot") or {}).get("feat_cols") or []
     return IncrementalEnsemble.from_state_dict(state, feat_cols), manifest
 
@@ -297,7 +353,9 @@ def promote(staging_id: str, promotion_record: dict | None = None) -> dict:
 def save_ensemble_from_dir(src_dir: str, dst_dir: str, manifest: dict) -> None:
     """目录级复制晋升：工件 + manifest 从 src 复制到 dst（src 保留作留档）。"""
     os.makedirs(dst_dir, exist_ok=True)
-    shutil.copy2(os.path.join(src_dir, _STATE_FILE), os.path.join(dst_dir, _STATE_FILE))
+    for name in os.listdir(src_dir):
+        if name.endswith(".json") or name == _STATE_FILE:
+            shutil.copy2(os.path.join(src_dir, name), os.path.join(dst_dir, name))
     manifest = dict(manifest)
     manifest["schema_version"] = SCHEMA_VERSION
     _write_manifest(dst_dir, manifest)

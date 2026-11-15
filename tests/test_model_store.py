@@ -9,6 +9,8 @@ PYTHONPATH=src:. uv run python tests/test_model_store.py
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import pickle
 
@@ -122,7 +124,8 @@ def test_stage_promote_load_champion(model_dir):
 
     sdir, manifest = model_store.stage_candidate(ens, FEATS, PARAMS)
     assert os.path.exists(os.path.join(sdir, "manifest.json"))
-    assert os.path.exists(os.path.join(sdir, "ensemble_state.pkl"))
+    assert os.path.exists(os.path.join(sdir, "ensemble_state.json"))
+    assert not os.path.exists(os.path.join(sdir, "ensemble_state.pkl"))
     assert manifest["fingerprint"] == model_store.fingerprint_of(FEATS, PARAMS)
     assert manifest["trained_at"]
     assert manifest["label_maturity_gap_days"] == C.FORWARD_WINDOW + C.EMBARGO_DAYS
@@ -192,6 +195,58 @@ def test_archive_prune_keeps_latest(model_dir, monkeypatch):
     archived = os.listdir(model_store.archive_root())
     assert len(archived) <= 1
     assert model_store.load_champion()[1]["model_id"] == last_id
+
+
+def test_json_roundtrip_and_json_wins_over_pickle(model_dir):
+    frame = _make_frame()
+    ens = _trained_ens(frame)
+    ens._scored_dates = {np.datetime64("2026-05-01")}
+    test = frame[frame["date"] == frame["date"].max()]
+    expected = ens.predict(test)
+    sdir, manifest = model_store.stage_candidate(ens, FEATS, PARAMS)
+
+    json_path = os.path.join(sdir, "ensemble_state.json")
+    with open(json_path, encoding="utf-8") as f:
+        encoded = json.load(f)
+    assert isinstance(encoded["last_trained_date"], str)
+    assert isinstance(encoded["scored_dates"], list)
+    with open(os.path.join(sdir, "ensemble_state.pkl"), "wb") as f:
+        f.write(b"not a valid pickle")
+
+    loaded, _ = model_store.load_ensemble(sdir)
+    actual = loaded.predict(test)
+    for model in expected:
+        np.testing.assert_array_equal(actual[model], expected[model])
+    assert loaded.weights == ens.weights
+    assert {m: list(h) for m, h in loaded._ic_hist.items()} == {
+        m: list(h) for m, h in ens._ic_hist.items()
+    }
+    assert loaded._scored_dates == ens._scored_dates
+    assert isinstance(loaded._last_trained_date, np.datetime64)
+    assert isinstance(loaded._linear_fit_date, np.datetime64)
+
+
+def test_legacy_pickle_only_directory_still_loads(tmp_path, caplog):
+    frame = _make_frame()
+    ens = _trained_ens(frame)
+    directory = tmp_path / "legacy"
+    directory.mkdir()
+    (directory / "manifest.json").write_text(
+        json.dumps({"config_snapshot": {"feat_cols": FEATS}}), encoding="utf-8"
+    )
+    with open(directory / "ensemble_state.pkl", "wb") as f:
+        pickle.dump(ens.state_dict(), f)
+
+    with caplog.at_level(logging.WARNING, logger="model_store"):
+        loaded, _ = model_store.load_ensemble(str(directory))
+    assert loaded.weights == ens.weights
+    assert "旧格式" in caplog.text
+
+
+def test_attention_bytes_are_base64_text():
+    encoded = model_store._encode_state({"attn": b"\x00\xff"})
+    assert isinstance(encoded["attn"], str)
+    assert model_store._decode_state(encoded)["attn"] == b"\x00\xff"
 
 
 if __name__ == "__main__":

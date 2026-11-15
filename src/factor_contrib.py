@@ -5,8 +5,9 @@ champion 内逐因子权重/重要性 → 「因子 → 模型内贡献」长表
 
 数据源
 ------
-· ``models/champion/ensemble_state.pkl`` —— ``IncrementalEnsemble.state_dict()``
-  的快照（结构见 src/ensemble.py）：各腿滚动 IC 权重（``weights``）、ic_linear
+· ``models/champion/ensemble_state.json`` —— ``IncrementalEnsemble.state_dict()``
+  的文本快照（旧 ``ensemble_state.pkl`` 保留只读回退；结构见 src/ensemble.py）：
+  各腿滚动 IC 权重（``weights``）、ic_linear
   腿的训练段 IC 权重（``linear_state``: feats + weights）、GBM 腿的 booster
   文本（``model_to_string``，可还原 gain 重要性）。
 · ``models/champion/manifest.json`` —— ``config_snapshot.feat_cols`` 提供特征列
@@ -32,11 +33,12 @@ from __future__ import annotations
 import glob
 import json
 import os
-import pickle
 import re
 
 import numpy as np
 import pandas as pd
+
+import model_store
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -93,7 +95,7 @@ def _gbm_importance_rows(
 def contrib_from_state(state: dict, feat_cols: list[str] | None = None, asof=None) -> pd.DataFrame:
     """从 ``IncrementalEnsemble.state_dict()`` 快照提取因子贡献长表。
 
-    不依赖 ensemble 类本身（state_dict 是纯 dict，pickle.load 即可），
+    不依赖 ensemble 类本身（state_dict 是纯 dict，由 model_store 统一读取），
     也不重建 booster 对象树（逐条 model_to_string 解析，坏的跳过）。
     """
     if not isinstance(state, dict):
@@ -163,13 +165,9 @@ def _default_models_dir() -> str:
 
 def champion_leg_weights(models_dir: str | None = None) -> dict:
     """champion 各腿当前滚动 IC 权重（state["weights"]）；无 champion → {}。"""
-    d = os.path.join(models_dir or _default_models_dir(), "champion")
-    spath = os.path.join(d, "ensemble_state.pkl")
-    if not os.path.exists(spath):
-        return {}
+    directory = os.path.join(models_dir or _default_models_dir(), "champion")
     try:
-        with open(spath, "rb") as f:
-            state = pickle.load(f)
+        state = model_store.load_state_dict(directory)
         return {str(m): float(w) for m, w in (state.get("weights") or {}).items()}
     except Exception:
         return {}
@@ -177,16 +175,19 @@ def champion_leg_weights(models_dir: str | None = None) -> dict:
 
 def load_champion_contrib(models_dir: str | None = None) -> pd.DataFrame:
     """读取 models/champion 的因子贡献长表；缺失/损坏/无信息 → 空表。"""
-    d = os.path.join(models_dir or _default_models_dir(), "champion")
-    mpath = os.path.join(d, "manifest.json")
-    spath = os.path.join(d, "ensemble_state.pkl")
-    if not (os.path.isdir(d) and os.path.exists(mpath) and os.path.exists(spath)):
+    directory = os.path.join(models_dir or _default_models_dir(), "champion")
+    manifest_path = os.path.join(directory, "manifest.json")
+    json_path = os.path.join(directory, "ensemble_state.json")
+    pickle_path = os.path.join(directory, "ensemble_state.pkl")
+    state_path = json_path if os.path.exists(json_path) else pickle_path
+    if not (
+        os.path.isdir(directory) and os.path.exists(manifest_path) and os.path.exists(state_path)
+    ):
         return _empty()
     try:
-        with open(mpath, "r", encoding="utf-8") as f:
+        with open(manifest_path, encoding="utf-8") as f:
             manifest = json.load(f)
-        with open(spath, "rb") as f:
-            state = pickle.load(f)
+        state = model_store.load_state_dict(directory)
     except Exception:
         return _empty()
     feat_cols = (manifest.get("config_snapshot") or {}).get("feat_cols") or []
@@ -197,7 +198,7 @@ def load_champion_contrib(models_dir: str | None = None) -> pd.DataFrame:
     if df["asof"].isna().all():
         import datetime as _dt
 
-        df["asof"] = _dt.datetime.fromtimestamp(os.path.getmtime(spath)).strftime("%Y-%m-%d")
+        df["asof"] = _dt.datetime.fromtimestamp(os.path.getmtime(state_path)).strftime("%Y-%m-%d")
     return df
 
 
