@@ -5,6 +5,7 @@
   python run_walkforward.py                 # 全特征滚动回测
   python run_walkforward.py --select-features  # 每窗口在训练段内做因子筛选
   python run_walkforward.py --compare       # 两者对比
+  python run_walkforward.py --engine incremental  # 线上同款逐日增量集成
 
 对比上一轮单次 60 天窗口（Sharpe 14.5，疑似窗口运气 + 因子选择泄露），本脚本
 拼接多个不重叠样本外窗口，得到跨 1~2 年的连续 OOS 净值与各窗口指标分布。
@@ -92,6 +93,7 @@ def main() -> None:
     )
     ap.add_argument("--compare", action="store_true", help="对比 全特征 vs 窗口内因子选择")
     ap.add_argument("--strategy", default="long_topk")
+    ap.add_argument("--engine", choices=["windowed", "incremental"], default="windowed")
     args = ap.parse_args()
 
     os.makedirs(C.OUTPUT_DIR, exist_ok=True)
@@ -114,7 +116,9 @@ def main() -> None:
     results = {}
     for tag, sel in runs:
         print(f"--- 运行: {tag} ---")
-        res = run_walkforward(panel, factors, select_features=sel, strategy=args.strategy)
+        res = run_walkforward(
+            panel, factors, select_features=sel, strategy=args.strategy, engine=args.engine
+        )
         results[tag] = res
         _summarize(tag, res)
         # canonical 产物由 run_walkforward 内部 save_walkforward_result 落盘

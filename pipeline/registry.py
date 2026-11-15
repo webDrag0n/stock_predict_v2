@@ -261,6 +261,13 @@ PARAM_SCHEMA = {
         _sp("capital", label="初始资金(元)", hint="仅用于净值图的金额口径"),
         _sp("train_window"),
         {
+            "key": "engine",
+            "label": "训练引擎",
+            "type": "select",
+            "default": "windowed",
+            "options": ["windowed", "incremental"],
+        },
+        {
             "key": "test_window",
             "label": "测试窗口(交易日)",
             "type": "number",

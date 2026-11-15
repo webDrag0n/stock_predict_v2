@@ -9,9 +9,10 @@
 
 回测口径：唯一回测引擎是每日重放 run_daily_replay（backtest_daily.py，与实盘
 共用 trading.py 的决策/撮合：次日开盘成交、T+1、整手、涨跌停、参与率上限、
-五层风控）。每个窗口的 OOS 预测打包成 score_cache（带配方指纹）喂给重放引擎，
-窗口内不再重训模型；窗口指标（Sharpe/PnL/MaxDD/hit）从逐笔撮合的每日账户
-序列计算，比旧的周期调仓向量化近似更接近可成交结果。
+五层风控）。默认 windowed 模式把每个窗口的 OOS 预测打包成 score_cache（带配方
+指纹）喂给重放引擎，窗口内不再重训模型；incremental 模式在相同 OOS 边界只调用
+一次逐日重放，由线上同款 IncrementalEnsemble 逐日续训并收集分数。窗口指标
+（Sharpe/PnL/MaxDD/hit）从逐笔撮合的每日账户序列计算。
 
 直接在「命名因子面板」(load_factor_panel，需 keep_trade_cols=True 以携带
 OHLC/撮合列) 上操作，模型用命名因子列训练，避免 feature_NN 映射，保证窗口内
@@ -34,7 +35,7 @@ import lightgbm as lgb
 import config as C
 from factor_eval import select_passing_factors, daily_rank_ic
 from model_store import fingerprint_of
-from perf_metrics import daily_replay_metrics
+from perf_metrics import compute_performance, daily_replay_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,14 @@ def _pred_ic(frame: pd.DataFrame) -> tuple[float, float]:
         return float("nan"), float("nan")
     icir = float(ic.mean() / ic.std()) if ic.std() > 1e-12 else float("nan")
     return float(ic.mean()), icir
+
+
+def _add_performance_metrics(
+    metrics: dict, daily: pd.DataFrame, panel: pd.DataFrame, initial_cash: float
+) -> None:
+    performance = compute_performance(daily, panel, initial_cash, lags=C.REBALANCE_DAYS)
+    metrics["nw_t"] = performance["t_nw"]
+    metrics["alpha_ann"] = performance["alpha_ann"]
 
 
 def _combine_seeds(preds: list[np.ndarray], dates: np.ndarray) -> np.ndarray:
@@ -866,6 +875,8 @@ def save_walkforward_result(res: dict, outdir: str | None = None) -> str:
     meta = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "metrics": res["oos_result"]["metrics"],
+        "nw_t": res["oos_result"]["metrics"].get("nw_t"),
+        "alpha_ann": res["oos_result"]["metrics"].get("alpha_ann"),
         "n_windows": res.get("n_windows"),
         "select_features": res.get("select_features"),
         "sharpe_pos_ratio": sharpe_pos_ratio,
@@ -878,6 +889,7 @@ def save_walkforward_result(res: dict, outdir: str | None = None) -> str:
             "forward_window": C.FORWARD_WINDOW,
             "model_objective": C.MODEL_OBJECTIVE,
             "strategy": res.get("strategy") or "long_topk",
+            "engine": res.get("engine", "windowed"),
             "initial_capital": C.INITIAL_CAPITAL,
             "universe_mode": C.UNIVERSE_MODE,
             "universe_size": C.UNIVERSE_SIZE,
@@ -904,6 +916,7 @@ def run_walkforward(
     replay_params: dict | None = None,
     save: bool = True,
     progress_cb=None,
+    engine: str = "windowed",
 ) -> dict:
     """滚动回测。返回拼接后的 OOS 结果与各窗口指标分布。
 
@@ -914,6 +927,8 @@ def run_walkforward(
     strategy: 已废弃——唯一回测引擎 run_daily_replay 固定走 decide_orders 的
               A股长多口径（无做空/整手/T+1）；保留形参仅为调用方兼容。
     replay_params: 透传给 run_daily_replay 的决策/撮合参数覆盖（通常不用动）。
+    engine: "windowed" 保持逐窗口训练；"incremental" 在相同 OOS 区间只调用
+            一次 run_daily_replay，由线上同款 IncrementalEnsemble 逐日续训。
     save: True 则跑完后调用 save_walkforward_result 落盘 canonical 目录
           outputs/walkforward/（CLI 默认；webapp 会话传 False，由 wf_run 在
           会话 artifacts 之后显式落盘，避免双写）。
@@ -924,6 +939,10 @@ def run_walkforward(
           / "final_replay"（尾部拼接整体重放）。None 时零开销；回调异常一律
           吞掉——进度永远不能影响主流程。
     """
+    if engine not in {"windowed", "incremental"}:
+        raise ValueError(f"未知 walk-forward engine: {engine!r}")
+    if engine == "incremental" and select_features:
+        raise ValueError("incremental 模式使用线上完整特征集，不支持逐窗口 select_features")
     if strategy != "long_topk":
         warnings.warn(
             f"strategy={strategy!r} 已失效：每日重放引擎（唯一回测口径）为 A股长多"
@@ -970,6 +989,127 @@ def run_walkforward(
         assert embargo >= max(
             C.MULTI_HORIZON_WINDOWS
         ), f"multi 目标要求 EMBARGO_DAYS >= {max(C.MULTI_HORIZON_WINDOWS)}"
+
+    if engine == "incremental":
+        t0 = time.time()
+        n_windows = max((n_dates - train_w - embargo - test_w) // step + 1, 0)
+        if n_windows <= 0:
+            raise ValueError("数据不足以构成任何滚动窗口，请减小 TRAIN_WINDOW/TEST_WINDOW")
+        first_i = train_w + embargo
+        last_start_i = first_i + (n_windows - 1) * step
+        last_i = last_start_i + test_w - 1
+        first_te_start, last_te_end = dates[first_i], dates[last_i]
+        rp = dict(replay_params or {})
+        rp.pop("score_cache", None)
+        rp["collect_scores"] = True
+        rp["warmup_days"] = train_w
+        if progress_cb is not None:
+            try:
+                progress_cb(
+                    phase="final_replay",
+                    current=0,
+                    total=1,
+                    message=f"增量集成 OOS 重放 {n_windows} 个窗口",
+                )
+            except Exception:
+                pass
+
+        from backtest_daily import run_daily_replay
+
+        replay = run_daily_replay(
+            panel,
+            all_factor_cols,
+            params=rp,
+            start_date=first_te_start,
+            end_date=last_te_end,
+            progress=False,
+        )
+        daily = replay["daily"]
+        cash0 = replay["meta"]["initial_cash"]
+        score_cache = replay["score_cache"]
+        keep = [
+            c
+            for c in ("date", "symbol", "return_1d", "pct_chg", "amount", C.TARGET)
+            if c in panel.columns
+        ]
+        cache_dates = list(score_cache)
+        oos = panel.loc[panel["date"].isin(cache_dates), keep].copy()
+        oos["prediction"] = [
+            score_cache[np.datetime64(d)][s]
+            for d, s in zip(oos["date"].to_numpy(), oos["symbol"].to_numpy())
+        ]
+        keep.append("prediction")
+        oos = oos[keep]
+
+        oos_metrics = daily_replay_metrics(daily, cash0)
+        ic_mean, icir = _pred_ic(oos)
+        oos_metrics["pred_ic"] = ic_mean
+        oos_metrics["pred_icir"] = icir
+        oos_metrics["mean_price_rmse"] = float("nan")
+        _add_performance_metrics(oos_metrics, daily, panel, cash0)
+
+        window_metrics = []
+        for win_id in range(n_windows):
+            te_lo_i = first_i + win_id * step
+            te_dates = dates[te_lo_i : te_lo_i + test_w]
+            w_daily = daily.iloc[win_id * test_w : (win_id + 1) * test_w]
+            m = daily_replay_metrics(w_daily, cash0)
+            pred_ic, _ = _pred_ic(oos[oos["date"].isin(te_dates)])
+            window_metrics.append(
+                {
+                    "window": win_id,
+                    "train": "incremental",
+                    "test": (
+                        f"{pd.Timestamp(te_dates[0]).date()}~"
+                        f"{pd.Timestamp(te_dates[-1]).date()}"
+                    ),
+                    "n_feat": len(all_factor_cols),
+                    "PnL": m["total_pnl"],
+                    "Sharpe": m["sharpe"],
+                    "MaxDD": m["max_drawdown"],
+                    "hit": m["hit_rate"],
+                    "PriceRMSE": float("nan"),
+                    "PredIC": pred_ic,
+                }
+            )
+
+        wm_df = pd.DataFrame(window_metrics)
+        result = {
+            "oos_result": {
+                "curve": _curve_from_daily(daily, cash0),
+                "metrics": oos_metrics,
+                "daily": daily,
+                "trades": replay["trades"],
+            },
+            "window_metrics": wm_df,
+            "n_windows": n_windows,
+            "oos": oos,
+            "select_features": False,
+            "strategy": "long_topk",
+            **_window_pos_ratios(wm_df),
+            "engine": engine,
+        }
+        if progress_cb is not None:
+            try:
+                progress_cb(
+                    phase="final_replay",
+                    current=1,
+                    total=1,
+                    message="增量集成 OOS 重放完成",
+                    pred_ic=ic_mean,
+                )
+            except Exception:
+                pass
+        if verbose:
+            logger.info(
+                f"增量集成 OOS 重放完成（{_fmt_dur(time.time() - t0)}）："
+                f"Sharpe={oos_metrics['sharpe']:+.2f} PredIC={ic_mean:+.4f}"
+            )
+        if save:
+            outdir = save_walkforward_result(result)
+            if verbose:
+                logger.info(f"walkforward 结果 -> {outdir}")
+        return result
 
     oos_frames = []
     window_metrics = []
@@ -1137,6 +1277,7 @@ def run_walkforward(
     oos_metrics["pred_ic"] = ic_mean
     oos_metrics["pred_icir"] = icir
     oos_metrics["mean_price_rmse"] = float("nan")
+    _add_performance_metrics(oos_metrics, daily, panel, cash0)
     logger.info(
         f"拼接 OOS 重放完成（{_fmt_dur(time.time() - t_replay0)}）："
         f"Sharpe={oos_metrics['sharpe']:+.2f} PnL={oos_metrics['total_pnl']:+.4f} "

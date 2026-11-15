@@ -1,9 +1,9 @@
 """滚动 Walk-Forward 模式的流水线步骤（严格防泄露的样本外验证）。
 
-引擎是 src/walkforward.run_walkforward：每步用前 TRAIN_WINDOW 天训练、embargo
-后预测 TEST_WINDOW 天，拼接成一条连续 OOS 净值。train_window/test_window/
-wf_step 经 PARAM_ENV 在子进程启动前写入环境变量 → config 读取；select_features/
-strategy/capital 由步骤函数从 ctx.params 直接读取。
+引擎是 src/walkforward.run_walkforward：windowed 每窗口训练，incremental 在相同
+OOS 区间逐日续训，均拼接成一条连续 OOS 净值。train_window/test_window/wf_step
+经 PARAM_ENV 在子进程启动前写入环境变量 → config 读取；select_features/strategy/
+capital/engine 由步骤函数从 ctx.params 直接读取。
 
 顺序：wf_data_import → wf_run → wf_report
 
@@ -134,6 +134,7 @@ def wf_run(ctx: ctxmod.StepContext) -> dict:
     p = ctx.params
     select_features = bool(p.get("select_features", False))
     strategy = str(p.get("strategy") or "long_topk")
+    engine = str(p.get("engine") or "windowed")
 
     # 把 progress 回调从 ctx 注入 run_walkforward
     # （cb(phase, current, total, **extras) 与 run_daily_replay 的约定一致）
@@ -145,7 +146,7 @@ def wf_run(ctx: ctxmod.StepContext) -> dict:
         0,
         1,
         f"train={C.TRAIN_WINDOW} test={C.TEST_WINDOW} "
-        f"step={C.WF_STEP} strategy={strategy} "
+        f"step={C.WF_STEP} strategy={strategy} engine={engine} "
         f"select_features={select_features}",
     )
     res = run_walkforward(
@@ -156,6 +157,7 @@ def wf_run(ctx: ctxmod.StepContext) -> dict:
         verbose=True,
         save=False,  # canonical 落盘在会话 artifacts 之后显式调用，避免双写
         progress_cb=_cb,
+        engine=engine,
     )
     ctx.shared["wf"] = res
     ctx.report_progress("滚动回测完成", 1, 1, n_windows=res["n_windows"])
