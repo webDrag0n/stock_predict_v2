@@ -31,8 +31,10 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
+from scipy.stats import kurtosis, skew
 
 import config as C
+from experiment_log import count_trials, deflated_sharpe, log_trial
 from factor_eval import select_passing_factors, daily_rank_ic
 from model_store import fingerprint_of
 from perf_metrics import compute_performance, daily_replay_metrics
@@ -175,6 +177,36 @@ def _add_performance_metrics(
     performance = compute_performance(daily, panel, initial_cash, lags=C.REBALANCE_DAYS)
     metrics["nw_t"] = performance["t_nw"]
     metrics["alpha_ann"] = performance["alpha_ann"]
+
+
+def _holdout_summary(
+    daily: pd.DataFrame, oos: pd.DataFrame, initial_cash: float, holdout_start: str
+) -> tuple[dict, dict]:
+    """按决策日划分报告段；holdout 只用于最终报告，不参与训练或自动选型。"""
+    date_col = "decision_date" if "decision_date" in daily.columns else "date"
+    decision_dates = pd.to_datetime(daily[date_col])
+    oos_dates = pd.to_datetime(oos["date"])
+    cutoff = pd.Timestamp(holdout_start)
+    summaries = []
+    for is_holdout in (False, True):
+        mask = decision_dates >= cutoff if is_holdout else decision_dates < cutoff
+        positions = np.flatnonzero(mask.to_numpy())
+        if len(positions) == 0:
+            summaries.append({"sharpe": 0.0, "pred_ic": float("nan"), "n_days": 0})
+            continue
+        segment = daily.iloc[positions]
+        cash0 = (
+            float(initial_cash)
+            if positions[0] == 0
+            else float(daily["total_value"].iloc[positions[0] - 1])
+        )
+        metrics = daily_replay_metrics(segment, cash0)
+        oos_mask = oos_dates >= cutoff if is_holdout else oos_dates < cutoff
+        pred_ic, _ = _pred_ic(oos.loc[oos_mask])
+        summaries.append(
+            {"sharpe": metrics["sharpe"], "pred_ic": pred_ic, "n_days": int(len(segment))}
+        )
+    return summaries[0], summaries[1]
 
 
 def _combine_seeds(preds: list[np.ndarray], dates: np.ndarray) -> np.ndarray:
@@ -872,11 +904,34 @@ def save_walkforward_result(res: dict, outdir: str | None = None) -> str:
     sharpe_pos_ratio = res.get("sharpe_pos_ratio", ratios["sharpe_pos_ratio"])
     predic_pos_ratio = res.get("predic_pos_ratio", ratios["predic_pos_ratio"])
 
+    metrics = res["oos_result"]["metrics"]
+    daily = res["oos_result"].get("daily")
+    returns = np.array([], dtype=float)
+    if daily is not None and len(daily) > 1:
+        returns = daily["total_value"].pct_change().dropna().to_numpy(dtype=float)
+    return_std = float(returns.std()) if len(returns) else 0.0
+    skew_value = float(skew(returns, bias=False)) if len(returns) >= 3 and return_std > 0 else 0.0
+    kurt_value = (
+        float(kurtosis(returns, fisher=False, bias=False))
+        if len(returns) >= 4 and return_std > 0
+        else 3.0
+    )
+    n_trials = count_trials(kind="walkforward")
+    deflated = deflated_sharpe(
+        float(metrics.get("sharpe", 0.0)) / np.sqrt(252.0),
+        int(metrics.get("n_steps", len(daily) if daily is not None else 0)),
+        n_trials,
+        skew=skew_value,
+        kurt=kurt_value,
+    )
+
     meta = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "metrics": res["oos_result"]["metrics"],
         "nw_t": res["oos_result"]["metrics"].get("nw_t"),
         "alpha_ann": res["oos_result"]["metrics"].get("alpha_ann"),
+        "n_trials": n_trials,
+        "deflated_sharpe": deflated,
         "n_windows": res.get("n_windows"),
         "select_features": res.get("select_features"),
         "sharpe_pos_ratio": sharpe_pos_ratio,
@@ -895,6 +950,9 @@ def save_walkforward_result(res: dict, outdir: str | None = None) -> str:
             "universe_size": C.UNIVERSE_SIZE,
         },
     }
+    for key in ("pre_holdout", "holdout"):
+        if key in res:
+            meta[key] = res[key]
     if oos is not None and len(oos):
         meta["universe"] = {
             "n_symbols": int(oos["symbol"].nunique()),
@@ -905,6 +963,45 @@ def save_walkforward_result(res: dict, outdir: str | None = None) -> str:
     with open(os.path.join(outdir, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(_jsonable(meta), f, ensure_ascii=False, indent=2)
     return outdir
+
+
+def _finalize_walkforward_result(
+    result: dict,
+    replay_params: dict | None,
+    save: bool,
+    verbose: bool,
+) -> dict:
+    oos_result = result["oos_result"]
+    if C.HOLDOUT_START:
+        before, holdout = _holdout_summary(
+            oos_result["daily"], result["oos"], C.INITIAL_CAPITAL, C.HOLDOUT_START
+        )
+        result["pre_holdout"] = before
+        result["holdout"] = holdout
+    clean_replay = {
+        key: value
+        for key, value in dict(replay_params or {}).items()
+        if key not in {"score_cache", "progress_cb"}
+    }
+    config = {
+        "engine": result.get("engine", "windowed"),
+        "select_features": result.get("select_features", False),
+        "strategy": result.get("strategy", "long_topk"),
+        "train_window": C.TRAIN_WINDOW,
+        "test_window": C.TEST_WINDOW,
+        "wf_step": C.WF_STEP,
+        "embargo_days": C.EMBARGO_DAYS,
+        "forward_window": C.FORWARD_WINDOW,
+        "model_objective": C.MODEL_OBJECTIVE,
+        "initial_capital": C.INITIAL_CAPITAL,
+        "replay_params": clean_replay,
+    }
+    log_trial("walkforward", config, oos_result["metrics"])
+    if save:
+        outdir = save_walkforward_result(result)
+        if verbose:
+            logger.info(f"walkforward 结果 -> {outdir}")
+    return result
 
 
 def run_walkforward(
@@ -1105,11 +1202,7 @@ def run_walkforward(
                 f"增量集成 OOS 重放完成（{_fmt_dur(time.time() - t0)}）："
                 f"Sharpe={oos_metrics['sharpe']:+.2f} PredIC={ic_mean:+.4f}"
             )
-        if save:
-            outdir = save_walkforward_result(result)
-            if verbose:
-                logger.info(f"walkforward 结果 -> {outdir}")
-        return result
+        return _finalize_walkforward_result(result, replay_params, save, verbose)
 
     oos_frames = []
     window_metrics = []
@@ -1313,11 +1406,7 @@ def run_walkforward(
         # 「为正窗口占比」门禁信号（Sharpe>0 / PredIC>0 窗口占比），meta.json 同名字段
         **pos_ratios,
     }
-    if save:
-        outdir = save_walkforward_result(result)
-        if verbose:
-            logger.info(f"walkforward 结果 -> {outdir}")
-    return result
+    return _finalize_walkforward_result(result, replay_params, save, verbose)
 
 
 def with_ids(df: pd.DataFrame) -> pd.DataFrame:

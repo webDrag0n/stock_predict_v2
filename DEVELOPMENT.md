@@ -313,3 +313,15 @@ uv run python predict_tomorrow.py
 # 清缓存
 rm -rf data_cache/dataset_*.parquet
 ```
+
+
+---
+
+## 10. 留出段使用纪律
+
+`HOLDOUT_START` 默认为空，由使用者在研究计划中明确设置（例如最近约 6 个月的起点），不要为了让单次结果更好看而移动它。一旦设定：
+
+- 调参、因子或模型选型只能查看留出段之前的指标；留出段仅用于最终报告。
+- 自动流程不得读取 `meta.json` 的 `holdout` 字段作为选型依据。
+- 每次 walk-forward 会在 `outputs/experiments/trials.jsonl` 记录配置哈希；`n_trials` 按不同配置去重，`deflated_sharpe` 用于展示多重试验修正后的 Sharpe 大于 0 的概率。
+- 若需要重新启用留出段做研究，必须将其视为新的样本内数据，并另行保留最终验证区间。

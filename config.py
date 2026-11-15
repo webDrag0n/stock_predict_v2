@@ -293,6 +293,7 @@ EMBARGO_DAYS = int(os.environ.get("EMBARGO_DAYS", str(FORWARD_WINDOW)))
 TRAIN_WINDOW = int(os.environ.get("TRAIN_WINDOW", "500"))
 TEST_WINDOW = int(os.environ.get("TEST_WINDOW", "60"))
 WF_STEP = int(os.environ.get("WF_STEP", str(TEST_WINDOW)))
+HOLDOUT_START = os.environ.get("HOLDOUT_START", "")
 
 # REBALANCE_DAYS：原周期调仓引擎（已删除）的调仓间隔；现仅作为 Newey-West
 # alpha 检验的滞后阶数（≈持仓持有期，见 model_gate / multiseed_eval）。

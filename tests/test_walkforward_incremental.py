@@ -130,7 +130,10 @@ def test_pipeline_wf_run_passes_incremental_engine(monkeypatch, tmp_path):
             "capital": 1_000_000,
         },
     )
-    ctx.shared["panel"] = _make_panel()
+    panel = _make_panel()
+    dates = np.sort(panel["date"].unique())
+    monkeypatch.setattr(C, "HOLDOUT_START", str(pd.Timestamp(dates[60]).date()))
+    ctx.shared["panel"] = panel
     ctx.shared["factors"] = ["feature_00", "feature_01"]
 
     steps.wf_run(ctx)
@@ -138,4 +141,11 @@ def test_pipeline_wf_run_passes_incremental_engine(monkeypatch, tmp_path):
     assert ctx.shared["wf"]["engine"] == "incremental"
     assert (tmp_path / "session" / "artifacts" / "oos_curve.parquet").exists()
     with open(tmp_path / "outputs" / "walkforward" / "meta.json", encoding="utf-8") as f:
-        assert json.load(f)["config"]["engine"] == "incremental"
+        meta = json.load(f)
+    assert meta["config"]["engine"] == "incremental"
+    assert meta["pre_holdout"]["n_days"] == 10
+    assert meta["holdout"]["n_days"] == 20
+    assert meta["n_trials"] == 1
+    assert "deflated_sharpe" in meta
+    trials = tmp_path / "outputs" / "experiments" / "trials.jsonl"
+    assert len(trials.read_text(encoding="utf-8").splitlines()) == 1
