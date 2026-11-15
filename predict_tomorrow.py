@@ -61,7 +61,13 @@ from live import (
     run_gated_prediction,
 )
 from trading import parse_initial_holdings, estimate_order_cost
-from execution import load_holdings_table, save_holdings, load_rejected_rids
+from execution import (
+    load_fills_csv,
+    load_holdings_table,
+    load_rejected_rids,
+    save_holdings,
+    save_holdings_from_fills,
+)
 
 
 def _load_holdings(path: str) -> dict[str, int]:
@@ -285,6 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="只打印回测 vs 实盘偏差跟踪报告后退出（不训练不出单）",
     )
     ap.add_argument("--commit", action="store_true", help="确认成交后把目标持仓写回 holdings.csv")
+    ap.add_argument("--fills", default=None, help="券商实际成交单 CSV；提供时 --commit 按成交写回")
     return ap
 
 
@@ -490,7 +497,7 @@ def main(argv=None) -> None:
             os.path.dirname(os.path.abspath(args.holdings)),
             pd.Timestamp.today().strftime("%Y%m%d"),
         )
-        if rej and len(orders):
+        if not args.fills and rej and len(orders):
             orders = orders.copy()
             rids = pd.Series(
                 [f"{r.side}-{r.symbol}" for r in orders.itertuples(index=False)],
@@ -508,13 +515,23 @@ def main(argv=None) -> None:
             )
             if n_rej:
                 print(f"已按交易台「拒绝」标记跳过 {n_rej} 笔订单")
-        save_holdings(args.holdings, orders, current, latest)
+        if args.fills:
+            fills = load_fills_csv(args.fills)
+            save_holdings_from_fills(args.holdings, fills, current, latest)
+        else:
+            save_holdings(args.holdings, orders, current, latest)
         print(f"已更新持仓 -> {args.holdings}")
-        print(
-            "注意：--commit 【假设非拦截且未拒绝订单全部成交】，请按实际成交手动核对 "
-            f"holdings.csv；并请同步维护 {args.account} 的 cash 列"
-            "（真实净值是 vol/回撤两层风控的输入）。"
-        )
+        if args.fills:
+            print(
+                f"注意：--commit 已按实际成交单 {args.fills} 写回；"
+                f"请同步维护 {args.account} 的 cash 列"
+            )
+        else:
+            print(
+                "注意：--commit 【假设非拦截且未拒绝订单全部成交】，请按实际成交手动核对 "
+                f"holdings.csv；并请同步维护 {args.account} 的 cash 列"
+                "（真实净值是 vol/回撤两层风控的输入）。"
+            )
     else:
         print("（未写持仓。确认按单成交后加 --commit 更新 holdings.csv）")
 

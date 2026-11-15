@@ -125,6 +125,135 @@ def test_cli_shares_same_impl():
     assert pt.load_holdings_table is execution.load_holdings_table
 
 
+def test_load_fills_csv_aggregates_and_validates(tmp_path):
+    path = tmp_path / "fills.csv"
+    pd.DataFrame(
+        {
+            "symbol": ["600000.SH", "600000.SH", "000001.SZ"],
+            "side": ["buy", "buy", "sell"],
+            "shares": [60, 40, 200],
+            "price": [4.0, 6.0, 11.0],
+        }
+    ).to_csv(path, index=False)
+    fills = execution.load_fills_csv(str(path))
+    buy = fills[(fills["symbol"] == "600000.SH") & (fills["side"] == "buy")].iloc[0]
+    assert buy["shares"] == 100
+    assert buy["price"] == pytest.approx(4.8)
+    assert len(fills) == 2
+
+    pd.DataFrame({"symbol": ["600000.SH"], "side": ["buy"]}).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="shares.*price|price.*shares"):
+        execution.load_fills_csv(str(path))
+
+
+def test_save_holdings_from_fills_partial_reject_and_oversell(tmp_path):
+    path = str(tmp_path / "holdings.csv")
+    _holdings_file(path)
+    current = {"000001.SZ": 1000, "000002.SZ": 500}
+    fills = pd.DataFrame(
+        {
+            "symbol": ["000001.SZ", "600000.SH"],
+            "side": ["sell", "buy"],
+            "shares": [1200, 100],
+            "price": [11.0, 4.8],
+        }
+    )
+    execution.save_holdings_from_fills(path, fills, current, "2026-10-27")
+
+    df = execution.load_holdings_table(path).set_index("symbol")
+    assert "000001.SZ" not in df.index
+    assert df.loc["000002.SZ", "shares"] == 500
+    assert df.loc["000002.SZ", "ref_close"] == pytest.approx(20.0)
+    assert df.loc["600000.SH", "shares"] == 100
+    assert df.loc["600000.SH", "entry_date"] == "2026-10-27"
+    assert df.loc["600000.SH", "ref_close"] == pytest.approx(4.8)
+
+
+def test_cli_fills_uses_real_execution_impl():
+    import predict_tomorrow as pt
+
+    assert pt.save_holdings_from_fills is execution.save_holdings_from_fills
+    assert pt.load_fills_csv is execution.load_fills_csv
+    assert pt.build_parser().parse_args(["--fills", "fills.csv"]).fills == "fills.csv"
+
+
+def test_main_commit_uses_fills_instead_of_order_assumption(monkeypatch, tmp_path):
+    import config as C
+    import predict_tomorrow as pt
+
+    dates = pd.bdate_range("2026-10-20", periods=6)
+    panel = pd.DataFrame(
+        {
+            "date": list(dates) * 2,
+            "symbol": ["000001.SZ"] * len(dates) + ["600000.SH"] * len(dates),
+            "close": 10.0,
+            "adj_close": 10.0,
+            "pct_chg": 0.0,
+            "return_1d": 0.0,
+            C.TARGET: 0.01,
+            C.WEIGHT: 1.0,
+            "feature_00": 0.5,
+        }
+    )
+    latest = panel["date"].max()
+    today = panel[panel["date"] == latest].copy()
+    today["score"] = 1.0
+    today["prediction"] = 1.0
+    out = tmp_path / "outputs"
+    monkeypatch.setattr(C, "OUTPUT_DIR", str(out))
+    monkeypatch.setattr(C, "TRACKING_DIR", str(tmp_path / "tracking"))
+    monkeypatch.setattr(C, "MODEL_DIR", str(tmp_path / "models"))
+    monkeypatch.setattr(pt, "load_live_panel", lambda **kwargs: (panel, ["feature_00"]))
+    monkeypatch.setattr(
+        pt,
+        "run_gated_prediction",
+        lambda *args, **kwargs: {
+            "today": today,
+            "info": {"weights": {"gbm_l2": 1.0}},
+            "gate": None,
+            "action": "frozen",
+            "ic_stats": None,
+        },
+    )
+    monkeypatch.setattr(
+        pt,
+        "make_orders_from_state",
+        lambda *args, **kwargs: _orders().assign(limit_price=lambda frame: frame["ref_close"]),
+    )
+    holdings = out / "holdings.csv"
+    out.mkdir()
+    _holdings_file(holdings)
+    fills = out / "fills.csv"
+    pd.DataFrame(
+        {
+            "symbol": ["000001.SZ", "600000.SH"],
+            "side": ["sell", "buy"],
+            "shares": [400, 100],
+            "price": [11.0, 5.0],
+        }
+    ).to_csv(fills, index=False)
+
+    pt.main(
+        [
+            "--commit",
+            "--fills",
+            str(fills),
+            "--skip-preflight",
+            "--holdings",
+            str(holdings),
+            "--account",
+            str(out / "account.csv"),
+            "--risk-state",
+            str(out / "risk.json"),
+        ]
+    )
+
+    df = execution.load_holdings_table(str(holdings)).set_index("symbol")
+    assert df.loc["000001.SZ", "shares"] == 600
+    assert df.loc["600000.SH", "shares"] == 100
+    assert df.loc["600000.SH", "ref_close"] == pytest.approx(5.0)
+
+
 # ---------------------------------------------------------------------------
 # dataio：执行勾选状态 / 现金维护
 # ---------------------------------------------------------------------------

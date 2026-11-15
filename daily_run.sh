@@ -37,7 +37,13 @@ mkdir -p "$LOG_DIR"
 
 if [ "$MODE" = "commit" ]; then
     echo "== $(date '+%F %T') 成交确认：写回 holdings.csv ==" | tee -a "$LOG"
-    uv run python predict_tomorrow.py --commit 2>&1 | tee -a "$LOG"
+    FILLS="outputs/fills_${TODAY}.csv"
+    if [ -f "$FILLS" ]; then
+        uv run python predict_tomorrow.py --commit --fills "$FILLS" 2>&1 | tee -a "$LOG"
+    else
+        echo "未找到 $FILLS，沿用订单全部成交假设写回。" | tee -a "$LOG"
+        uv run python predict_tomorrow.py --commit 2>&1 | tee -a "$LOG"
+    fi
     echo "提示：如现金有变动（分红/出入金），请同步维护 outputs/account.csv 的 cash 列。"
     exit 0
 fi

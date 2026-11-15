@@ -1,5 +1,6 @@
 """成交确认写回：CLI（predict_tomorrow --commit / daily_run.sh commit）与
 webapp 交易台「确认成交」共用的唯一实现，保证两条路径行为逐位一致。
+CLI 提供 --fills 时按券商实际成交写回；未提供时保留订单全部成交假设。
 
 状态文件：
   outputs/holdings.csv —— 当前持仓（symbol,shares,entry_date,ref_close）
@@ -45,13 +46,39 @@ def load_holdings_table(path: str) -> pd.DataFrame:
         return pd.DataFrame(columns=cols)
 
 
-def save_holdings(path: str, orders: pd.DataFrame, current: dict[str, int], latest_date) -> None:
-    """按订单差额把目标持仓写回 holdings.csv（commit 假设非拦截单全部成交）。
+def load_fills_csv(path: str) -> pd.DataFrame:
+    required = ["symbol", "side", "shares", "price"]
+    frame = pd.read_csv(path, dtype={"symbol": str})
+    missing = [column for column in required if column not in frame.columns]
+    if missing:
+        raise ValueError(f"成交单缺少必需列：{', '.join(missing)}")
+    frame = frame[required].copy()
+    frame["side"] = frame["side"].astype(str).str.strip().str.lower()
+    invalid_side = ~frame["side"].isin(["buy", "sell"])
+    if invalid_side.any():
+        raise ValueError("成交单 side 只能为 buy/sell")
+    frame["shares"] = pd.to_numeric(frame["shares"], errors="coerce")
+    frame["price"] = pd.to_numeric(frame["price"], errors="coerce")
+    if frame[["shares", "price"]].isna().any().any():
+        raise ValueError("成交单 shares/price 必须为数字")
+    if (frame["shares"] <= 0).any() or (frame["price"] <= 0).any():
+        raise ValueError("成交单 shares/price 必须大于 0")
+    frame["notional"] = frame["shares"] * frame["price"]
+    grouped = frame.groupby(["symbol", "side"], sort=False, as_index=False).agg(
+        shares=("shares", "sum"), notional=("notional", "sum")
+    )
+    grouped["price"] = grouped["notional"] / grouped["shares"]
+    grouped["shares"] = grouped["shares"].astype(int)
+    return grouped[["symbol", "side", "shares", "price"]]
 
-    entry_date 语义：只有【买入成交】（新建/加仓）的持仓刷新为当日；卖出减仓
-    与未交易的持仓保留原 entry_date（旧版每次 commit 全部重置，会丢失真实
-    建仓日，已修复）。
-    """
+
+def _save_holdings_with_price(
+    path: str,
+    transactions: pd.DataFrame,
+    current: dict[str, int],
+    latest_date,
+    price_col: str,
+) -> None:
     old = load_holdings_table(path)
     old_entry, old_ref = {}, {}
     for r in old.itertuples(index=False):
@@ -60,32 +87,48 @@ def save_holdings(path: str, orders: pd.DataFrame, current: dict[str, int], late
 
     target = dict(current)
     bought: set[str] = set()
-    for o in orders.itertuples(index=False):
-        if getattr(o, "blocked", False):
+    for transaction in transactions.itertuples(index=False):
+        if getattr(transaction, "blocked", False):
             continue
-        s = o.symbol
-        if o.side == "buy":
-            target[s] = target.get(s, 0) + int(o.shares)
-            bought.add(s)
-        elif o.side == "sell":
-            target[s] = max(0, target.get(s, 0) - int(o.shares))
+        symbol = transaction.symbol
+        if transaction.side == "buy":
+            target[symbol] = target.get(symbol, 0) + int(transaction.shares)
+            bought.add(symbol)
+        elif transaction.side == "sell":
+            target[symbol] = max(0, target.get(symbol, 0) - int(transaction.shares))
 
     dstr = str(pd.Timestamp(latest_date).date())
     rows = []
-    for s, sh in target.items():
-        if sh <= 0:
+    for symbol, shares in target.items():
+        if shares <= 0:
             continue
-        ref = old_ref.get(s)
-        sub = orders[orders["symbol"] == s]
-        if len(sub) and "ref_close" in orders.columns:
-            ref = float(sub.iloc[0]["ref_close"])
+        ref = old_ref.get(symbol)
+        sub = transactions[transactions["symbol"] == symbol]
+        if len(sub) and price_col in transactions.columns:
+            ref = float(sub.iloc[0][price_col])
         rows.append(
             {
-                "symbol": s,
-                "shares": int(sh),
-                # 未买入的持仓保留原建仓日；查不到（新文件外的来源）才用当日
-                "entry_date": dstr if s in bought else (old_entry.get(s) or dstr),
+                "symbol": symbol,
+                "shares": int(shares),
+                "entry_date": dstr if symbol in bought else (old_entry.get(symbol) or dstr),
                 "ref_close": ref,
             }
         )
     pd.DataFrame(rows).to_csv(path, index=False)
+
+
+def save_holdings(path: str, orders: pd.DataFrame, current: dict[str, int], latest_date) -> None:
+    """按订单差额把目标持仓写回 holdings.csv（commit 假设非拦截单全部成交）。
+
+    entry_date 语义：只有【买入成交】（新建/加仓）的持仓刷新为当日；卖出减仓
+    与未交易的持仓保留原 entry_date（旧版每次 commit 全部重置，会丢失真实
+    建仓日，已修复）。
+    """
+    _save_holdings_with_price(path, orders, current, latest_date, "ref_close")
+
+
+def save_holdings_from_fills(
+    path: str, fills: pd.DataFrame, current: dict[str, int], latest_date
+) -> None:
+    """只按实际成交写回；fills 中缺失的订单或股票保持原持仓不变。"""
+    _save_holdings_with_price(path, fills, current, latest_date, "price")
