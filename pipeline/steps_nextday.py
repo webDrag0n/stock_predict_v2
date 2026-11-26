@@ -19,6 +19,7 @@ import config as C
 from live import make_orders_from_state, load_live_panel, run_gated_prediction
 from model_display import model_label
 from trading import parse_initial_holdings, estimate_order_cost
+from capital import with_capital_profile
 
 from . import context as ctxmod
 from .context import kpi, table, fig_line, fig_bar, fig_hist, report
@@ -101,12 +102,13 @@ def _ensemble_params(ctx: ctxmod.StepContext) -> dict:
 def _decision_params(ctx: ctxmod.StepContext) -> dict:
     """下单/撮合参数（generate_orders 与模型门控双回放共用，保证两边一致）。"""
     p = ctx.params
-    dp = {}
+    explicit = {}
     for key, pk in (
         ("topk", "topk"),
         ("max_positions", "max_positions"),
         ("max_weight", "max_weight"),
         ("min_notional", "min_notional"),
+        ("min_entry_notional", "min_entry_notional"),
         ("dynamic_topk_ic_full", "dynamic_topk_ic_full"),
         ("dynamic_topk_ic_zero", "dynamic_topk_ic_zero"),
         ("dynamic_topk_low", "dynamic_topk_low"),
@@ -114,16 +116,24 @@ def _decision_params(ctx: ctxmod.StepContext) -> dict:
         ("max_portfolio_beta", "max_portfolio_beta"),
     ):
         if p.get(pk) is not None:
-            dp[key] = float(p[pk]) if key != "max_positions" else int(p[pk])
+            explicit[key] = float(p[pk]) if key != "max_positions" else int(p[pk])
     if p.get("use_bb_timing") is not None:
-        dp["use_bb_timing"] = bool(p["use_bb_timing"])
+        explicit["use_bb_timing"] = bool(p["use_bb_timing"])
     if p.get("use_dynamic_topk") is not None:
-        dp["use_dynamic_topk"] = bool(p["use_dynamic_topk"])
+        explicit["use_dynamic_topk"] = bool(p["use_dynamic_topk"])
     if p.get("use_beta_constraint") is not None:
-        dp["use_beta_constraint"] = bool(p["use_beta_constraint"])
+        explicit["use_beta_constraint"] = bool(p["use_beta_constraint"])
     if p.get("order_price_mode"):
-        dp["order_price_mode"] = str(p["order_price_mode"])
-    return dp
+        explicit["order_price_mode"] = str(p["order_price_mode"])
+    if p.get("cash_aware") is not None:
+        explicit["cash_aware"] = bool(p["cash_aware"])
+    if p.get("cash_buffer") is not None:
+        explicit["cash_buffer"] = float(p["cash_buffer"])
+    if p.get("skip_unaffordable") is not None:
+        explicit["skip_unaffordable"] = bool(p["skip_unaffordable"])
+    return with_capital_profile(
+        p.get("capital_profile", "standard"), explicit, ignore_standard_defaults=True
+    )
 
 
 def train_predict(ctx: ctxmod.StepContext) -> dict:
@@ -323,6 +333,16 @@ def generate_orders(ctx: ctxmod.StepContext) -> dict:
         ),
     ]
     notes = ["提醒：信号基于当日收盘特征，请于【次日】按挂单价执行；ML 仅用于选池排序。"]
+    cash_report = orders.attrs.get("cash_report")
+    if cash_report:
+        notes.append(
+            f"现金校验：预留 ¥{cash_report['cash_buffer']:,.0f}，"
+            f"预计剩余 ¥{cash_report['estimated_free_cash']:,.0f}；"
+            f"缩手 {len(cash_report['capped_buys'])} 笔，"
+            f"跳过 {len(cash_report['skipped_buys'])} 笔。"
+        )
+        if cash_report["skipped_buys"]:
+            notes.append("现金/最低金额限制跳过：" + ", ".join(cash_report["skipped_buys"]))
     return report(
         "generate_orders",
         "生成次日订单",

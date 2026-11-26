@@ -121,6 +121,28 @@ def paired_diff_t(ret_a, ret_b, lags) -> float:
     return float(mean / np.sqrt(max(long_var, 1e-18) / n))
 
 
+def _champion_feat_cols(panel: pd.DataFrame, champ_params: dict, fallback: list[str]) -> tuple:
+    """冠军回放用的特征列：优先取其 config_snapshot 里训练时的列，而非候选的列。
+
+    返回 (cols, missing)：cols 是快照列中当前面板仍存在的部分（保持快照顺序），
+    missing 是快照里有、面板里已没有的列。快照没有 feat_cols 时回退 fallback
+    （旧 manifest）。
+
+    注意用 panel.columns 而非 list_factor_columns 判断存在性：list_factor_columns
+    会把 pct_chg 等交易 meta 列排除在特征之外，但 keep_trade_cols=True 的面板里
+    它们仍在，冻结 champion 线上推理也正是按自己的快照列取数。missing 非空时
+    冠军只能在剩余列上回放（cross_sectional_norm 对缺列直接 KeyError，不能原样
+    传入），调用方必须把 missing 写进评估结果，不得静默吞掉。
+    """
+    snap = champ_params.get("feat_cols") or []
+    if not snap:
+        return list(fallback), []
+    present = set(panel.columns)
+    cols = [c for c in snap if c in present]
+    missing = [c for c in snap if c not in present]
+    return cols, missing
+
+
 def evaluate_pair(
     panel: pd.DataFrame,
     feat_cols: list[str],
@@ -131,13 +153,18 @@ def evaluate_pair(
     initial_cash: float | None = None,
     progress: bool = True,
     progress_cb=None,
+    champ_feat_cols: list[str] | None = None,
 ) -> dict:
     """候选配方 vs 冠军配方：同一评估窗口各跑一遍完整每日重放，返回双方指标。
 
-    两遍只有配方参数（ensemble 腿/超参）不同；决策/成本/风控参数、初始资金、
-    评估窗口完全一致。窗口起点按两边较大的 train_window 预热，保证两个配方
-    的决策日集合相同。candidate_ret/champion_ret 仅用于内存中的配对检验，
-    stage_and_evaluate 写 evaluation.json 前会剔除这两个大字段。
+    两遍只有配方参数（ensemble 腿/超参）与各自的特征列不同；决策/成本/风控
+    参数、初始资金、评估窗口完全一致。窗口起点按两边较大的 train_window 预热，
+    保证两个配方的决策日集合相同。candidate_ret/champion_ret 仅用于内存中的
+    配对检验，stage_and_evaluate 写 evaluation.json 前会剔除这两个大字段。
+
+    champ_feat_cols：冠军训练时的特征列（None → 与候选相同）。必须区分：特征集
+    是配方的一部分（指纹含 feat_cols），两边列不同却喂同一份列，会让两次回放
+    逐位相同，门控永远判「未超过」。
     """
     eval_days = int(eval_days or getattr(C, "PROMOTE_EVAL_DAYS", 120))
     initial_cash = float(initial_cash or C.INITIAL_CAPITAL)
@@ -151,15 +178,31 @@ def evaluate_pair(
     lags = int(getattr(C, "REBALANCE_DAYS", 20))
 
     out = {"eval_days": eval_days, "window": [str(start_date.date()), str(end_date.date())]}
-    for tag, recipe in (("candidate", cand_params), ("champion", champ_params)):
+    sides = (
+        ("candidate", cand_params, feat_cols),
+        ("champion", champ_params, champ_feat_cols if champ_feat_cols is not None else feat_cols),
+    )
+    for tag, recipe, cols in sides:
         # warmup_days 显式统一为两边较大值：两个配方的决策日集合完全一致
         p = {"warmup_days": warmup, **dec, **_recipe_params(recipe)}
         if progress_cb is not None:
-            p["progress_cb"] = progress_cb
+            side = "候选" if tag == "candidate" else "champion"
+
+            def _side_progress(phase, current, total, message="", **extras):
+                progress_cb(
+                    phase=f"{side} · {phase}",
+                    current=current,
+                    total=total,
+                    message=message,
+                    **extras,
+                )
+
+            p["progress_cb"] = _side_progress
         out[tag] = _replay_metrics(
-            panel, feat_cols, p, start_date, end_date, initial_cash, lags, progress
+            panel, cols, p, start_date, end_date, initial_cash, lags, progress
         )
         out[tag]["params"] = _recipe_params(recipe)
+        out[tag]["n_features"] = len(cols)
     for tag in ("candidate", "champion"):
         out[f"{tag}_ret"] = out[tag].pop("strat_ret")
     return out
@@ -334,7 +377,16 @@ def stage_and_evaluate(
             "evaluation": evaluation,
         }
 
-    champ_params = _recipe_params(champ_manifest.get("config_snapshot") or {})
+    champ_snapshot = champ_manifest.get("config_snapshot") or {}
+    champ_params = _recipe_params(champ_snapshot)
+    champ_cols, champ_missing = _champion_feat_cols(panel, champ_snapshot, feat_cols)
+    if champ_missing:
+        logger.warning(
+            "champion 训练列中有 %d 列已不在当前面板（%s），冠军回放只用剩余 %d 列",
+            len(champ_missing),
+            ",".join(champ_missing[:5]),
+            len(champ_cols),
+        )
     evaluation = evaluate_pair(
         panel,
         feat_cols,
@@ -344,7 +396,9 @@ def stage_and_evaluate(
         decision_params=decision_params,
         progress=progress,
         progress_cb=progress_cb,
+        champ_feat_cols=champ_cols,
     )
+    evaluation["champion_missing_cols"] = champ_missing
     ok, reason = should_promote(
         evaluation["candidate"],
         evaluation["champion"],

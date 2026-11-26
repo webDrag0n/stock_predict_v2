@@ -35,7 +35,7 @@ from .macro_features import merge_global_macro_features
 from .factors import MAX_ROLLING_WINDOW, compute_all_factors, get_factor_library_hash
 
 # 注：不在 import 期全局屏蔽 PerformanceWarning——由入口脚本
-# （run_session.py / predict_tomorrow.py / scripts/run_walkforward.py）显式设置。
+# （run_pipeline.py / predict_tomorrow.py / scripts/run_walkforward.py）显式设置。
 
 logger = logging.getLogger(__name__)
 

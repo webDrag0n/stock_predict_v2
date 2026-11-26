@@ -4,7 +4,7 @@
 manifest、指纹计算）一律用原始模型键，本模块不做任何改动；这里只定义
 **显示层**的键 → 中文名映射，供 pipeline 步骤摘要与 webapp 渲染共用。
 
-放在 src/ 而非 webapp/ 的原因：pipeline/steps_*（不依赖 dash）也要把人话文案
+放在 src/ 而非 webapp2/ 的原因：pipeline/steps_*（不依赖 dash）也要把人话文案
 写进落盘的 step report；本模块零三方依赖，双向 import 都不会成环。
 """
 

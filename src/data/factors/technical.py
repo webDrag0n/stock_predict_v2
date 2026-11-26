@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 # 注：不在 import 期全局屏蔽 PerformanceWarning——库模块不该动全局 warnings
-# 状态，由入口脚本（run_session.py / predict_tomorrow.py / run_walkforward.py）
+# 状态，由入口脚本（run_pipeline.py / predict_tomorrow.py / run_walkforward.py）
 # 显式设置。
 
 

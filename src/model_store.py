@@ -258,7 +258,8 @@ def load_champion_manifest() -> dict | None:
 def stage_candidate(
     ens, feat_cols: list[str], params: dict, extra: dict | None = None
 ) -> tuple[str, dict]:
-    """候选落盘 staging。train_end_date 是最后成熟标签日，trained_at 是实际训练时间。"""
+    """候选落盘 staging。train_end_date 是最后成熟标签日；trained_at 是工件写入时间，
+    no-new 复用参数时不代表发生了新拟合。"""
     fp = fingerprint_of(feat_cols, params)
     mid = _new_model_id(fp)
     manifest = {

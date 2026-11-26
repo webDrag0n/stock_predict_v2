@@ -4,7 +4,7 @@
 ``load_factor_panel``（命名因子面板）→ 逐因子 ``evaluate_factor``
 （RankIC/ICIR/分层/换手/准入）→ ``outputs/factor_eval.csv`` +
 ``factor_layers.dump_layers`` 落盘 ``factor_layer_<id>.parquet`` /
-``factor_ic_daily_<id>.parquet``。webapp/pages/factor_workbench.py 直接读
+``factor_ic_daily_<id>.parquet``。webapp2/pages/factors.py 直接读
 这些产物，因此**文件名与列结构不可变**。
 
 顺序：data_import → eval_factors → eval_report
@@ -61,7 +61,7 @@ _MIN_OBS = 100
 _MIN_NUNIQUE = 5
 
 # 诊断产物文件名（scripts/diagnose_factors.py 的 canonical 契约，
-# webapp/pages/factor_workbench.py 直接消费）
+# webapp2/pages/factors.py 直接消费）
 _DIAG_FILES = ["diag_factor_ic_decay.csv", "diag_factor_corr.csv", "diag_model_vs_factor.csv"]
 
 

@@ -41,10 +41,11 @@ tushare daily bars (full market, ~5700 ex-ST)  →  technical + fundamental fact
   library in `factor_library/`.
 - **Fundamental factors** (`ep`/`bp`/`sp`/`ln_mv` from akshare, point-in-time
   aligned via `merge_asof(backward)`).
-- **Web UI** (`run_webapp.py`, Dash): session-based pipelines with per-step
-  reports — research sessions (`walkforward` / `train` / `modeleval` /
-  `factoreval`) launched from the Model Lab "new task" panel, and the
-  production `nextday` order-generation session from the Trading Desk.
+- **Web UI** (`run_webapp2.py`, Dash): read-only over the files the CLIs write, plus
+  buttons that launch the same CLIs. Every CLI registers its state in
+  `outputs/runs/<run_id>/` (`run.json` + `events.jsonl`), so the UI shows live
+  progress and full history without the CLIs depending on it. Seven pages:
+  Overview, Trade, Models, Backtest, Factors, Market, Runs.
 - **Live tooling** (`predict_tomorrow.py`): next-day executable orders, model
   gating (`models/staging/` promotion), adaptive retraining triggers,
   backtest-vs-live drift tracking.
@@ -66,9 +67,8 @@ uv sync --extra dev          # core + pytest
 #    (the TUSHARE_TOKEN environment variable takes precedence)
 
 # 3. Run
-uv run python run_webapp.py                  # web UI (recommended)
-uv run python run_webapp.py --debug          # hot reload for development
-                                             # (default mode: restart the process after code changes)
+uv run python run_webapp2.py                 # web UI (optional; CLIs run without it)
+DEBUG=1 uv run python run_webapp2.py         # hot reload for development
 uv run python scripts/run_walkforward.py     # rolling walk-forward OOS backtest
 uv run python predict_tomorrow.py            # next-day executable orders
 uv run pytest                                # test suite
@@ -115,14 +115,14 @@ uv run python predict_tomorrow.py --force-retrain
 uv run python predict_tomorrow.py --tracking-report
 
 # Single-factor evaluation / multi-seed robustness
-# (the factoreval web session is an equivalent entry point for eval_factors)
+# (scripts/run_pipeline.py --mode factoreval is the run-registered equivalent)
 uv run python scripts/eval_factors.py
 uv run python scripts/research/multiseed_robust.py
 ```
 
-Outputs land in `outputs/` (`orders_*.csv`, session reports). Walk-forward
+Outputs land in `outputs/` (`orders_*.csv`, run records under `outputs/runs/`). Walk-forward
 results use the canonical `outputs/walkforward/` contract shared by the CLI
-and webapp sessions: `oos_curve.parquet` (stitched OOS equity curve),
+and the web UI: `oos_curve.parquet` (stitched OOS equity curve),
 `window_metrics.parquet` (per-window OOS metrics), `oos_bench.parquet`
 (equal-weight benchmark daily returns) and `meta.json` (summary metrics +
 config snapshot). The Model Lab page renders the latest CLI walk-forward
@@ -135,8 +135,7 @@ UI; PNG chart output has been retired.
 config.py                  # all parameters + credential loading (env-overridable)
 config_credentials.toml    # tushare token (gitignored, never commit)
 predict_tomorrow.py        # CLI: next-day orders from current holdings
-run_session.py             # session executor (spawned by the webapp)
-run_webapp.py              # Dash front-end entry
+run_webapp2.py             # Dash front-end entry
 
 src/                       # core library (top-level modules, src/ on sys.path)
   data/                    # connectors (tushare/akshare), factor engineering, panel loaders
@@ -152,8 +151,8 @@ src/                       # core library (top-level modules, src/ on sys.path)
   live.py / live_state.py / live_tracking.py   # live inference, state, drift tracking
   model_store.py / model_gate.py               # model artifacts + promotion gating
 
-pipeline/                  # session pipeline framework (registry/context/steps)
-webapp/                    # Dash multi-page front-end
+pipeline/                  # step functions for the research modes (run by scripts/run_pipeline.py)
+webapp2/                   # Dash multi-page front-end (reads files, launches CLIs)
 scripts/                   # research CLIs (active vs archive: see scripts/README.md)
 factor_library/            # YAML formula factor library
 tests/                     # pytest suite

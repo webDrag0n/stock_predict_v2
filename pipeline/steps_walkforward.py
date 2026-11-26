@@ -25,6 +25,7 @@ import pandas as pd
 import config as C
 from data import load_factor_panel, list_factor_columns
 from walkforward import run_walkforward, save_walkforward_result, _window_pos_ratios
+from capital import with_capital_profile
 
 from . import context as ctxmod
 from .context import kpi, table, fig_line, fig_bar, report
@@ -141,6 +142,19 @@ def wf_run(ctx: ctxmod.StepContext) -> dict:
     def _cb(phase, current, total, **extras):
         ctx.report_progress(phase, current, total, **extras)
 
+    replay_explicit = {}
+    for key in ("max_positions", "max_weight", "min_notional", "min_entry_notional", "cash_buffer"):
+        if p.get(key) is not None:
+            replay_explicit[key] = p[key]
+    for key in ("cash_aware", "skip_unaffordable"):
+        if p.get(key) is not None:
+            replay_explicit[key] = bool(p[key])
+    if p.get("allowed_boards"):
+        replay_explicit["allowed_boards"] = p["allowed_boards"]
+    replay_params = with_capital_profile(
+        p.get("capital_profile", "standard"), replay_explicit, ignore_standard_defaults=True
+    )
+
     ctx.report_progress(
         "滚动回测中",
         0,
@@ -158,6 +172,7 @@ def wf_run(ctx: ctxmod.StepContext) -> dict:
         save=False,  # canonical 落盘在会话 artifacts 之后显式调用，避免双写
         progress_cb=_cb,
         engine=engine,
+        replay_params=replay_params,
     )
     ctx.shared["wf"] = res
     ctx.report_progress("滚动回测完成", 1, 1, n_windows=res["n_windows"])
@@ -246,7 +261,7 @@ def build_wf_report(
     """OOS 绩效报告（纯函数）：净值 vs 基准、累计 alpha、逐窗口 Sharpe、回撤、窗口表。
 
     wf_report(ctx)（会话步骤）与前端「最近一次 CLI Walk-Forward」卡片
-    （webapp/pages/sessions.py，读 outputs/walkforward/ canonical 目录）共用此
+    （webapp2/pages/backtest.py，读 outputs/walkforward/ canonical 目录）共用此
     构造函数。bench/dts 为 None 时退化为单系列净值图 + 序号横轴。
     """
     m = metrics or {}

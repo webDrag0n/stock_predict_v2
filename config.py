@@ -15,13 +15,16 @@ A-share specifics:
   - retail investors cannot short single names -> the default tradeable strategy
     is long_topk (long the top-K%% predicted names, equal weight). cross_sectional
     market-neutral is kept as a RESEARCH reference only (not practically tradeable).
-  - costs: 0.02%% commission per side + 0.1%% stamp duty on the SELL side.
+  - costs: commission / stamp duty / market impact are configurable in
+    outputs/trading_settings.json; environment variables take precedence.
 """
 
 from __future__ import annotations
 
 import os
 import tomllib
+
+from trading_settings import load_trading_settings
 
 # --- Paths -----------------------------------------------------------------
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -293,7 +296,11 @@ EMBARGO_DAYS = int(os.environ.get("EMBARGO_DAYS", str(FORWARD_WINDOW)))
 TRAIN_WINDOW = int(os.environ.get("TRAIN_WINDOW", "500"))
 TEST_WINDOW = int(os.environ.get("TEST_WINDOW", "60"))
 WF_STEP = int(os.environ.get("WF_STEP", str(TEST_WINDOW)))
-HOLDOUT_START = os.environ.get("HOLDOUT_START", "")
+# 留出段起点（见 DEVELOPMENT.md §10）。2026-11-16 由使用者设定为第 8 个 OOS 窗口的起点
+# （约最近 6 个月，含最近 3 个窗口）：此日及以后的 OOS 指标只用于最终报告，调参、因子与
+# 模型选型一律只看此日之前。不要为让单次结果更好看而移动它；置空 HOLDOUT_START="" 可关闭。
+# 注意：这是 OOS 之上再切一刀，并不能让已被反复使用过的 2024-04 至 2026-02 变回样本外。
+HOLDOUT_START = os.environ.get("HOLDOUT_START", "2026-02-27")
 
 # REBALANCE_DAYS：原周期调仓引擎（已删除）的调仓间隔；现仅作为 Newey-West
 # alpha 检验的滞后阶数（≈持仓持有期，见 model_gate / multiseed_eval）。
@@ -358,15 +365,19 @@ DYNAMIC_TOPK_LOW = float(os.environ.get("DYNAMIC_TOPK_LOW", "0.10"))
 DYNAMIC_TOPK_HIGH = float(os.environ.get("DYNAMIC_TOPK_HIGH", "0.25"))
 
 # --- A-share transaction costs ---------------------------------------------
-COMMISSION_RATE = 0.0002  # brokerage commission, charged on BOTH buy and sell
-STAMP_DUTY_RATE = 0.0010  # stamp duty, charged on the SELL side only
+# outputs/trading_settings.json 持久化个人设置；同名环境变量优先，便于单次实验覆盖。
+_TRADING_SETTINGS = load_trading_settings()
+COMMISSION_RATE = float(os.environ.get("COMMISSION_RATE", _TRADING_SETTINGS["commission_rate"]))
+STAMP_DUTY_RATE = float(os.environ.get("STAMP_DUTY_RATE", _TRADING_SETTINGS["stamp_duty_rate"]))
 # 最低佣金（元/笔）：A股券商普遍 max(5元, 费率×成交额)。纯比例佣金会系统性低估
 # 小额订单的成本（5万元订单的真实佣金是 5 元而非 1 元）。设为 0 可退回纯比例。
-MIN_COMMISSION = float(os.environ.get("MIN_COMMISSION", "5.0"))  # 元/笔
+MIN_COMMISSION = float(os.environ.get("MIN_COMMISSION", _TRADING_SETTINGS["min_commission"]))
 # 参与率上限：单笔成交股数 ≤ MAX_PARTICIPATION × 次日成交额(ADV)。冲击成本模型
 # 只"计价"不"限量"，没有这个上限回测可以按开盘价吃下超过全天成交量的订单，
 # 资金规模稍大就会系统性偏乐观。0 = 不限量（退回旧行为）。
-MAX_PARTICIPATION = float(os.environ.get("MAX_PARTICIPATION", "0.10"))
+MAX_PARTICIPATION = float(
+    os.environ.get("MAX_PARTICIPATION", _TRADING_SETTINGS["max_participation"])
+)
 
 # Liquidity-aware market-impact cost (square-root model), on top of commission +
 # stamp. For a trade of notional N in a stock with average daily dollar volume
@@ -376,8 +387,10 @@ MAX_PARTICIPATION = float(os.environ.get("MAX_PARTICIPATION", "0.10"))
 # column (千元→元). IMPACT_K≈0.1 is a standard empirical coefficient (impact ≈
 # 10% of daily vol move when you trade 100% of ADV). Set USE_IMPACT_COST=0 to
 # revert to the flat-commission-only model.
-USE_IMPACT_COST = os.environ.get("USE_IMPACT_COST", "1") == "1"
-IMPACT_K = float(os.environ.get("IMPACT_K", "0.1"))
+USE_IMPACT_COST = (
+    os.environ.get("USE_IMPACT_COST", "1" if _TRADING_SETTINGS["use_impact_cost"] else "0") == "1"
+)
+IMPACT_K = float(os.environ.get("IMPACT_K", _TRADING_SETTINGS["impact_k"]))
 
 # --- Capital (for money-denominated PnL curve) -----------------------------
 INITIAL_CAPITAL = float(os.environ.get("INITIAL_CAPITAL", "1000000"))  # ¥1,000,000

@@ -56,13 +56,13 @@ def _f(x, fmt: str = "{:+.3f}", na: str = "—") -> str:
 
 # ---------------------------------------------------------------------------
 def data_import(ctx: ctxmod.StepContext) -> dict:
-    """加载全市场命名因子面板（keep_trade_cols=True：门控双回放撮合需 OHLC 等交易列）。
+    """加载全市场命名因子面板，保留交易列与最新未打标日。
 
-    与 steps_walkforward.wf_data_import 同一加载口径（全量历史，训练 + 门控
-    双回放都需要长历史），仅报告画像按 train 模式裁剪。
+    train_candidate_ensemble 需要以真实行情截止日计算 fw+embargo 的成熟边界；
+    keep_unlabeled=False 会先删掉尾部未打标日，再重复扣除一轮成熟期。
     """
     ctx.report_progress("数据加载中", 0, 2, "load_factor_panel")
-    panel = load_factor_panel(keep_trade_cols=True, verbose=True)
+    panel = load_factor_panel(keep_unlabeled=True, keep_trade_cols=True, verbose=True)
     factors = list_factor_columns(panel)
     ctx.shared["panel"] = panel
     ctx.shared["factors"] = factors
@@ -124,6 +124,20 @@ def _ensemble_params(ctx: ctxmod.StepContext) -> dict:
     return out
 
 
+def _training_summary(ens, recipe: dict, fp: str, train_end: str) -> str:
+    update = recipe.get("train_update") or {}
+    actions = list(update.values())
+    if actions and all(v == "no-new" for v in actions):
+        action = "无新成熟标签，复用 champion 参数"
+    elif any(str(v).startswith("full") for v in actions):
+        action = "全量重建完成"
+    elif any(str(v).startswith("+") for v in actions):
+        action = "增量续训完成"
+    else:
+        action = "候选工件已准备"
+    return f"{action} · {len(ens.models)} 个子模型 · 训练截止 {train_end} · 指纹 {fp}"
+
+
 def train_candidate(ctx: ctxmod.StepContext) -> dict:
     """训练候选 ensemble（同配方时增量续训 champion，否则全量重建），结果存 ctx.shared。"""
     panel = ctx.shared["panel"]
@@ -137,7 +151,7 @@ def train_candidate(ctx: ctxmod.StepContext) -> dict:
     ens, recipe = train_candidate_ensemble(panel, factors, params=params, progress_cb=_cb)
     ctx.shared["candidate_ens"] = ens
     ctx.shared["cand_recipe"] = recipe
-    ctx.report_progress("训练完成", 3, 3, models=",".join(ens.models))
+    ctx.report_progress("候选工件准备完成", 3, 3, models=",".join(ens.models))
 
     fp = model_store.fingerprint_of(factors, recipe)
     train_end = str(ens._last_trained_date)[:10] if ens._last_trained_date is not None else "—"
@@ -159,6 +173,12 @@ def train_candidate(ctx: ctxmod.StepContext) -> dict:
             f"{len(ens.models)} 个 · 权重 {wtxt}",
         ),
         kpi("训练截止日", train_end, "已成熟标签最后一日"),
+        kpi(
+            "成熟截止日",
+            recipe.get("maturity_cutoff", "—"),
+            f"新增成熟日 {recipe.get('new_matured_days', 0)} 个 · "
+            f"面板最新日 {recipe.get('panel_latest_date', '—')}",
+        ),
         kpi("配方指纹", fp, "与 champion 不同 → 门控评估"),
         kpi(
             "训练窗口",
@@ -168,7 +188,13 @@ def train_candidate(ctx: ctxmod.StepContext) -> dict:
     ]
     champ = model_store.load_champion_manifest()
     notes = []
-    if champ is None:
+    update = recipe.get("train_update") or {}
+    no_new = bool(update) and all(v == "no-new" for v in update.values())
+    if no_new:
+        notes.append(
+            "ℹ️ 本次没有新成熟标签：未新增树，也未重拟合线性模型；候选是 champion 参数副本"
+        )
+    elif champ is None:
         notes.append("ℹ️ 当前无 champion：gate_eval 将只留档候选，不做双回放对比")
     elif champ.get("fingerprint") == fp:
         notes.append(
@@ -178,7 +204,7 @@ def train_candidate(ctx: ctxmod.StepContext) -> dict:
     return report(
         "train_candidate",
         "训练候选模型",
-        summary=f"已训练 {len(ens.models)} 个子模型 · 训练截止 {train_end} · 指纹 {fp}",
+        summary=_training_summary(ens, recipe, fp, train_end),
         kpis=kpis,
         figures=figures,
         notes=notes,

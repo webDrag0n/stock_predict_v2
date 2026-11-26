@@ -33,6 +33,7 @@ import config as C
 from data import load_factor_panel, list_factor_columns
 from walkforward import run_walkforward
 from perf_metrics import format_metrics
+from capital import with_capital_profile
 
 
 def _summarize(tag: str, res: dict) -> None:
@@ -81,6 +82,23 @@ def _summarize(tag: str, res: dict) -> None:
         )
 
 
+def _null_run():
+    """RUN_REGISTRY=0 时的空登记器：主流程不必处处判空。"""
+    from types import SimpleNamespace
+
+    noop = lambda *a, **k: None  # noqa: E731
+    return SimpleNamespace(
+        step=noop,
+        step_done=noop,
+        artifact=noop,
+        note=noop,
+        set_param=noop,
+        callback=lambda: None,
+        finish=noop,
+        fail=noop,
+    )
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -95,18 +113,59 @@ def main() -> None:
     ap.add_argument("--strategy", default="long_topk")
     ap.add_argument("--engine", choices=["windowed", "incremental"], default="windowed")
     ap.add_argument("--capital", type=float, default=None)
+    ap.add_argument(
+        "--capital-profile",
+        choices=["standard", "small"],
+        default=os.environ.get("CAPITAL_PROFILE", "standard"),
+        help="small：少仓、较大单笔、最小建仓金额与现金校验",
+    )
     ap.add_argument("--max-positions", type=int, default=None)
     ap.add_argument("--max-weight", type=float, default=None)
     ap.add_argument("--min-notional", type=float, default=None)
+    ap.add_argument("--min-entry-notional", type=float, default=None)
+    ap.add_argument("--cash-aware", action="store_true")
+    ap.add_argument("--cash-buffer", type=float, default=None)
     ap.add_argument("--allowed-boards", default="")
     ap.add_argument("--skip-unaffordable", action="store_true")
     args = ap.parse_args()
 
+    # 登记到 outputs/runs/：前端只读该目录即可看到状态与进度（RUN_REGISTRY=0 关闭）。
+    # 登记是旁路，RunReporter 写盘失败只降级，不影响回测本身。
+    if os.environ.get("RUN_REGISTRY", "1") == "0":
+        run = _null_run()
+    else:
+        from run_registry import RunReporter
+
+        run = RunReporter(
+            "walkforward",
+            label=f"滚动 walk-forward · {args.engine}"
+            + (" · 因子选择" if args.select_features else ""),
+            steps=["load_panel", "walkforward"],
+            params={k: v for k, v in vars(args).items() if v not in (None, "")},
+            run_id=os.environ.get("RUN_ID") or None,
+            parent=os.environ.get("RUN_PARENT") or None,
+        )
+    try:
+        _run(args, run)
+    except SystemExit as exc:
+        run.finish("done" if exc.code in (None, 0) else "failed", exit_code=exc.code or 0)
+        raise
+    except KeyboardInterrupt:
+        run.finish("killed", exit_code=130)
+        raise
+    except BaseException as exc:
+        run.fail(exc)
+        raise
+    else:
+        run.finish("done", exit_code=0)
+
+
+def _run(args, run) -> None:
     if args.capital is not None:
         C.INITIAL_CAPITAL = float(args.capital)
     replay_params = {}
-    for key in ("max_positions", "max_weight", "min_notional"):
-        value = getattr(args, key)
+    for key in ("max_positions", "max_weight", "min_notional", "min_entry_notional", "cash_buffer"):
+        value = getattr(args, key, None)
         if value is not None:
             replay_params[key] = value
     if args.allowed_boards:
@@ -115,9 +174,13 @@ def main() -> None:
         ]
     if args.skip_unaffordable:
         replay_params["skip_unaffordable"] = True
+    if getattr(args, "cash_aware", False):
+        replay_params["cash_aware"] = True
+    replay_params = with_capital_profile(getattr(args, "capital_profile", "standard"), replay_params)
 
     os.makedirs(C.OUTPUT_DIR, exist_ok=True)
     print("加载命名因子面板...")
+    run.step("load_panel", "加载因子面板")
     # keep_trade_cols=True：每日重放引擎（唯一回测口径）需要 OHLC/布林带/涨跌停
     # 等撮合列（close 随之保留，keep_price 不再需要单独开）。
     panel = load_factor_panel(keep_trade_cols=True)
@@ -126,6 +189,8 @@ def main() -> None:
         f"候选因子 {len(factors)} 个 | 训练窗口 {C.TRAIN_WINDOW} | "
         f"测试窗口 {C.TEST_WINDOW} | embargo {C.EMBARGO_DAYS} | step {C.WF_STEP}\n"
     )
+    run.step_done("load_panel", f"{len(panel):,} 行 · {len(factors)} 因子")
+    run.step("walkforward", "滚动 walk-forward")
 
     runs = []
     if args.compare:
@@ -143,6 +208,7 @@ def main() -> None:
             strategy=args.strategy,
             engine=args.engine,
             replay_params=replay_params,
+            progress_cb=run.callback(),
         )
         results[tag] = res
         _summarize(tag, res)
@@ -151,6 +217,22 @@ def main() -> None:
         # meta.json，前端会话页直接读取展示）；--compare 两次运行共用该目录，
         # 后者覆盖前者。
         print(f"walkforward 结果 -> {os.path.join(C.OUTPUT_DIR, 'walkforward')}")
+        run.artifact(
+            "walkforward", os.path.join(C.OUTPUT_DIR, "walkforward", "meta.json"), kind="report"
+        )
+        _m = res["oos_result"]["metrics"]
+        run.set_param(
+            **{
+                f"result_{tag}": {
+                    "sharpe": _m.get("sharpe"),
+                    "pred_ic": _m.get("pred_ic"),
+                    "nw_t": _m.get("nw_t"),
+                    "n_windows": res.get("n_windows"),
+                    "sharpe_pos_ratio": res.get("sharpe_pos_ratio"),
+                }
+            }
+        )
+    run.step_done("walkforward", f"{len(results)} 组完成")
 
     print(
         "\n说明：连续样本外 Sharpe 通常远低于单窗口数字——这才是可信的真实水平。"

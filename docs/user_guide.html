@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="QuantLab v2 A 股量化交易系统使用说明：安装启动、每日交易、七个页面、研究流程、指标、命令行与故障排查。">
+<title>QuantLab v2 · A 股量化交易系统使用说明</title>
+<style>
+:root{
+  --bg:#f4f7fb;--paper:#fff;--ink:#132238;--muted:#627089;--line:#dfe6ef;
+  --accent:#087f8c;--accent-soft:#e8f5f6;--blue:#2563eb;--ok:#15803d;--ok-soft:#edf8f0;
+  --warn:#a15c07;--warn-soft:#fff7e8;--bad:#b4233c;--bad-soft:#fff0f2;
+  --code:#101c2c;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --side:264px;--radius:14px;--shadow:0 8px 30px rgba(30,52,80,.06)
+}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:24px}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.78 var(--sans);-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}button,input{font:inherit}button{cursor:pointer}
+.sidebar{position:fixed;inset:0 auto 0 0;width:var(--side);padding:26px 20px 18px;background:#0f2033;color:#dbe7f4;display:flex;flex-direction:column;z-index:10;overflow-y:auto}
+.brand{font:700 20px/1.2 var(--mono);letter-spacing:2px;color:#fff}.brand small{display:block;margin-top:8px;font:400 12px/1.5 var(--sans);letter-spacing:1px;color:#91a8be}
+.version{display:inline-block;margin:16px 0 20px;padding:3px 9px;border:1px solid #345068;border-radius:20px;color:#b9cbdc;font-size:11px}
+.search-label{font-size:11px;color:#91a8be;margin-bottom:5px}.search{width:100%;border:1px solid #345068;border-radius:8px;background:#162b40;color:#fff;padding:8px 10px;outline:none}.search:focus{border-color:#51b7c1;box-shadow:0 0 0 3px rgba(81,183,193,.14)}.search::placeholder{color:#7890a6}
+.nav{display:grid;gap:3px;margin-top:18px}.nav a{display:flex;gap:10px;align-items:center;padding:7px 10px;border-radius:7px;color:#b9c9d8;font-size:13px}.nav a:hover{background:#172f46;text-decoration:none;color:#fff}.nav a.active{background:#17404d;color:#8ee7ed}.nav .n{width:20px;color:#66849c;font:11px var(--mono)}.nav a.active .n{color:#8ee7ed}
+.side-foot{margin-top:auto;padding-top:22px;color:#728ba1;font-size:11px;line-height:1.6}
+.main{margin-left:var(--side);padding:36px 42px 80px}.content{max-width:1120px;margin:0 auto}
+.hero{position:relative;overflow:hidden;background:linear-gradient(125deg,#fff 20%,#edf8f8);border:1px solid var(--line);border-radius:20px;padding:38px 42px;box-shadow:var(--shadow);margin-bottom:28px}.hero:after{content:"";position:absolute;width:250px;height:250px;border:52px solid rgba(8,127,140,.05);border-radius:50%;right:-70px;top:-110px;pointer-events:none}
+.eyebrow{font:600 11px/1.5 var(--mono);letter-spacing:2px;color:var(--accent);text-transform:uppercase}h1{font-size:34px;line-height:1.28;letter-spacing:-.5px;margin:10px 0 12px;max-width:760px}h2{font-size:24px;line-height:1.35;margin:0 0 8px;letter-spacing:-.25px}h3{font-size:17px;line-height:1.45;margin:22px 0 8px}h4{font-size:15px;margin:0 0 7px}p{margin:8px 0}.lead{font-size:16px;color:var(--muted);max-width:790px;margin:0}.hero-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:24px}.btn{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);padding:8px 14px;font-size:13px}.btn:hover{text-decoration:none;border-color:#9eb2c4}.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.btn.primary:hover{background:#066c77}.btn.small{padding:4px 10px;font-size:12px}
+.hero-meta{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:18px;color:var(--muted);font-size:12px}.hero-meta span:before{content:"";display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--accent);margin-right:7px;vertical-align:2px}
+.section{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:28px 32px;margin:22px 0;box-shadow:0 2px 10px rgba(30,52,80,.025)}.section-head{display:flex;align-items:flex-start;gap:14px;border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:18px}.section-no{flex:none;display:grid;place-items:center;width:38px;height:38px;border-radius:10px;background:var(--accent-soft);color:var(--accent);font:600 13px var(--mono)}.section-sub{margin:3px 0 0;color:var(--muted);font-size:13px}.anchor{opacity:0;margin-left:8px;font-size:15px}.section-head:hover .anchor{opacity:1}
+.grid{display:grid;gap:14px;margin:14px 0}.grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}.grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}.grid.four{grid-template-columns:repeat(4,minmax(0,1fr))}.card{border:1px solid var(--line);border-radius:11px;padding:16px 18px;background:#fff}.card.soft{background:#f8fafc}.card h3,.card h4{margin-top:0}.card p:last-child{margin-bottom:0}.tag{display:inline-block;padding:1px 7px;border-radius:5px;background:#eef2f7;color:#53637a;font:11px/1.7 var(--mono);white-space:nowrap}.tag.ok{background:var(--ok-soft);color:var(--ok)}.tag.warn{background:var(--warn-soft);color:var(--warn)}.tag.bad{background:var(--bad-soft);color:var(--bad)}.tag.info{background:var(--accent-soft);color:var(--accent)}
+.callout{border:1px solid #bddce0;border-left:4px solid var(--accent);background:#f0f9fa;border-radius:9px;padding:12px 16px;margin:14px 0}.callout.warn{border-color:#edd7aa;border-left-color:var(--warn);background:var(--warn-soft)}.callout.danger{border-color:#efbec7;border-left-color:var(--bad);background:var(--bad-soft)}.callout.ok{border-color:#bee0c8;border-left-color:var(--ok);background:var(--ok-soft)}.callout strong:first-child{display:inline-block;margin-right:5px}.callout p:first-child{margin-top:0}.callout p:last-child{margin-bottom:0}
+.flow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:20px;margin:18px 0}.flow-item{position:relative;border:1px solid var(--line);border-radius:10px;background:#f8fafc;padding:13px 12px;text-align:center;font-size:13px}.flow-item:not(:last-child):after{content:"→";position:absolute;right:-18px;top:50%;transform:translateY(-50%);color:#86a0b4}.flow-item b{display:block;color:var(--accent);font:600 11px var(--mono);margin-bottom:4px}
+.steps{list-style:none;margin:16px 0;padding:0;counter-reset:step}.steps>li{position:relative;padding:0 0 22px 50px;counter-increment:step}.steps>li:before{content:counter(step);position:absolute;left:0;top:1px;width:32px;height:32px;display:grid;place-items:center;border-radius:50%;background:var(--accent);color:#fff;font:600 13px var(--mono)}.steps>li:not(:last-child):after{content:"";position:absolute;left:15px;top:36px;bottom:3px;width:1px;background:#c8d6e2}.steps h3{margin:2px 0 5px}.steps p{margin:5px 0}
+ul,ol{padding-left:22px;margin:8px 0}li{margin:4px 0}.clean{list-style:none;padding-left:0}.clean li{position:relative;padding-left:16px}.clean li:before{content:"";position:absolute;left:1px;top:.78em;width:5px;height:5px;background:#7b93a7;border-radius:50%}.checklist{list-style:none;padding:0;margin:12px 0}.checklist li{margin:7px 0}.checklist input{accent-color:var(--accent);margin-right:8px;vertical-align:-1px}
+code{font:12.5px var(--mono);background:#edf2f7;color:#0b6f7a;border-radius:4px;padding:2px 5px;overflow-wrap:anywhere}pre{position:relative;background:var(--code);color:#e7edf5;border-radius:10px;padding:16px 18px;overflow:auto;margin:12px 0;font:12.5px/1.72 var(--mono);tab-size:2}pre code{background:none;color:inherit;padding:0;font:inherit;overflow-wrap:normal}.copy-btn{position:absolute;right:8px;top:8px;border:1px solid #3c4c60;background:#1c2c3e;color:#c9d7e6;border-radius:6px;padding:3px 8px;font:11px var(--sans)}.copy-btn:hover{background:#293c52}.copy-btn.copied{color:#8ee7ed;border-color:#428b92}
+.table-wrap{overflow-x:auto;margin:12px 0;border:1px solid var(--line);border-radius:10px}table{border-collapse:collapse;width:100%;font-size:13px;background:#fff}th,td{text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid var(--line)}th{background:#f3f6fa;color:#52627a;font-weight:600;white-space:nowrap}tr:last-child td{border-bottom:0}td code{white-space:nowrap}.num{font-family:var(--mono);font-size:12px}.muted{color:var(--muted)}.small{font-size:12px}.ok-text{color:var(--ok)}.warn-text{color:var(--warn)}.bad-text{color:var(--bad)}.nowrap{white-space:nowrap}
+.route{font:11px var(--mono);color:var(--accent);background:var(--accent-soft);padding:2px 7px;border-radius:5px;margin-left:6px;white-space:nowrap}.page-card{position:relative;padding-top:18px}.page-card h3{margin:0 0 7px}.page-card p{font-size:13px;color:var(--muted)}
+details{border:1px solid var(--line);border-radius:9px;margin:10px 0;background:#fff}summary{cursor:pointer;padding:10px 14px;font-weight:600;color:#43546b}details>.details-body{padding:0 16px 12px;border-top:1px solid var(--line)}details[open] summary{background:#f8fafc;border-radius:9px 9px 0 0}
+.status-list{display:grid;grid-template-columns:130px 1fr;gap:8px 14px;font-size:13px}.status-list dt{font-weight:600}.status-list dd{margin:0;color:var(--muted)}
+.no-results{display:none;text-align:center;padding:30px;color:var(--muted)}.no-results.show{display:block}.back-top{position:fixed;right:22px;bottom:20px;width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:#fff;color:var(--accent);box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:.2s}.back-top.show{opacity:1;pointer-events:auto}.footer{text-align:center;color:var(--muted);font-size:12px;padding:26px 0 0}.footer strong{color:var(--ink)}
+@media(max-width:1100px){.grid.four{grid-template-columns:repeat(2,minmax(0,1fr))}.flow{grid-template-columns:repeat(3,minmax(0,1fr))}.flow-item:nth-child(3):after{display:none}.main{padding:28px 26px 70px}}
+@media(max-width:800px){.sidebar{position:relative;width:100%;max-height:none;padding:20px}.side-foot{display:none}.nav{grid-template-columns:repeat(3,minmax(0,1fr));margin-top:12px}.nav a{padding:6px;font-size:12px}.nav .n{display:none}.version{margin:10px 0}.main{margin-left:0;padding:18px 14px 60px}.hero{padding:26px 24px}h1{font-size:28px}.section{padding:22px 20px}.grid.two,.grid.three{grid-template-columns:1fr}.flow{grid-template-columns:1fr;gap:10px}.flow-item:not(:last-child):after{content:"↓";right:50%;top:auto;bottom:-20px;transform:translateX(50%);z-index:1}.flow-item:nth-child(3):after{display:block}.status-list{grid-template-columns:105px 1fr}.back-top{right:14px;bottom:14px}}
+@media(max-width:460px){.nav{grid-template-columns:repeat(2,minmax(0,1fr))}.grid.four{grid-template-columns:1fr}.hero-actions{display:grid}.section-head{gap:10px}h2{font-size:21px}.steps>li{padding-left:42px}}
+@media print{body{background:#fff;font-size:11px;color:#000}.sidebar,.hero-actions,.back-top,.copy-btn,.search,.no-results{display:none!important}.main{margin:0;padding:0}.content{max-width:none}.hero,.section{box-shadow:none;border-color:#bbb;break-inside:auto;margin:12px 0;padding:18px}.hero{background:#fff}h1{font-size:25px}h2{font-size:19px}h3{font-size:15px}.section[hidden]{display:block!important}.card,.callout,tr,details,.flow-item{break-inside:avoid}pre{white-space:pre-wrap;word-break:break-all;background:#f3f3f3;color:#000;border:1px solid #ccc}pre code{color:#000}.grid.three,.grid.four{grid-template-columns:repeat(2,minmax(0,1fr))}.footer{padding:10px}.anchor{display:none}a{color:#000;text-decoration:none}details>.details-body{display:block!important}}
+</style>
+</head>
+<body>
+<aside class="sidebar" aria-label="文档导航">
+  <div class="brand">QUANTLAB<small>A 股量化交易系统 · 使用说明</small></div>
+  <span class="version">适用于 QuantLab v2 / 七页面</span>
+  <label class="search-label" for="doc-search">筛选章节</label>
+  <input class="search" id="doc-search" type="search" placeholder="例如：成交、Sharpe、现金" autocomplete="off">
+  <nav class="nav" id="doc-nav">
+    <a href="#intro"><span class="n">01</span>认识系统</a>
+    <a href="#quickstart"><span class="n">02</span>安装与首次启动</a>
+    <a href="#daily"><span class="n">03</span>每日交易流程</a>
+    <a href="#pages"><span class="n">04</span>七个页面</a>
+    <a href="#research"><span class="n">05</span>研究与模型晋升</a>
+    <a href="#metrics"><span class="n">06</span>指标怎么读</a>
+    <a href="#cli"><span class="n">07</span>命令行速查</a>
+    <a href="#files"><span class="n">08</span>数据与状态文件</a>
+    <a href="#rules"><span class="n">09</span>交易规则与风控</a>
+    <a href="#trouble"><span class="n">10</span>状态与故障排查</a>
+    <a href="#faq"><span class="n">11</span>常见问题</a>
+    <a href="#safety"><span class="n">12</span>安全与风险边界</a>
+  </nav>
+  <div class="side-foot">独立 HTML 文档，无外部资源。<br>命令均应在项目根目录执行。</div>
+</aside>
+<main class="main">
+<div class="content">
+<header class="hero" id="top">
+  <div class="eyebrow">QuantLab v2 · User Guide</div>
+  <h1>A 股量化交易系统使用说明</h1>
+  <p class="lead">从行情与因子到模型预测、样本外回测和次日订单。本说明面向日常使用者和研究人员，重点讲清“今天该点哪里、订单如何写回、结果如何判断”。</p>
+  <div class="hero-actions">
+    <a class="btn primary" href="#daily">查看每日操作</a>
+    <a class="btn" href="#quickstart">首次安装启动</a>
+    <button class="btn" id="print-doc" type="button">打印 / 保存 PDF</button>
+    <button class="btn" id="toggle-details" type="button">展开全部附录</button>
+  </div>
+  <div class="hero-meta"><span>网页默认地址 127.0.0.1:8060</span><span>CLI 可独立运行</span><span>订单由人工在券商执行</span></div>
+</header>
+<div class="grid three" aria-label="重要提醒">
+  <div class="card"><span class="tag bad">交易边界</span><h3>不是自动下单系统</h3><p class="small muted">系统只生成订单建议，不连接券商。实际委托、撤单和成交以券商终端为准。</p></div>
+  <div class="card"><span class="tag warn">每日必做</span><h3>成交后维护现金与持仓</h3><p class="small muted">现金不会根据成交自动更新。现金过期会阻止夜间出单，持仓不实会使后续订单失真。</p></div>
+  <div class="card"><span class="tag info">研究边界</span><h3>样本外结果不等于未来收益</h3><p class="small muted">重点看跨窗口稳定性、成本后表现与留出段，不以单次 Sharpe 或历史排名作收益承诺。</p></div>
+</div>
+<div class="no-results" id="no-results">没有匹配的章节。请尝试“订单”“模型”“回测”“日志”等关键词。</div>
+
+<section class="section doc-section" id="intro">
+  <div class="section-head"><span class="section-no">01</span><div><h2>认识系统<a class="anchor" href="#intro">#</a></h2><p class="section-sub">数据、模型、订单与文件状态组成一条可复现流水线。</p></div></div>
+  <div class="flow" aria-label="系统主流程">
+    <div class="flow-item"><b>STEP 1</b>行情与外部数据</div>
+    <div class="flow-item"><b>STEP 2</b>因子与模型预测</div>
+    <div class="flow-item"><b>STEP 3</b>策略、风控与订单</div>
+    <div class="flow-item"><b>STEP 4</b>人工在券商执行</div>
+    <div class="flow-item"><b>STEP 5</b>成交、现金写回</div>
+  </div>
+  <div class="grid two">
+    <div class="card soft"><h3>系统能做什么</h3><ul class="clean"><li>从 Tushare 获取 A 股行情，并整合估值、北向持股等数据。</li><li>计算技术与基本面因子，训练集成模型并预测未来收益排序。</li><li>以每日重放、次日撮合进行 walk-forward 样本外回测。</li><li>生成次日买卖订单，跟踪持仓、现金、风控和实盘偏差。</li><li>提供公式因子编辑、模型门控、候选晋升与运行日志。</li></ul></div>
+    <div class="card soft"><h3>使用前要知道</h3><ul class="clean"><li>当前默认研究口径为全市场股票池、20 个交易日预测窗口。</li><li>网页读取本地文件；终端任务不依赖网页也能完成并留下记录。</li><li>网页中的长任务由同一批 CLI 在后台执行，关闭页面不会中断。</li><li>行情页使用本地日线缓存，不是券商实时行情或交易接口。</li><li>策略以仅做多 <code>long_topk</code> 为实际交易路径；做空类策略仅供研究。</li></ul></div>
+  </div>
+  <div class="callout"><strong>三个核心目录：</strong><code>outputs/</code> 保存订单、账户、回测与运行记录；<code>models/</code> 保存线上模型和候选；<code>data_cache/</code> 保存行情与因子面板缓存。排错时先查这些文件，不必猜测页面内部状态。</div>
+</section>
+
+<section class="section doc-section" id="quickstart">
+  <div class="section-head"><span class="section-no">02</span><div><h2>安装与首次启动<a class="anchor" href="#quickstart">#</a></h2><p class="section-sub">准备 Python、uv 和 Tushare Token，然后启动网页。</p></div></div>
+  <h3>1. 准备环境</h3>
+  <p>要求 Python 3.10 或更高版本，并使用 <code>uv</code> 管理依赖。以下命令均在项目根目录执行；把示例路径替换为本机实际目录。</p>
+  <pre><code>cd /path/to/stock_predict_v2
+
+# 如尚未安装 uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 网页 + 开发/测试依赖；自动创建 .venv
+uv sync --extra ui --extra dev
+
+# 如需 XGBoost / CatBoost 可选模型，再安装 full extra
+uv sync --extra full --extra ui --extra dev</code></pre>
+  <p class="small muted">只做核心研究时可使用 <code>uv sync --extra dev</code>；要运行本说明中的网页，必须包含 <code>ui</code> 依赖。</p>
+  <h3>2. 配置 Tushare Token</h3>
+  <p>在项目根目录的 <code>config_credentials.toml</code> 中填写：</p>
+  <pre><code>[tushare]
+token = "你的 Tushare Pro Token"</code></pre>
+  <p>也可使用环境变量 <code>TUSHARE_TOKEN</code>，其优先级更高。该凭据文件不应提交到版本库或发送给他人。</p>
+  <pre><code>export TUSHARE_TOKEN="你的 Tushare Pro Token"</code></pre>
+  <div class="callout warn"><strong>首次数据准备可能较久。</strong>首次下载全市场日线、估值和因子面板需要等待并受接口权限、限速和网络影响；后续通常使用本地缓存与增量更新。北向持股等接口还受 Token 权限与每日调用额度限制。</div>
+  <h3>3. 启动网页</h3>
+  <pre><code>uv run python run_webapp2.py</code></pre>
+  <p>终端显示 <code>QuantLab v2 → http://127.0.0.1:8060</code> 后，用浏览器打开该地址。停止服务可在启动终端按 <code>Ctrl+C</code>。</p>
+  <details><summary>自定义端口或开发模式</summary><div class="details-body">
+    <pre><code># 修改监听地址与端口
+HOST=0.0.0.0 PORT=8061 uv run python run_webapp2.py
+
+# 开发热重载
+DEBUG=1 uv run python run_webapp2.py</code></pre>
+    <p class="small muted">默认仅监听本机。改为 <code>0.0.0.0</code> 会允许其他机器访问；当前网页没有登录鉴权，不应直接暴露到公网。</p>
+  </div></details>
+  <h3>4. 首次使用检查</h3>
+  <ul class="checklist">
+    <li><label><input type="checkbox">在“总览”或“交易”页的“现金”中填写券商账户的实际可用现金并保存。</label></li>
+    <li><label><input type="checkbox">如果已有持仓，核对 <code>outputs/holdings.csv</code>；如果为空，系统按空仓处理。</label></li>
+    <li><label><input type="checkbox">在“交易”页点击“生成次日订单”，或在终端运行 <code>./daily_run.sh</code>。</label></li>
+    <li><label><input type="checkbox">到“运行”页查看数据加载、前置体检、模型与订单步骤，直到状态为“完成”。</label></li>
+    <li><label><input type="checkbox">回到“总览”处理“待办”，确认订单日期、champion、现金和持仓没有异常。</label></li>
+  </ul>
+  <p>已有持仓文件使用以下列名。股票代码保留交易所后缀；<code>entry_date</code> 为建仓日，<code>ref_close</code> 为持仓参考价。</p>
+  <pre><code>symbol,shares,entry_date,ref_close
+000001.SZ,1000,2026-01-05,10.80
+600519.SH,100,2026-01-06,1450.00</code></pre>
+  <div class="callout danger"><strong>现金不是总资产。</strong>“现金”填写实际可用资金，不是“现金 + 持仓市值”。首次没有 champion 时，可通过一次夜间任务自动 bootstrap，或先到“模型”页训练候选。</div>
+</section>
+
+<section class="section doc-section" id="daily">
+  <div class="section-head"><span class="section-no">03</span><div><h2>每日交易流程<a class="anchor" href="#daily">#</a></h2><p class="section-sub">T 日收盘后出单，T+1 日人工执行，成交后写回并维护现金。</p></div></div>
+  <div class="callout warn"><strong>订单文件名日期是信号/行情日期。</strong>例如 <code>orders_20261120.csv</code> 通常表示用 11 月 20 日收盘数据生成、供下一交易日执行的订单，不是“11 月 20 日已经成交”的记录。</div>
+  <ol class="steps">
+    <li><h3>T 日收盘后：生成次日订单</h3>
+      <p>在“交易”页点击 <strong>生成次日订单</strong>，或在终端运行：</p>
+      <pre><code>./daily_run.sh</code></pre>
+      <p>网页按钮使用与脚本一致的 3 万本金预设；终端脚本还会先检查交易日，日历不可用或非交易日会安全跳过。任务进行中可点击“查看进度”，不必停留在原页面。</p>
+      <div class="table-wrap"><table><thead><tr><th>小本金预设</th><th>当前值</th><th>含义</th></tr></thead><tbody>
+        <tr><td><code>--capital</code></td><td class="num">30000</td><td>组合资金兜底；存在有效账户现金时以实际现金为准</td></tr>
+        <tr><td><code>--max-positions</code></td><td class="num">6</td><td>最大持仓只数</td></tr>
+        <tr><td><code>--max-weight</code></td><td class="num">0.20</td><td>单只目标权重上限 20%</td></tr>
+        <tr><td><code>--min-notional</code></td><td class="num">2000</td><td>忽略低于 2000 元的调仓差单</td></tr>
+        <tr><td><code>--allowed-boards</code></td><td class="num">main</td><td>新买单仅允许主板</td></tr>
+        <tr><td><code>--skip-unaffordable</code></td><td>开启</td><td>跳过一手都买不起的候选并向后补位</td></tr>
+      </tbody></table></div>
+      <p class="small muted">系统默认每 10 个交易日重新决策一次，非调仓日没有订单可能属于正常情况。不要为“补订单”反复强制执行旧订单。</p>
+    </li>
+    <li><h3>T+1 日开盘前后：核对并人工执行</h3>
+      <p>打开“交易”页的“订单执行单”，先做三项核对：</p>
+      <ul class="clean"><li><strong>订单未过期：</strong>出现“已过期，勿执行”时不要下单，应查明行情与订单日期后重新生成。</li><li><strong>拦截单不执行：</strong>标为“拦截 · 不执行”的订单由决策层排除。</li><li><strong>先卖后买：</strong>先处理卖单腾出资金，再按可用现金处理买单。限价、参考价和预计金额仅供委托参考。</li></ul>
+      <p>在券商终端完成委托后，回到网页逐笔点击 <strong>执行</strong>；决定不做某笔则点 <strong>拒绝</strong>。再次点击同一按钮可撤销该标记。“执行/拒绝”只是本地记录，不会向券商发送任何指令。</p>
+      <p>每笔订单的“分析”可展开，查看选股、排名、风控与订单生成背景。</p>
+    </li>
+    <li><h3>成交后：按实际情况写回持仓</h3>
+      <div class="grid two">
+        <div class="card"><span class="tag warn">全部成交时</span><h3>使用网页确认</h3><p>当所有未拦截、未拒绝订单都已按订单数量成交时，点击 <strong>确认成交，写回持仓</strong>，在二次弹层中核对笔数，再点“确认写回”。</p><p class="small muted">网页会跳过拦截单和拒绝单，并假设其余订单全部成交。过期订单和疑似重复确认会被拦截。</p></div>
+        <div class="card"><span class="tag bad">部分成交 / 价格不同</span><h3>使用实际成交单</h3><p>若有部分成交、未成交或实际数量不同，不要直接假设全部成交。准备 <code>outputs/fills_YYYYMMDD.csv</code>，再运行 <code>./daily_run.sh commit</code>。</p><p class="small muted">脚本检测到当日 fills 文件后按实际成交写回；没有该文件时仍采用全部成交假设。</p></div>
+      </div>
+      <p>实际成交单必须包含 <code>symbol</code>、<code>side</code>、<code>shares</code>、<code>price</code> 四列，方向只使用 <code>buy</code> 或 <code>sell</code>，股数与价格必须大于 0。</p>
+      <pre><code>symbol,side,shares,price
+000001.SZ,sell,500,11.20
+600519.SH,buy,100,1438.50</code></pre>
+      <pre><code># 推荐：成交确认入口；自动读取当天 outputs/fills_YYYYMMDD.csv（如存在）
+./daily_run.sh commit
+
+# 或显式指定实际成交单
+uv run python predict_tomorrow.py --commit --fills outputs/fills_YYYYMMDD.csv
+
+# 仅在确认所有有效订单均全部成交时使用全部成交假设
+uv run python predict_tomorrow.py --commit</code></pre>
+    </li>
+    <li><h3>最后：维护现金并复核</h3>
+      <p>在“交易”页“现金”中填写券商成交、费用、分红和出入金之后的<strong>实际可用现金</strong>并保存。随后检查：</p>
+      <ul class="checklist"><li><label><input type="checkbox">“持仓明细”的代码和股数与券商一致。</label></li><li><label><input type="checkbox">“账户快照”的现金、持仓市值和净值合理。</label></li><li><label><input type="checkbox">四步流程均达到预期状态，没有过期订单或重复确认提示。</label></li><li><label><input type="checkbox">“风控五层”与“净值与偏差”没有需要处理的新告警。</label></li></ul>
+    </li>
+  </ol>
+  <h3>可选：定时执行夜间任务</h3>
+  <p>可在工作日收盘并待日线数据就绪后运行。项目示例为 18:10；实际时间应根据数据源就绪情况调整。</p>
+  <pre><code># crontab 示例；替换为本机项目路径
+10 18 * * 1-5  cd /path/to/stock_predict_v2 &amp;&amp; ./daily_run.sh</code></pre>
+  <p class="small muted">定时出单不等于定时交易。次日仍需人工核对、执行、成交写回与现金维护。日志位于 <code>outputs/job_logs/daily_YYYYMMDD.log</code>。</p>
+</section>
+
+<section class="section doc-section" id="pages">
+  <div class="section-head"><span class="section-no">04</span><div><h2>七个页面怎么用<a class="anchor" href="#pages">#</a></h2><p class="section-sub">顶部状态条显示运行、champion、现金与最新订单；侧栏切换页面。</p></div></div>
+  <div class="grid two">
+    <article class="card page-card"><h3>总览 <span class="route">/</span></h3><p>每天先看这里。除待办、champion、风控和运行状态外，还按最新订单落实状态展示当前持仓，支持再次编辑执行/拒绝、查看完整持仓历史、手动校正精确持仓，以及维护现金和交易费用设置。</p><ul class="clean small"><li>持仓状态：已执行、部分落实、待执行、已拒绝、无本批订单或已拦截。</li><li>精确校正：按 CSV 编辑代码、股数、建仓日和参考价；保存后追加完整历史快照。</li><li>个性化设置：佣金、印花税、最低佣金、冲击成本与参与率；新启动的出单和回测生效。</li></ul></article>
+    <article class="card page-card"><h3>交易 <span class="route">/trade</span></h3><p>完成生成订单、照单执行、成交确认、现金维护四步。还显示账户快照、目标仓位与当前仓位、持仓明细、实盘净值和五层风控。</p><p class="small">“目标仓位”由订单推导，同样基于未拦截、未拒绝订单全部成交的假设。</p></article>
+    <article class="card page-card"><h3>模型 <span class="route">/models</span></h3><p>管理 champion（线上）、staging（候选）与 archive（退役）。训练区用于生成候选并进入门控，评估区用于 rolling 或冻结工件的信号评估；两个区域分别显示启动反馈、当前步骤、任务步骤数、阶段进度/总步数、总耗时和阶段 ETA，只有对应任务全部结束才显示完成。</p><p class="small">候选工件准备完成不等于整个训练任务完成，门控双回放仍可能在运行。no-new 表示没有新成熟标签并复用原参数，不显示为新增训练。晋升会替换 champion 并记录审计；删除 staging 是永久删除。</p></article>
+    <article class="card page-card"><h3>回测 <span class="route">/backtest</span></h3><p>启动增量或滚动窗口 walk-forward，选择产物并查看净值、基准、窗口表、HOLDOUT、Deflated Sharpe、实验对比、冲击成本敏感性与试验记录。</p><p class="small">长任务可能运行数小时。页面展示落盘产物，不会在浏览器里即时重算整套回测。</p></article>
+    <article class="card page-card"><h3>因子 <span class="route">/factors</span></h3><p>按类别、准入、来源/状态和关键字筛选，查看 RankIC、ICIR、多空收益、换手、模型贡献、衰减与冗余簇。点击因子名进入六组详情图。</p><p class="small">“新建公式因子”提供 DSL 校验、保存草稿和一键评估；草稿默认停用，不会自动进入线上模型。</p></article>
+    <article class="card page-card"><h3>行情 <span class="route">/market</span></h3><p>搜索个股并查看 K 线、成交量、MA20/60、布林带、RSI 和 MACD，可切换近 1 年、近 2 年或全部缓存。下方展示全市场涨跌家数、涨跌停和平均/中位数涨跌幅。</p><p class="small">遵循 A 股红涨绿跌。首次计算市场宽度约需数秒；数据截止日以页面显示为准。</p></article>
+    <article class="card page-card"><h3>运行 <span class="route">/runs</span></h3><p>统一查看 CLI 与网页启动的后台任务，包括夜间出单、walk-forward、训练、信号/因子评估、偏差跟踪及终端成交确认。列表显示最近 60 条记录。</p><p class="small">点击 run_id 查看步骤、实时进度、事件、产物、参数、失败堆栈和原始日志末尾；活任务可发送终止信号。</p></article>
+    <article class="card page-card"><h3>运行详情 <span class="route">/runs/&lt;run_id&gt;</span></h3><p>排错的主要入口。先看失败步骤和错误摘要，再展开“堆栈”与“原始日志（末尾）”，最后核对“产物”是否真实存在。</p><p class="small">运行中的详情页约每 2 秒刷新；终态后无需持续等待。关闭详情页不会停止后台任务。</p></article>
+  </div>
+  <h3>因子研究页面的具体操作</h3>
+  <div class="table-wrap"><table><thead><tr><th>操作</th><th>步骤</th><th>结果与注意事项</th></tr></thead><tbody>
+    <tr><td>全库评估</td><td>“因子”→“运行全库评估”</td><td>更新因子评估表；公式库默认并不全部进入生产面板。</td></tr>
+    <tr><td>完整诊断</td><td>“全库评估 + 诊断”</td><td>额外生成 IC 衰减、相关矩阵和模型对比，耗时更长。</td></tr>
+    <tr><td>单因子评估</td><td>进入因子详情→“评估该因子”</td><td>原生因子使用面板；公式因子临时现算，不读写共享生产缓存。</td></tr>
+    <tr><td>新建公式因子</td><td>“新建公式因子”→填写定义→“校验”→“保存草稿”→“立即评估”</td><td>保存到 <code>factor_library/custom.yaml</code>，<code>enabled=false</code>；因子库变化会使下一次面板读取全量重建一次。</td></tr>
+    <tr><td>启用公式因子</td><td>评估后按因子库规则编辑 YAML 与全局开关</td><td><code>USE_FORMULA_FACTORS</code> 默认关闭；启用不是网页保存草稿的自动后果。</td></tr>
+  </tbody></table></div>
+  <details><summary>公式因子 DSL 示例</summary><div class="details-body">
+    <p>例如创建一个 5 日动量因子：id 使用字母或下划线开头，只能包含字母、数字和下划线，最长 64 字符。</p>
+    <pre><code>id: my_momentum_5
+名称: 五日动量
+类别: custom
+预期方向: +1（越大越好）
+公式: adj_close / ts_delay(adj_close, 5) - 1</code></pre>
+    <p class="small muted">常用函数包括 <code>ts_delay</code>、<code>ts_mean</code>、<code>ts_std</code>、<code>ts_corr</code>、<code>ts_rank</code>、<code>cs_rank</code>、<code>safe_div</code>、<code>signed_power</code>。编辑器会列出当前可用函数与依赖列；完整语法见 <code>factor_library/README.md</code>。</p>
+  </div></details>
+</section>
+
+<section class="section doc-section" id="research">
+  <div class="section-head"><span class="section-no">05</span><div><h2>研究与模型晋升<a class="anchor" href="#research">#</a></h2><p class="section-sub">先验证信号，再做样本外回测，最后通过门控决定是否替换线上模型。</p></div></div>
+  <ol class="steps">
+    <li><h3>评估因子，而不是直接加进线上模型</h3><p>在“因子”页运行单因子或全库评估，结合 RankIC、ICIR、分层单调性、换手、近期衰减与相关性判断。通过准入代表有研究价值，不代表一定提升组合收益。</p></li>
+    <li><h3>做信号评估，区分“排序力”和“可交易收益”</h3><p>在“模型”页选择 <code>rolling</code>（滚动重训）或 <code>champion</code>（冻结线上工件），点击“信号评估”。该任务只看 IC 与分位数收益，不经过实际撮合，不能替代 walk-forward。</p></li>
+    <li><h3>用 walk-forward 检查跨时间表现</h3><p>在“回测”页选择引擎：</p>
+      <div class="table-wrap"><table><thead><tr><th>引擎</th><th>适用场景</th><th>结果口径</th></tr></thead><tbody>
+        <tr><td><code>incremental</code></td><td>评估与线上增量集成更接近的连续重放</td><td>单一组合跨窗口连续，持仓和现金延续；窗口指标可从连续曲线切段复算</td></tr>
+        <tr><td><code>windowed</code></td><td>研究逐窗口训练与窗口内因子筛选</td><td>每个窗口独立从空仓重放；窗口指标不与拼接曲线逐段相等</td></tr>
+      </tbody></table></div>
+      <p>比较实验时尽量固定数据快照、OOS 区间、本金、成本与交易约束。页面提示 OOS 区间不同，意味着差异不只是方法差异。</p>
+    </li>
+    <li><h3>训练候选并查看门控</h3><p>在“模型”页点击“训练候选模型 → staging”。候选先进行门控评估，不会因训练完成自动替换 champion。重点查看 ΔSharpe、Δ回撤、评估天数、评估区间及警告。</p>
+      <div class="callout warn"><strong>评估可疑时不要直接晋升。</strong>两侧指标逐项相同、champion 特征缺失、没有 evaluation.json 或门控未通过，都说明需要进一步核查。人工绕过这些警告时必须填写至少 6 个字符的理由，理由会进入审计。</div>
+    </li>
+    <li><h3>对比后晋升</h3><p>在模型对比区设 A 为基准、B 为对照，页面显示 <strong>Δ = B − A</strong>。Sharpe、收益等通常越高越好；最大回撤为负数，越接近 0 越好，因此 Δ回撤为正通常表示改善。</p><p>确认配方和特征差异后，在 staging 条目中点击“晋升”并二次确认。夜间任务运行时禁止晋升或删除候选，避免同一晚读取到不同模型。</p></li>
+  </ol>
+  <h3>研究纪律</h3>
+  <div class="grid three">
+    <div class="card soft"><h4>只看样本外</h4><p class="small">训练段分数不能证明泛化能力。结论以拼接 OOS 曲线、正窗口占比和成本后结果为主。</p></div>
+    <div class="card soft"><h4>留出段只做最终报告</h4><p class="small">HOLDOUT 之前的区间用于选型；不要为了改善结果反复查看并调整 HOLDOUT。</p></div>
+    <div class="card soft"><h4>保留每次实验</h4><p class="small">最新 CLI 结果写入 <code>outputs/walkforward/</code> 并可能覆盖前次。重要实验应复制到独立的 <code>outputs/experiments/</code> 子目录。</p></div>
+  </div>
+  <div class="callout"><strong>当前推荐起点：</strong>保持全市场 <code>UNIVERSE_MODE=all</code>、20 日预测窗口和统一成本口径。旧的小股票池筛选方式已弃用；缩小股票池得到的结果不应直接与当前全市场结论混用。</div>
+</section>
+
+<section class="section doc-section" id="metrics">
+  <div class="section-head"><span class="section-no">06</span><div><h2>指标怎么读<a class="anchor" href="#metrics">#</a></h2><p class="section-sub">不要只找“越高越好”的数字，要同时看收益、风险、稳定性与统计可信度。</p></div></div>
+  <div class="table-wrap"><table><thead><tr><th>指标</th><th>含义</th><th>阅读重点</th></tr></thead><tbody>
+    <tr><td>OOS</td><td>Out-of-Sample，样本外区间</td><td>模型训练和选型未直接使用的数据；仍不能等同未来实盘。</td></tr>
+    <tr><td>Sharpe（净）</td><td>单位波动对应的超额收益，页面使用成本后口径</td><td>越高通常越好，但必须结合样本长度、正窗口占比和回撤。</td></tr>
+    <tr><td>Sortino</td><td>只惩罚下行波动的风险调整收益</td><td>适合与 Sharpe 对照，观察下行风险是否突出。</td></tr>
+    <tr><td>年化收益 / 总收益</td><td>区间收益的年度化或累计表现</td><td>核对 OOS 起止日、初始资金、成本和基准。</td></tr>
+    <tr><td>最大回撤</td><td>净值从历史高点到随后低点的最大跌幅</td><td>通常为负数，越接近 0 越好；评估自己能否承受。</td></tr>
+    <tr><td>Alpha / Beta</td><td>相对基准的超额收益 / 市场敏感度</td><td>Alpha 要结合 NW-t 和区间；Beta 不是越低或越高就绝对更好。</td></tr>
+    <tr><td>PredIC</td><td>模型预测与未来实现收益的截面相关性</td><td>衡量排序力；长期为正比单日极高更重要。</td></tr>
+    <tr><td>RankIC</td><td>因子值排序与未来收益排序的相关性</td><td>看方向、均值和跨窗口稳定性，不只看全区间平均值。</td></tr>
+    <tr><td>RankICIR / ICIR</td><td>IC 均值相对其波动的稳定性</td><td>绝对值较高通常表示信号更稳定，需与 IC 方向一起解读。</td></tr>
+    <tr><td>IC t 值</td><td>IC 均值显著异于 0 的统计量</td><td>绝对值约 2 常作为参考；仍需防止多重试验与数据窥探。</td></tr>
+    <tr><td>Newey–West t（NW-t）</td><td>考虑时间序列自相关后的显著性统计量</td><td>与 Alpha 方向一起读；页面以绝对值 2 作为徽章参考线。</td></tr>
+    <tr><td>正窗口占比</td><td>Sharpe 或 PredIC 为正的 OOS 窗口比例</td><td>衡量跨时间可复现性。增量引擎旧产物会以曲线复算值为准。</td></tr>
+    <tr><td>Deflated Sharpe</td><td>考虑多次试验后的“真实 Sharpe &gt; 0”概率</td><td>越接近 1 越好；页面以 0.95 为参考线，试验越多折扣越重要。</td></tr>
+    <tr><td>换手率</td><td>仓位变化与交易频率</td><td>高换手会放大佣金、印花税与冲击成本，毛信号不一定能转化为净收益。</td></tr>
+    <tr><td>贡献分位 / 冗余簇</td><td>因子在模型内的相对贡献 / 高相关因子分组</td><td>独立 IC 高不等于边际贡献高；|corr|≥0.8 会在主表标注同簇。</td></tr>
+  </tbody></table></div>
+  <div class="grid two">
+    <div class="callout ok"><strong>页面可信度徽章：</strong>Sharpe&gt;0 窗口占比达到 60%、PredIC&gt;0 窗口占比达到 50%、|NW-t| 达到 2 时分别显示为通过色。这些是界面筛查线，不是收益保证或万能阈值。</div>
+    <div class="callout warn"><strong>实验噪声：</strong>项目页面提示，同一配置重跑的 Sharpe 随机波动约为 ±0.4。落在这个范围内的差异不应单独被当成改进证据。</div>
+  </div>
+  <h3>五层风控乘数</h3>
+  <p>“交易”页的总乘数由各层叠乘得到，只缩放目标仓位。显示“样本不足”或“已关闭”的层不参与有效降仓，不应把总乘数误解为收益率。</p>
+  <div class="table-wrap"><table><thead><tr><th>层</th><th>当前默认行为</th><th>主要输入</th></tr></thead><tbody>
+    <tr><td>波动目标</td><td>实现波动高于 15% 年化目标时降仓</td><td>近 20 日已实现净值波动；历史不足时不触发</td></tr>
+    <tr><td>回撤刹车</td><td>回撤超过 20% 时再乘 0.5</td><td>已实现净值相对历史高点的回撤</td></tr>
+    <tr><td>IC 降仓</td><td>近 20 日成熟 OOS IC 在 +0.02 与 −0.01 间映射仓位</td><td>只有预测窗口已成熟的 IC；样本不足不降仓</td></tr>
+    <tr><td>择时 regime</td><td>默认关闭</td><td>大盘状态；启用后由决策端判定</td></tr>
+    <tr><td>IV 降仓</td><td>隐波处于近 60 日高位区域时降仓</td><td><code>opt_vix_like</code>；数据不可得时显示未知</td></tr>
+  </tbody></table></div>
+</section>
+
+<section class="section doc-section" id="cli">
+  <div class="section-head"><span class="section-no">07</span><div><h2>命令行速查<a class="anchor" href="#cli">#</a></h2><p class="section-sub">网页与 CLI 共用落盘契约。以下命令都在项目根目录运行。</p></div></div>
+  <h3>日常与网页</h3>
+  <pre><code># 启动网页（默认 http://127.0.0.1:8060）
+uv run python run_webapp2.py
+
+# 推荐每日入口：交易日检查 + 数据更新 + 出单
+./daily_run.sh
+
+# 成交后写回持仓；自动使用当天实际成交单（如存在）
+./daily_run.sh commit
+
+# 直接使用夜间 CLI，自定义资金与持仓约束
+uv run python predict_tomorrow.py --capital 1000000 \
+  --max-positions 20 --max-weight 0.10 --min-notional 5000
+
+# 强制本次重训（仍会走模型门控）
+uv run python predict_tomorrow.py --force-retrain
+
+# 强制本次完整调仓
+uv run python predict_tomorrow.py --force-rebalance
+
+# 只生成回测 vs 实盘偏差报告
+uv run python predict_tomorrow.py --tracking-report</code></pre>
+  <h3>回测与研究</h3>
+  <pre><code># 当前全市场口径：增量引擎 walk-forward
+UNIVERSE_MODE=all FORWARD_WINDOW=20 TRAIN_WINDOW=500 USE_IMPACT_COST=1 \
+  uv run python scripts/run_walkforward.py --engine incremental
+
+# 滚动窗口引擎，并对比全特征与窗口内因子筛选
+uv run python scripts/run_walkforward.py --engine windowed --compare
+
+# 限定研究区间（环境变量须在命令前设置）
+START_DATE=2020-01-01 END_DATE=2024-12-31 \
+  uv run python scripts/run_walkforward.py --engine windowed
+
+# 训练候选 → staging，并做门控评估
+uv run python scripts/run_pipeline.py --mode train
+
+# 信号评估：冻结 champion；也可把 champion 改成 rolling
+uv run python scripts/run_pipeline.py --mode modeleval --set model_ref=champion
+
+# 因子评估：指定两个原生因子与回看区间
+uv run python scripts/run_pipeline.py --mode factoreval \
+  --set factor_subset=ep,bp --set lookback_days=730
+
+# 评估公式因子草稿：不读写共享因子面板缓存
+uv run python scripts/run_pipeline.py --mode factoreval --draft my_factor
+
+# 人工晋升指定候选
+uv run python predict_tomorrow.py --promote &lt;staging_id&gt;</code></pre>
+  <div class="callout warn"><strong>参数覆盖要在进程启动前完成。</strong><code>config.py</code> 在 import 时读取环境变量，因此使用上面的“环境变量 + 命令”形式。<code>run_pipeline.py --set</code> 会校验参数，未知参数、越界或非法选项以退出码 2 拒绝。</div>
+  <details><summary>验证安装与运行测试</summary><div class="details-body">
+    <pre><code># 合成数据回测冒烟
+uv run python tests/test_backtest_synthetic.py
+
+# 完整测试
+uv run pytest tests/ -v</code></pre>
+    <p class="small muted">测试用于验证软件行为，不代表策略实盘有效性。某些真实数据回归测试在缓存缺失时会跳过。</p>
+  </div></details>
+</section>
+
+<section class="section doc-section" id="files">
+  <div class="section-head"><span class="section-no">08</span><div><h2>数据与状态文件<a class="anchor" href="#files">#</a></h2><p class="section-sub">页面是这些文件的视图；理解文件语义有助于避免重复成交和状态错乱。</p></div></div>
+  <div class="table-wrap"><table><thead><tr><th>文件 / 目录</th><th>用途</th><th>使用注意</th></tr></thead><tbody>
+    <tr><td><code>outputs/orders_YYYYMMDD.csv</code></td><td>次日买卖订单</td><td>日期来自信号数据日；包含方向、股数、限价/参考价、原因和拦截状态。</td></tr>
+    <tr><td><code>outputs/holdings.csv</code></td><td>系统认定的当前持仓</td><td>由成交确认或总览“精确持仓校正”更新；与券商不一致时，下一批订单也会不一致。</td></tr>
+    <tr><td><code>outputs/holdings_history.csv</code></td><td>每次持仓变更的完整历史快照</td><td>订单确认、实际成交和手动校正都会追加；空仓也有记录，按 snapshot_id 分组。</td></tr>
+    <tr><td><code>outputs/trading_settings.json</code></td><td>个性化费用与撮合设置</td><td>总览页维护；新启动的出单和回测读取，环境变量优先，进行中的任务不改变。</td></tr>
+    <tr><td><code>outputs/account.csv</code></td><td>每日实际可用现金</td><td>网页保存会追加一行；最后一个有效 cash 用于估值，文件修改时间用于新鲜度检查。</td></tr>
+    <tr><td><code>outputs/fills_YYYYMMDD.csv</code></td><td>券商实际成交记录</td><td>四列必需；适合部分成交。<code>daily_run.sh commit</code> 只自动查找执行当天的文件。</td></tr>
+    <tr><td><code>outputs/execution_state_YYYYMMDD.json</code></td><td>网页“执行/拒绝”标记</td><td>按执行当天保存；只有“拒绝”会在成交确认时跳过，“执行”是进度记录。</td></tr>
+    <tr><td><code>outputs/live_risk_state.json</code></td><td>净值与成熟 IC 等风控状态</td><td>长期积累，不是普通临时缓存；不要随意删除。</td></tr>
+    <tr><td><code>outputs/live_risk_state_pred_hist.parquet</code></td><td>历史预测分</td><td>供未来标签成熟后计算真 OOS IC 与模型定权。</td></tr>
+    <tr><td><code>outputs/tracking/</code></td><td>实盘偏差报告与每日快照</td><td>网页“净值与偏差”和跟踪告警的数据来源。</td></tr>
+    <tr><td><code>outputs/runs/&lt;run_id&gt;/</code></td><td>一次任务的完整记录</td><td><code>run.json</code> 为状态快照，<code>events.jsonl</code> 为事件流，<code>run.log</code> 为原始输出。</td></tr>
+    <tr><td><code>outputs/walkforward/</code></td><td>最近一次 canonical 回测产物</td><td>包含 <code>meta.json</code>、<code>oos_curve.parquet</code>、<code>window_metrics.parquet</code>、<code>oos_bench.parquet</code>；新运行可能覆盖。</td></tr>
+    <tr><td><code>outputs/experiments/</code></td><td>独立实验与试验记录</td><td>用于横向对比；<code>trials.jsonl</code> 的独立配置数进入多重检验修正。</td></tr>
+    <tr><td><code>models/champion/</code></td><td>当前线上冻结工件</td><td>包含 manifest 和模型文件；夜间未触发重训时直接使用。</td></tr>
+    <tr><td><code>models/staging/</code></td><td>待评估或待决策候选</td><td>训练完成不代表上线；已晋升候选可能保留同 id 副本。</td></tr>
+    <tr><td><code>models/archive/</code></td><td>已退役 champion</td><td>用于留档和模型对比。</td></tr>
+    <tr><td><code>models/promotions.log</code></td><td>模型与网页写操作审计</td><td>记录晋升、删除、现金、启动任务等操作。</td></tr>
+    <tr><td><code>factor_library/custom.yaml</code></td><td>网页保存的公式因子草稿</td><td>默认 <code>enabled=false</code>；修改因子库会改变缓存签名。</td></tr>
+    <tr><td><code>data_cache/</code></td><td>行情、估值与因子面板缓存</td><td>不是账户状态。排错时不要与 outputs 中的风控/持仓文件一起清空。</td></tr>
+  </tbody></table></div>
+  <h3>一次运行的目录结构</h3>
+  <pre><code>outputs/runs/&lt;run_id&gt;/
+├── run.json        # 状态、步骤、进度、心跳、pid、产物与失败信息
+├── events.jsonl    # run_start / step_start / artifact / error / run_end 等事件
+├── run.log         # 原始标准输出与错误输出
+└── reports/        # pipeline 步骤报告（适用时）</code></pre>
+</section>
+
+<section class="section doc-section" id="rules">
+  <div class="section-head"><span class="section-no">09</span><div><h2>交易规则、成本与防泄露<a class="anchor" href="#rules">#</a></h2><p class="section-sub">回测与次日订单共享决策及风控实现，但真实成交仍可能与模拟不同。</p></div></div>
+  <h3>A 股撮合与成本口径</h3>
+  <div class="table-wrap"><table><thead><tr><th>项目</th><th>系统当前默认</th><th>实际使用时的含义</th></tr></thead><tbody>
+    <tr><td>决策与成交</td><td>T 日收盘后决策，T+1 日行情撮合</td><td>实盘订单也是供下一交易日人工执行，不能按 T 日收盘价假设成交。</td></tr>
+    <tr><td>T+1</td><td>当日买入不可当日卖出</td><td>由回测撮合层强制；实际券商同样需遵守。</td></tr>
+    <tr><td>交易单位</td><td>1 手 = 100 股</td><td>订单按整手生成；小账户可开启买不起即跳过。</td></tr>
+    <tr><td>涨跌停</td><td>按次日价格与涨跌停条件判断可成交性</td><td>被系统拦截的订单不执行；真实排队和流动性仍可能不同。</td></tr>
+    <tr><td>参与率</td><td>单笔成交不超过次日成交额的 10%</td><td>防止回测在大资金下假设无限流动性。</td></tr>
+    <tr><td>佣金</td><td>买卖双边 0.02%，每笔最低 5 元</td><td>小额订单尤其受最低佣金影响。</td></tr>
+    <tr><td>印花税</td><td>卖出单边 0.1%</td><td>属于系统回测配置，不保证等同当前券商或税费政策。</td></tr>
+    <tr><td>冲击成本</td><td>默认开启，K = 0.1 的平方根模型</td><td>订单相对成交额越大，估算冲击越高；可做敏感性分析。</td></tr>
+  </tbody></table></div>
+  <p class="small muted">以上费率是系统初始默认口径。可在总览“交易费用与撮合设置”中按实际券商修改并持久化；新启动的出单和回测会读取该设置，环境变量仍优先。回测产物的 meta.json 会保存当次费用快照。实际交易以券商费用和现行规则为准。</p>
+  <h3>防泄露的关键约定</h3>
+  <div class="grid two">
+    <div class="card soft"><h4>训练与测试之间有隔离带</h4><p class="small"><code>EMBARGO_DAYS</code> 默认等于 <code>FORWARD_WINDOW</code>，避免训练标签跨进 OOS 区间；配置要求隔离天数不得小于预测窗口。</p></div>
+    <div class="card soft"><h4>只用成熟标签评分</h4><p class="small">20 日预测必须等对应未来收益已经实现后，才进入 IC 定权和 IC 风控，不能提前用未成熟结果。</p></div>
+    <div class="card soft"><h4>因子选择只看训练段</h4><p class="small">启用窗口内因子筛选时，每个窗口仅用自身训练段选因子，不读取测试段表现。</p></div>
+    <div class="card soft"><h4>决策与成交隔一天</h4><p class="small">因子与决策只使用决策日及以前数据，撮合使用下一交易日行情，避免把未来价格偷带进信号。</p></div>
+  </div>
+  <div class="callout warn"><strong>回测与实盘仍会有偏差。</strong>委托排队、部分成交、停牌、真实费用、现金维护延迟、数据修订和人工拒绝都可能造成偏差。应通过“偏差跟踪报告”和实际对账持续监控，而不是修改历史状态让曲线更好看。</div>
+</section>
+
+<section class="section doc-section" id="trouble">
+  <div class="section-head"><span class="section-no">10</span><div><h2>状态与故障排查<a class="anchor" href="#trouble">#</a></h2><p class="section-sub">统一顺序：总览待办 → 运行详情 → 原始日志 → 对应状态文件。</p></div></div>
+  <h3>运行状态含义</h3>
+  <dl class="status-list">
+    <dt><span class="tag info">运行中</span></dt><dd>进程存在且心跳正常，可查看当前阶段、进度和预计剩余时间。</dd>
+    <dt><span class="tag ok">完成</span></dt><dd>任务正常写入终态；仍需检查产物和订单是否符合预期。</dd>
+    <dt><span class="tag bad">失败</span></dt><dd>展开失败卡片、堆栈和原始日志，定位具体步骤。</dd>
+    <dt><span class="tag warn">已终止</span></dt><dd>任务收到终止信号并写下终态；不要假设所有产物都已完整生成。</dd>
+    <dt><span class="tag warn">疑似卡住</span></dt><dd>pid 仍存在，但心跳超过 3 分钟未更新。先查日志与系统资源，再决定是否终止。</dd>
+    <dt><span class="tag bad">已中断</span></dt><dd>记录仍称 running，但 pid 已不存在，常见于强制结束或机器重启。该状态不能靠页面“终止”修复。</dd>
+  </dl>
+  <h3>按现象排查</h3>
+  <div class="table-wrap"><table><thead><tr><th>现象</th><th>常见原因</th><th>处理方法</th></tr></thead><tbody>
+    <tr><td>夜间体检失败，退出码 3</td><td>现金文件缺失、无有效 cash、现金超过默认 4 天未更新；或面板过旧、最新覆盖不足</td><td>先维护真实可用现金，再查看失败条目。面板应更新到近期，最新股票数不得低于近 20 日中位数的 90%。不要常规使用 <code>--skip-preflight</code> 绕过。</td></tr>
+    <tr><td>订单显示“已过期”</td><td>订单日期早于行情缓存最新日</td><td>不要执行或确认。检查新行情为何已落盘，再用一致的持仓、现金和最新数据重新生成。</td></tr>
+    <tr><td>没有订单</td><td>非调仓日、非交易日、前置体检失败、任务仍在运行或没有可执行候选</td><td>先看“运行”页最后一步与日志。非调仓日无订单可以正常，不要盲目使用强制调仓。</td></tr>
+    <tr><td>提示已有重型任务</td><td>夜间、回测、训练、模型/因子评估或冲击任务共用大内存面板</td><td>等待现有任务结束，或进入其详情确认状态。网页对这些任务限制同时只跑一个，防止 OOM 和缓存冲突。</td></tr>
+    <tr><td>无法确认成交</td><td>订单过期、疑似已确认、全部拦截/拒绝或没有订单</td><td>按按钮旁原因处理。重复确认会重复加仓，不要强制绕过。</td></tr>
+    <tr><td>实际只成交一部分</td><td>网页确认采用全部成交假设</td><td>改用实际 fills CSV 的 CLI 流程，并按券商结果核对持仓与现金。</td></tr>
+    <tr><td>没有 champion</td><td>首次使用或模型目录不完整</td><td>运行夜间任务自动 bootstrap，或训练并晋升候选；确认 <code>models/champion/manifest.json</code> 存在。</td></tr>
+    <tr><td>champion 年龄告警</td><td>超过 48 个交易日临近超龄，超过 60 个交易日超龄</td><td>让夜间自适应重训与门控运行；必要时使用 <code>--force-retrain</code>，仍应检查结果而非直接替换。</td></tr>
+    <tr><td>候选不能晋升/删除</td><td>夜间任务正在读取模型，或候选已不存在</td><td>等夜间任务结束并刷新；未达门槛的晋升需填写理由。</td></tr>
+    <tr><td>回测没有 HOLDOUT / DSR</td><td>读取的是功能加入前的旧产物</td><td>用当前版本重跑；不要为获得更好看的结果反复移动 HOLDOUT 起点。</td></tr>
+    <tr><td>因子详情图缺失</td><td>尚未评估、未通过准入，或未运行诊断</td><td>先评估该因子；衰减/相关/模型对比需“全库评估 + 诊断”。分层与逐日 IC 通常只为准入通过因子落盘。</td></tr>
+    <tr><td>行情页为空</td><td>没有 <code>data_cache/tushare/daily_*.parquet</code></td><td>先运行夜间任务准备行情缓存；同时检查 Token、权限、限速与网络。</td></tr>
+    <tr><td>修改代码后结果不变</td><td>命中了因子或数据缓存</td><td>先核对配置快照与缓存签名。仅在开发排错时有针对地清理相关数据缓存，避免误删账户和风控状态。</td></tr>
+  </tbody></table></div>
+  <h3>需要保留的排错信息</h3>
+  <ul class="clean"><li>run_id、任务类型、开始时间和失败步骤。</li><li>失败摘要、完整堆栈和 <code>run.log</code> 末尾。</li><li>最新订单日、行情最新日、账户现金日期与 champion id。</li><li>若涉及成交差异，保留原始 orders、实际 fills、执行标记及券商对账单。</li></ul>
+</section>
+
+<section class="section doc-section" id="faq">
+  <div class="section-head"><span class="section-no">11</span><div><h2>常见问题<a class="anchor" href="#faq">#</a></h2><p class="section-sub">日常操作中最容易混淆的行为。</p></div></div>
+  <details><summary>关闭浏览器页面会中断任务吗？</summary><div class="details-body"><p>不会。网页启动的任务由后台 CLI 子进程执行，状态持续写入 <code>outputs/runs/</code>。重新打开“运行”页即可继续查看。终端独立运行的 CLI 也不依赖网页服务。</p></div></details>
+  <details><summary>点“执行”会真的向券商下单吗？</summary><div class="details-body"><p>不会。它只在本地 <code>execution_state_YYYYMMDD.json</code> 记录执行进度。“拒绝”会让后续全部成交假设跳过该订单，但同样不会撤销券商委托。</p></div></details>
+  <details><summary>为什么已经点了“执行”，现金还没有变化？</summary><div class="details-body"><p>执行勾选不是成交入账。持仓需要成交确认或实际 fills 写回，现金必须按券商实际结果手动维护。</p></div></details>
+  <details><summary>部分成交时，能否把未成交部分直接点“拒绝”再网页确认？</summary><div class="details-body"><p>“拒绝”会跳过整笔订单，不能表达部分数量，因此不适合记录部分成交。应优先使用包含实际股数和成交价的 fills CSV；也可在总览“精确持仓校正”中按券商结果修正当前账本。两种方式都会保留完整历史，写回后仍需与券商对账。</p></div></details>
+  <details><summary>训练完成后为什么订单仍使用旧模型？</summary><div class="details-body"><p>训练产物进入 staging，不会自动晋升。只有门控通过并晋升，或首次 bootstrap 后，候选才成为 champion。模型页可查看当前线上 id 和晋升审计。</p></div></details>
+  <details><summary>staging 中为什么出现与 champion 相同的 id？</summary><div class="details-body"><p>晋升采用复制而非移动，已晋升候选可能留一份副本。这不是待决策的新候选，不需要再次晋升；确认无用后才考虑删除。</p></div></details>
+  <details><summary>信号评估很好，为什么 walk-forward 收益仍可能差？</summary><div class="details-body"><p>信号评估主要看预测排序，不完整反映仓位、换手、涨跌停、T+1、整手、成本和资金约束。可交易结论应以每日重放的成本后 OOS 结果为准。</p></div></details>
+  <details><summary>可以直接在网页切换资金预设吗？</summary><div class="details-body"><p>“生成次日订单”按钮固定使用当前 3 万本金预设。需要其他资金、持仓数、权重或最小订单金额时，使用带参数的 <code>predict_tomorrow.py</code> CLI，并确保参数与后续门控/回测口径一致。</p></div></details>
+  <details><summary>为什么最新回测把之前的结果覆盖了？</summary><div class="details-body"><p><code>outputs/walkforward/</code> 是最近一次结果的 canonical 目录，新运行会更新它；<code>--compare</code> 的两组运行也共用该目录，后一组覆盖前一组。重要结果应事先复制到独立实验目录，运行详情中的两组摘要仍会保留。</p></div></details>
+  <details><summary>能否把网页部署到公网方便远程操作？</summary><div class="details-body"><p>不建议直接暴露。页面包含现金维护、成交写回、模型删除/晋升和任务终止等写操作，且没有内置登录鉴权。默认只监听 127.0.0.1；远程访问应放在可信网络与额外认证层之后。</p></div></details>
+</section>
+
+<section class="section doc-section" id="safety">
+  <div class="section-head"><span class="section-no">12</span><div><h2>安全与风险边界<a class="anchor" href="#safety">#</a></h2><p class="section-sub">把系统当作研究与订单辅助工具，而不是无人值守的交易代理。</p></div></div>
+  <div class="grid two">
+    <div class="card"><h3>账户与数据安全</h3><ul class="clean small"><li>不要提交或传播 <code>config_credentials.toml</code>、Token、券商对账单和真实账户数据。</li><li>定期备份 <code>outputs/</code>、<code>models/</code> 与重要实验；尤其保留持仓、现金、风控状态和审计日志。</li><li>不要把数据缓存与账户状态混为一谈。清理缓存前确认路径，不删除正在使用的工作目录。</li><li>网页写操作应仅在可信环境使用；模型删除不可恢复，成交确认前应二次对账。</li></ul></div>
+    <div class="card"><h3>投资与研究风险</h3><ul class="clean small"><li>历史回测、样本外指标和模型门控都不能保证未来收益。</li><li>实际成交可能受涨跌停、停牌、流动性、排队和费用影响而偏离回测。</li><li>不要仅凭单次 Sharpe、单窗口收益或单个因子 IC 做重仓决策。</li><li>本系统仅供研究和回测辅助，不构成投资建议；使用者自行核对订单并承担交易决策责任。</li></ul></div>
+  </div>
+  <div class="callout danger"><strong>每日最低安全动作：</strong>不执行过期订单；不重复确认成交；部分成交不套用全部成交假设；不让现金和持仓长期失真；不在夜间任务运行时切换 champion；不绕过体检与警告来掩盖问题。</div>
+  <h3>相关文档</h3>
+  <ul class="clean small"><li><code>README_CN.md</code>：项目能力、快速开始与研究背景。</li><li><code>DEVELOPMENT.md</code>：开发、测试、参数约定和调试。</li><li><code>factor_library/README.md</code>：公式因子 DSL 完整参考。</li><li><code>scripts/README.md</code>：当前研究脚本清单。</li><li><code>docs/system_architecture.html</code>：系统架构与数据流图。</li></ul>
+</section>
+
+<footer class="footer"><strong>QuantLab v2 使用说明</strong><br>以当前代码和实际页面行为为准 · 本文件可离线阅读与打印</footer>
+</div>
+</main>
+<button class="back-top" id="back-top" type="button" aria-label="返回顶部" title="返回顶部">↑</button>
+<script>
+(function(){
+  const search = document.getElementById('doc-search');
+  const sections = Array.from(document.querySelectorAll('.doc-section'));
+  const navLinks = Array.from(document.querySelectorAll('#doc-nav a'));
+  const noResults = document.getElementById('no-results');
+  const details = Array.from(document.querySelectorAll('details'));
+  const toggleDetails = document.getElementById('toggle-details');
+  const backTop = document.getElementById('back-top');
+
+  search.addEventListener('input', function(){
+    const query = this.value.trim().toLowerCase();
+    let visible = 0;
+    sections.forEach(function(section){
+      const match = !query || section.textContent.toLowerCase().includes(query);
+      section.hidden = !match;
+      if(match) visible++;
+    });
+    navLinks.forEach(function(link){
+      const target = document.querySelector(link.getAttribute('href'));
+      link.hidden = !!query && target && target.hidden;
+    });
+    noResults.classList.toggle('show', visible === 0);
+  });
+
+  document.querySelectorAll('pre').forEach(function(pre){
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'copy-btn';
+    button.textContent = '复制';
+    button.setAttribute('aria-label', '复制代码块');
+    button.addEventListener('click', async function(){
+      const text = pre.querySelector('code').innerText;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (error) {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand('copy');
+        area.remove();
+      }
+      button.textContent = '已复制';
+      button.classList.add('copied');
+      setTimeout(function(){ button.textContent = '复制'; button.classList.remove('copied'); }, 1400);
+    });
+    pre.appendChild(button);
+  });
+
+  toggleDetails.addEventListener('click', function(){
+    const shouldOpen = details.some(function(item){ return !item.open; });
+    details.forEach(function(item){ item.open = shouldOpen; });
+    this.textContent = shouldOpen ? '收起全部附录' : '展开全部附录';
+  });
+  details.forEach(function(item){
+    item.addEventListener('toggle', function(){
+      const allOpen = details.every(function(d){ return d.open; });
+      toggleDetails.textContent = allOpen ? '收起全部附录' : '展开全部附录';
+    });
+  });
+
+  document.getElementById('print-doc').addEventListener('click', function(){ window.print(); });
+  let printState = [];
+  window.addEventListener('beforeprint', function(){
+    printState = details.map(function(item){ return item.open; });
+    details.forEach(function(item){ item.open = true; });
+    sections.forEach(function(section){ section.hidden = false; });
+  });
+  window.addEventListener('afterprint', function(){
+    details.forEach(function(item, index){ item.open = printState[index]; });
+    search.dispatchEvent(new Event('input'));
+  });
+
+  const observed = new IntersectionObserver(function(entries){
+    entries.forEach(function(entry){
+      if(entry.isIntersecting){
+        navLinks.forEach(function(link){
+          link.classList.toggle('active', link.getAttribute('href') === '#' + entry.target.id);
+        });
+      }
+    });
+  }, {rootMargin:'-12% 0px -72% 0px', threshold:0});
+  sections.forEach(function(section){ observed.observe(section); });
+
+  window.addEventListener('scroll', function(){
+    backTop.classList.toggle('show', window.scrollY > 600);
+  }, {passive:true});
+  backTop.addEventListener('click', function(){ window.scrollTo({top:0, behavior:'smooth'}); });
+})();
+</script>
+</body>
+</html>

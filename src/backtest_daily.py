@@ -136,7 +136,7 @@ def run_daily_replay(
     score_fp = _score_cache_fingerprint(feat_cols, p)
     if use_cache:
         score_cache = _unwrap_score_cache(score_cache, score_fp)
-    # 进度回调：run_session / pipeline 注入。签名 cb(phase, current, total, **extras)。
+    # 进度回调：run_pipeline / run_walkforward 注入。签名 cb(phase, current, total, **extras)。
     # 进度回调是"尽力而为"——失败绝不能影响主回测。
     progress_cb = p.pop("progress_cb", None)
 

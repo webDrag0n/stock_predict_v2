@@ -61,6 +61,7 @@ from live import (
     run_gated_prediction,
 )
 from trading import parse_initial_holdings, estimate_order_cost
+from capital import with_capital_profile
 from execution import (
     load_fills_csv,
     load_holdings_table,
@@ -156,24 +157,28 @@ def _ensemble_params(args) -> dict:
 
 
 def _decision_params(args) -> dict:
-    p = {}
-    for key in ("topk", "max_positions", "max_weight", "min_notional"):
+    explicit = {}
+    for key in ("topk", "max_positions", "max_weight", "min_notional", "min_entry_notional"):
         v = getattr(args, key, None)
         if v is not None:
-            p[key] = float(v) if key != "max_positions" else int(v)
+            explicit[key] = float(v) if key != "max_positions" else int(v)
     if args.use_bb_timing is not None:
-        p["use_bb_timing"] = bool(args.use_bb_timing)
+        explicit["use_bb_timing"] = bool(args.use_bb_timing)
     if args.order_price_mode:
-        p["order_price_mode"] = str(args.order_price_mode)
+        explicit["order_price_mode"] = str(args.order_price_mode)
     if getattr(args, "allowed_boards", ""):
-        p["allowed_boards"] = [
+        explicit["allowed_boards"] = [
             board.strip() for board in args.allowed_boards.split(",") if board.strip()
         ]
     if getattr(args, "skip_unaffordable", False):
-        p["skip_unaffordable"] = True
+        explicit["skip_unaffordable"] = True
+    if getattr(args, "cash_aware", False):
+        explicit["cash_aware"] = True
+    if getattr(args, "cash_buffer", None) is not None:
+        explicit["cash_buffer"] = float(args.cash_buffer)
     if getattr(args, "force_rebalance", False):
-        p["force_rebalance"] = True
-    return p
+        explicit["force_rebalance"] = True
+    return with_capital_profile(getattr(args, "capital_profile", "standard"), explicit)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -185,6 +190,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=C.INITIAL_CAPITAL,
         help=f"组合总资金兜底（默认 {C.INITIAL_CAPITAL:.0f}；"
         f"提供 account.csv 的 cash 后以真实现金为准）",
+    )
+    ap.add_argument(
+        "--capital-profile",
+        choices=["standard", "small"],
+        default=os.environ.get("CAPITAL_PROFILE", "standard"),
+        help="资金配置：standard 保持原参数；small 为少仓、较大单笔和现金校验",
     )
     ap.add_argument(
         "--holdings", default=os.path.join(C.OUTPUT_DIR, "holdings.csv"), help="当前持仓 csv 路径"
@@ -201,19 +212,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     # 选股 / 择时
     ap.add_argument(
-        "--topk", type=float, default=C.TOPK_RATIO, help=f"候选池比例 TOPK（默认 {C.TOPK_RATIO}）"
+        "--topk", type=float, default=None, help=f"候选池比例 TOPK（默认 {C.TOPK_RATIO}）"
     )
     ap.add_argument(
         "--max-positions",
         type=int,
-        default=C.MAX_POSITIONS,
-        help=f"最大持仓数（默认 {C.MAX_POSITIONS}）",
+        default=None,
+        help=f"最大持仓数（默认 {C.MAX_POSITIONS}；small 配置为 4）",
     )
     ap.add_argument(
         "--max-weight",
         type=float,
-        default=C.MAX_WEIGHT_PER_NAME,
-        help=f"单股权重上限（默认 {C.MAX_WEIGHT_PER_NAME}）",
+        default=None,
+        help=f"单股权重上限（默认 {C.MAX_WEIGHT_PER_NAME}；small 配置为 0.25）",
     )
     ap.add_argument(
         "--use-bb-timing", action="store_true", default=C.USE_BB_TIMING, help="启用布林/RSI 择时"
@@ -227,8 +238,25 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--min-notional",
         type=float,
-        default=C.DAILY_MIN_NOTIONAL,
-        help=f"最小订单金额（默认 {C.DAILY_MIN_NOTIONAL}）",
+        default=None,
+        help=f"最小调仓金额（默认 {C.DAILY_MIN_NOTIONAL}；small 按最低佣金计算）",
+    )
+    ap.add_argument(
+        "--min-entry-notional",
+        type=float,
+        default=None,
+        help="最小新建仓金额；默认不另设门槛，small 配置按最低佣金计算",
+    )
+    ap.add_argument(
+        "--cash-aware",
+        action="store_true",
+        help="按预计卖出净回款和买入佣金约束买单（small 默认开启）",
+    )
+    ap.add_argument(
+        "--cash-buffer",
+        type=float,
+        default=None,
+        help="现金安全垫（元）；small 默认 50 元或最低佣金的 10 倍",
     )
     ap.add_argument(
         "--allowed-boards",
@@ -299,7 +327,20 @@ def build_parser() -> argparse.ArgumentParser:
 ap = build_parser()
 
 
-def _main(argv=None) -> None:
+class _NullRun:
+    """无登记器（如 --promote / 测试直接调 _main）时的空实现，主流程不必处处判空。"""
+
+    def __getattr__(self, name):
+        def _noop(*a, **k):
+            return None
+
+        return _noop
+
+    def callback(self):
+        return None
+
+
+def _main(argv=None, run=None) -> None:
     # 库模块（src/data, src/live, src/ensemble 等）走标准 logging，入口统一配置
     logging.basicConfig(
         level=logging.INFO,
@@ -307,6 +348,7 @@ def _main(argv=None) -> None:
         datefmt="%H:%M:%S",
     )
     args = build_parser().parse_args(argv)
+    run = run if run is not None else _NullRun()
 
     # 人工晋升：把留档候选直接设为 champion（不训练、不出订单）
     if args.promote:
@@ -330,6 +372,7 @@ def _main(argv=None) -> None:
 
     # 1) 加载含【今天】、含 OHLC/布林带 meta 的面板（实盘模式，用最小窗口减少 I/O）
     print("加载面板（保留最新无标签日 + 交易列）...")
+    run.step("load_panel", "加载因子面板（含当日数据增量）")
     gate_on = C.USE_MODEL_GATE and not args.no_gate
     panel, factors = load_live_panel(
         train_window=args.train_window,
@@ -337,9 +380,15 @@ def _main(argv=None) -> None:
         eval_days=args.eval_days,
         loader=load_factor_panel,
     )
+    run.step_done(
+        "load_panel",
+        f"{len(panel):,} 行 · {panel['symbol'].nunique()} 只 · {len(factors)} 因子 · "
+        f"最新日 {pd.Timestamp(panel['date'].max()).date()}",
+    )
     if C.USE_PREFLIGHT and not args.skip_preflight:
         from preflight import run_preflight
 
+        run.step("preflight", "出单前体检（现金新鲜度 / 面板 / 覆盖率）")
         failures = run_preflight(
             panel, args.account, max_cash_age_days=C.PREFLIGHT_MAX_CASH_AGE_DAYS
         )
@@ -348,8 +397,13 @@ def _main(argv=None) -> None:
 
             for reason in failures:
                 print(f"前置体检失败：{reason}")
+                run.note("error", f"前置体检失败：{reason}")
+            run.step_done("preflight", "；".join(failures)[:200], status="failed")
             send_alerts(failures, "夜间前置体检失败")
             raise SystemExit(3)
+        run.step_done("preflight", "通过")
+    else:
+        run.skip("preflight", "已关闭或 --skip-preflight")
 
     n_label = int(panel[C.TARGET].notna().sum())
     latest = panel["date"].max()
@@ -375,11 +429,24 @@ def _main(argv=None) -> None:
 
     pred_hist_path = pred_hist_path_for(args.risk_state)
     pred_hist = load_pred_hist(pred_hist_path)
+    dec_params = _decision_params(args)
+    run.set_param(
+        capital=args.capital,
+        capital_profile=args.capital_profile,
+        max_positions=dec_params.get("max_positions", C.MAX_POSITIONS),
+        max_weight=dec_params.get("max_weight", C.MAX_WEIGHT_PER_NAME),
+        min_notional=dec_params.get("min_notional", C.DAILY_MIN_NOTIONAL),
+        min_entry_notional=dec_params.get("min_entry_notional", 0.0),
+        cash_aware=dec_params.get("cash_aware", False),
+        gate_on=bool(gate_on),
+        force_retrain=bool(args.force_retrain),
+    )
 
     # --tracking-report：只打印回测 vs 实盘偏差报告后退出（不训练不出单）
     if args.tracking_report:
         import json as _json
 
+        run.step("tracking", "回测 vs 实盘偏差跟踪（只读）")
         report = compute_report(
             model_store.load_champion_manifest(),
             matured_ic_stats(panel, pred_hist),
@@ -389,9 +456,11 @@ def _main(argv=None) -> None:
         write_report(report)
         print_summary(report)
         print(_json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        run.step_done("tracking", "仅打印报告，不训练不出单")
         return
 
     # 3) 训练（触发时）或冻结加载（未触发时）+ 模型门控 + 预测最新日
+    run.step("model", "重训判定 → 训练/冻结 → 门控 → 预测")
     res = run_gated_prediction(
         panel,
         factors,
@@ -404,8 +473,19 @@ def _main(argv=None) -> None:
         pred_hist=pred_hist,
         risk_state_path=args.risk_state,
         train_fn=ensemble_predict_latest,
+        progress_cb=run.callback(),
     )
     today, info, gate, action = (res["today"], res["info"], res["gate"], res["action"])
+    run.set_param(action=action, fired=bool(res.get("fired")), reasons=res.get("reasons") or [])
+    for _reason in res.get("reasons") or []:
+        run.note("info", f"重训触发：{_reason}" if res.get("fired") else f"未触发：{_reason}")
+    if gate is not None:
+        run.note(
+            "info" if gate.get("action") != "rejected" else "warn",
+            f"门控 {gate.get('action')}：{gate.get('reason', '')}",
+            candidate=gate.get("candidate_id"),
+            champion=gate.get("champion_id"),
+        )
     n_today = len(today)
     ic_stats = res["ic_stats"]
     if ic_stats is None:
@@ -414,12 +494,16 @@ def _main(argv=None) -> None:
         _print_gate_result(gate)
     wtxt = " · ".join(f"{m}={w:.2f}" for m, w in info["weights"].items())
     print(f"模型权重: {wtxt}")
+    # 结构化权重落进 run.json：前端订单「分析」面板据此说明各子模型的占比，不必解析文字摘要
+    run.set_param(model_weights={str(m): float(w) for m, w in info["weights"].items()})
+    run.step_done("model", f"{action} · 预测 {n_today} 只 · 权重 {wtxt}")
 
     # 2b) 落盘当日预测分（供 fw 天后成熟打分入 IC 队列 + OOS IC 定权积累）
     append_pred_hist(pred_hist_path, latest, today)
     print(f"预测历史已累积 -> {pred_hist_path}")
 
     # 3) 读取当前持仓与账户现金，生成次日订单
+    run.step("orders", "风控缩放 → 决策 → 写订单")
     current = parse_initial_holdings(
         "\n".join(f"{s}:{sh}" for s, sh in _load_holdings(args.holdings).items())
     )
@@ -428,7 +512,6 @@ def _main(argv=None) -> None:
     if cash is not None:
         print(f"账户现金：¥{cash:,.0f}（{args.account}）")
 
-    dec_params = _decision_params(args)
     orders = make_orders_from_state(
         today,
         today["score"].to_numpy(),
@@ -456,6 +539,7 @@ def _main(argv=None) -> None:
     tag = pd.Timestamp(latest).strftime("%Y%m%d")
     out_csv = os.path.join(C.OUTPUT_DIR, f"orders_{tag}.csv")
     orders.to_csv(out_csv, index=False)
+    run.artifact("orders", out_csv, kind="orders", rows=int(len(orders)), asof=tag)
     if len(orders):
         from live import is_rebalance_day
         from live_state import rebalance_state_path_for, save_rebalance_state
@@ -471,6 +555,18 @@ def _main(argv=None) -> None:
                 rebalance_state_path_for(args.risk_state), str(pd.Timestamp(latest).date())
             )
 
+    cash_report = orders.attrs.get("cash_report")
+    if cash_report:
+        run.set_param(cash_report=cash_report)
+        print(
+            "现金校验："
+            f"预留 ¥{cash_report['cash_buffer']:,.0f} · "
+            f"预计可用现金 ¥{cash_report['estimated_free_cash']:,.0f} · "
+            f"缩手 {len(cash_report['capped_buys'])} 笔 · "
+            f"跳过 {len(cash_report['skipped_buys'])} 笔"
+        )
+        if cash_report["skipped_buys"]:
+            print("  现金/最低金额限制跳过：" + ", ".join(cash_report["skipped_buys"]))
     cost = estimate_order_cost(orders)
     n_buy = int((orders["side"] == "buy").sum()) if len(orders) else 0
     n_sell = int((orders["side"] == "sell").sum()) if len(orders) else 0
@@ -493,6 +589,12 @@ def _main(argv=None) -> None:
             print("\n  前 15 条交易指令：")
             print(show.to_string(index=False))
     print(f"\n订单明细 -> {out_csv}")
+    run.step_done(
+        "orders",
+        f"买 {n_buy} · 卖 {n_sell}"
+        + (f" · 拦截 {n_block}" if n_block else "")
+        + (" · 非调仓日，未生成订单" if not len(orders) else ""),
+    )
 
     # 5) 可选：确认成交后更新持仓
     if args.commit:
@@ -539,9 +641,15 @@ def _main(argv=None) -> None:
         print("（未写持仓。确认按单成交后加 --commit 更新 holdings.csv）")
 
     # 6) 回测 vs 实盘跟踪：快照落盘 + 偏差报告 + 告警（每晚都记，与是否触发无关）
+    run.step("tracking", "回测 vs 实盘偏差跟踪")
     nav = nav_stats(args.risk_state, panel)  # 订单步骤已入账今日净值
     report = compute_report(model_store.load_champion_manifest(), ic_stats, nav, panel=panel)
     write_report(report)
+    run.artifact(
+        "tracking_report", os.path.join(C.TRACKING_DIR, "tracking_report.json"), kind="report"
+    )
+    for _alert in report["alerts"]:
+        run.note("warn", f"跟踪告警：{_alert}")
     if report["alerts"]:
         from notify import send_alerts
 
@@ -550,13 +658,53 @@ def _main(argv=None) -> None:
         latest, report["champion"].get("model_id") or "-", action, n_today, ic_stats, nav
     )
     print_summary(report)
+    run.step_done("tracking", f"告警 {len(report['alerts'])} 条")
 
     print("\n提醒：信号基于当日收盘特征，请于【次日】执行；prediction 仅用于排序选股，非涨幅预测。")
 
 
+def _run_kind(args) -> tuple[str, str]:
+    if args.promote:
+        return "promote", f"人工晋升 {args.promote}"
+    if args.tracking_report:
+        return "tracking", "偏差跟踪报告"
+    if args.commit:
+        return "commit", "成交确认写回持仓"
+    return "nightly", "夜间出单"
+
+
 def main(argv=None) -> None:
+    """入口：登记本次运行到 outputs/runs/，再交给 _main。
+
+    登记是旁路：RunReporter 写盘失败只降级、不抛异常；不开登记（RUN_REGISTRY=0）时
+    与改造前行为完全一致。前端只读 outputs/runs/，不需要 webapp 在跑。
+    """
+    args = build_parser().parse_args(argv)
+    run = None
+    if os.environ.get("RUN_REGISTRY", "1") != "0":
+        from run_registry import RunReporter
+
+        kind, label = _run_kind(args)
+        run = RunReporter(
+            kind,
+            label=label,
+            params={k: v for k, v in vars(args).items() if k not in ("fills",) and v is not None},
+            run_id=os.environ.get("RUN_ID") or None,
+            parent=os.environ.get("RUN_PARENT") or None,
+        )
     try:
-        _main(argv)
+        if run is None:
+            _main(argv)
+        else:
+            with run:
+                # run 以关键字传入；_main 的旧签名只有 argv（测试替身/外部调用方），
+                # 退回无登记调用即可，登记器仍会按 with 块的异常/退出码收尾。
+                try:
+                    _main(argv, run=run)
+                except TypeError as exc:
+                    if "run" not in str(exc) or "unexpected keyword" not in str(exc):
+                        raise
+                    _main(argv)
     except Exception as exc:
         from notify import send_alerts
 

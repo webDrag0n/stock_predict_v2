@@ -106,6 +106,9 @@ def test_same_recipe_incremental_continue(model_dir, update_spy):
     ens2, recipe2 = train_candidate_ensemble(panel2, FEATS, params=PARAMS)
     assert update_spy == [True, False]
     assert recipe2["train_mode"] == "incremental"
+    assert recipe2["new_matured_days"] == 5
+    assert recipe2["panel_latest_date"] == str(panel2["date"].max().date())
+    assert recipe2["maturity_cutoff"] < recipe2["panel_latest_date"]
     assert ens2._last_trained_date > train_end_1
     # 续训树数 = INCR_TREES × 新成熟天数（5）为上界；玩具数据行数少，
     # LightGBM 可能提前报 "no further splits" 而少于上界，断言区间即可

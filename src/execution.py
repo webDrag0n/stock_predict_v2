@@ -4,15 +4,31 @@ CLI 提供 --fills 时按券商实际成交写回；未提供时保留订单全�
 
 状态文件：
   outputs/holdings.csv —— 当前持仓（symbol,shares,entry_date,ref_close）
+  outputs/holdings_history.csv —— 每次订单确认、实际成交写回和手动校正的完整快照
 """
 
 from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
+from io import StringIO
 
 import numpy as np
 import pandas as pd
+
+HOLDING_COLUMNS = ["symbol", "shares", "entry_date", "ref_close"]
+HISTORY_COLUMNS = [
+    "snapshot_id",
+    "recorded_at",
+    "effective_date",
+    "action",
+    "symbol",
+    "shares",
+    "entry_date",
+    "ref_close",
+    "note",
+]
 
 
 def load_rejected_rids(outputs_dir: str, day: str) -> set[str]:
@@ -72,12 +88,100 @@ def load_fills_csv(path: str) -> pd.DataFrame:
     return grouped[["symbol", "side", "shares", "price"]]
 
 
+def _append_holdings_history(
+    path: str, holdings: pd.DataFrame, effective_date, action: str, note: str = ""
+) -> None:
+    """追加一份完整持仓快照；空仓也写一条 symbol 为空的零股数记录。"""
+    now = datetime.now()
+    effective = str(pd.Timestamp(effective_date or now.date()).date())
+    base = {
+        "snapshot_id": now.strftime("%Y%m%dT%H%M%S_%f") + f"_{os.getpid()}",
+        "recorded_at": now.isoformat(timespec="seconds"),
+        "effective_date": effective,
+        "action": action,
+        "note": note,
+    }
+    records = holdings.to_dict("records") or [
+        {"symbol": "", "shares": 0, "entry_date": "", "ref_close": np.nan}
+    ]
+    frame = pd.DataFrame([{**base, **r} for r in records], columns=HISTORY_COLUMNS)
+    history_path = os.path.join(os.path.dirname(path), "holdings_history.csv")
+    frame.to_csv(history_path, mode="a", header=not os.path.exists(history_path), index=False)
+
+
+def _write_holdings_snapshot(
+    path: str, holdings: pd.DataFrame, effective_date, action: str, note: str = ""
+) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    holdings = holdings.reindex(columns=HOLDING_COLUMNS)
+    tmp = f"{path}.tmp-{os.getpid()}"
+    try:
+        holdings.to_csv(tmp, index=False)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    _append_holdings_history(path, holdings, effective_date, action, note)
+
+
+def parse_holdings_editor(text: str) -> pd.DataFrame:
+    """解析总览的 CSV 持仓编辑器；零股数行视为删除，保留表头即可表示空仓。"""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("持仓内容为空；空仓请保留 symbol,shares,entry_date,ref_close 表头")
+    try:
+        frame = pd.read_csv(StringIO(text), dtype=str, keep_default_na=False)
+    except Exception as exc:
+        raise ValueError(f"持仓 CSV 无法解析：{exc}") from exc
+    missing = [c for c in HOLDING_COLUMNS if c not in frame.columns]
+    if missing:
+        raise ValueError(f"持仓缺少必需列：{', '.join(missing)}")
+    frame = frame[HOLDING_COLUMNS].copy()
+    frame["symbol"] = frame["symbol"].str.strip().str.upper()
+    invalid_symbol = ~frame["symbol"].str.fullmatch(r"\d{6}\.(SH|SZ|BJ)")
+    if invalid_symbol.any():
+        bad = frame.loc[invalid_symbol, "symbol"].iloc[0]
+        raise ValueError(f"股票代码格式不正确：{bad!r}（示例 600000.SH）")
+
+    shares_text = frame["shares"].str.strip()
+    shares = pd.to_numeric(shares_text, errors="coerce")
+    invalid_shares = shares.isna() | (shares < 0) | (shares % 1 != 0)
+    if invalid_shares.any():
+        raise ValueError("股数必须是大于等于 0 的整数；0 表示删除该持仓")
+    frame["shares"] = shares.astype(int)
+    duplicated = frame.loc[frame["shares"] > 0, "symbol"].duplicated(keep=False)
+    if duplicated.any():
+        bad = frame.loc[duplicated, "symbol"].iloc[0]
+        raise ValueError(f"股票代码重复：{bad}，请合并为一行")
+
+    entry_text = frame["entry_date"].str.strip()
+    entry = pd.to_datetime(entry_text.replace("", pd.NA), errors="coerce")
+    if (entry_text.ne("") & entry.isna()).any():
+        raise ValueError("建仓日必须是 YYYY-MM-DD，或留空")
+    frame["entry_date"] = entry.dt.strftime("%Y-%m-%d").fillna("")
+
+    ref_text = frame["ref_close"].str.strip()
+    ref = pd.to_numeric(ref_text, errors="coerce")
+    invalid_ref = ref_text.ne("") & (ref.isna() | (ref <= 0))
+    if invalid_ref.any():
+        raise ValueError("参考价必须大于 0，或留空")
+    frame["ref_close"] = ref.where(ref_text.ne(""), np.nan)
+    return frame.loc[frame["shares"] > 0].reset_index(drop=True)
+
+
+def replace_holdings(
+    path: str, holdings: pd.DataFrame, effective_date=None, note: str = "总览手动校正"
+) -> None:
+    """用手动校正后的精确状态替换当前持仓，并保留完整历史快照。"""
+    _write_holdings_snapshot(path, holdings, effective_date, "manual_edit", note)
+
+
 def _save_holdings_with_price(
     path: str,
     transactions: pd.DataFrame,
     current: dict[str, int],
     latest_date,
     price_col: str,
+    action: str,
 ) -> None:
     old = load_holdings_table(path)
     old_entry, old_ref = {}, {}
@@ -114,7 +218,7 @@ def _save_holdings_with_price(
                 "ref_close": ref,
             }
         )
-    pd.DataFrame(rows).to_csv(path, index=False)
+    _write_holdings_snapshot(path, pd.DataFrame(rows, columns=HOLDING_COLUMNS), dstr, action)
 
 
 def save_holdings(path: str, orders: pd.DataFrame, current: dict[str, int], latest_date) -> None:
@@ -124,11 +228,11 @@ def save_holdings(path: str, orders: pd.DataFrame, current: dict[str, int], late
     与未交易的持仓保留原 entry_date（旧版每次 commit 全部重置，会丢失真实
     建仓日，已修复）。
     """
-    _save_holdings_with_price(path, orders, current, latest_date, "ref_close")
+    _save_holdings_with_price(path, orders, current, latest_date, "ref_close", "orders_commit")
 
 
 def save_holdings_from_fills(
     path: str, fills: pd.DataFrame, current: dict[str, int], latest_date
 ) -> None:
     """只按实际成交写回；fills 中缺失的订单或股票保持原持仓不变。"""
-    _save_holdings_with_price(path, fills, current, latest_date, "price")
+    _save_holdings_with_price(path, fills, current, latest_date, "price", "fills_commit")

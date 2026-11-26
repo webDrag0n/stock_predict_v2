@@ -5,6 +5,7 @@ import os
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import config as C
 from live import is_rebalance_day, make_orders_from_state
@@ -219,3 +220,134 @@ def test_cli_records_only_nonempty_rebalance(monkeypatch, tmp_path):
     assert not pd.read_csv(out_csv).empty
     with open(rebal_path, encoding="utf-8") as f:
         assert json.load(f)["last_rebalance_date"] == str(latest.date())
+
+
+def test_cli_run_is_fully_observable_from_files_only(monkeypatch, tmp_path):
+    """CLI 独立跑完后，只读 outputs/runs/ 就能还原：状态、步骤、产物、事件（无需 webapp）。"""
+    import predict_tomorrow as pt
+    import run_registry as rr
+
+    panel = _make_panel()
+    latest = panel["date"].max()
+    today = panel[panel["date"] == latest].copy()
+    today["score"] = np.linspace(1.0, 0.0, len(today))
+    today["prediction"] = today["score"]
+    out_dir = tmp_path / "outputs"
+    monkeypatch.setattr(C, "OUTPUT_DIR", str(out_dir))
+    monkeypatch.setattr(C, "TRACKING_DIR", str(tmp_path / "tracking"))
+    monkeypatch.setattr(C, "MODEL_DIR", str(tmp_path / "models"))
+    monkeypatch.setattr(pt, "load_live_panel", lambda **kwargs: (panel, ["feature_00"]))
+
+    def fake_gated(*args, progress_cb=None, **kwargs):
+        progress_cb(phase="预测最新日", current=3, total=3, message="m")
+        return {
+            "today": today,
+            "info": {"weights": {"gbm_l2": 1.0}},
+            "gate": {
+                "action": "rejected",
+                "reason": "测试",
+                "candidate_id": "c",
+                "champion_id": "h",
+            },
+            "action": "rejected",
+            "fired": True,
+            "reasons": ["模型超龄"],
+            "ic_stats": None,
+        }
+
+    monkeypatch.setattr(pt, "run_gated_prediction", fake_gated)
+    risk_path = str(tmp_path / "live_risk_state.json")
+    pt.main(
+        [
+            "--capital",
+            "1000000",
+            "--holdings",
+            str(tmp_path / "holdings.csv"),
+            "--account",
+            str(tmp_path / "account.csv"),
+            "--risk-state",
+            risk_path,
+            "--topk",
+            "0.5",
+            "--max-positions",
+            "2",
+            "--max-weight",
+            "0.5",
+            "--min-notional",
+            "1000",
+            "--skip-preflight",
+        ]
+    )
+
+    runs = rr.list_runs(root=str(out_dir / "runs"))
+    assert len(runs) == 1
+    meta = runs[0]
+    assert meta["kind"] == "nightly" and meta["status"] == "done" and meta["exit_code"] == 0
+    steps = {s["id"]: s for s in meta["steps"]}
+    assert [s["status"] for s in meta["steps"]] == ["done"] * 5 or all(
+        s["status"] in ("done", "skipped") for s in meta["steps"]
+    )
+    assert {"load_panel", "preflight", "model", "orders", "tracking"} <= set(steps)
+    assert steps["preflight"]["status"] == "skipped"
+    assert meta["params"]["action"] == "rejected" and meta["params"]["fired"] is True
+    orders = [a for a in meta["artifacts"] if a["name"] == "orders"]
+    assert orders and orders[0]["rows"] > 0
+
+    events = rr.read_events(meta["run_id"], root=str(out_dir / "runs"))
+    notes = [e["message"] for e in events if e["type"] == "note"]
+    assert any("门控 rejected" in m for m in notes)
+    assert any("重训触发" in m for m in notes)
+
+
+def test_cli_failure_is_recorded_and_exit_code_preserved(monkeypatch, tmp_path):
+    import predict_tomorrow as pt
+    import run_registry as rr
+
+    out_dir = tmp_path / "outputs"
+    monkeypatch.setattr(C, "OUTPUT_DIR", str(out_dir))
+    monkeypatch.setattr(C, "USE_PREFLIGHT", True)
+    panel = _make_panel()
+    monkeypatch.setattr(pt, "load_live_panel", lambda **kwargs: (panel, ["feature_00"]))
+
+    with pytest.raises(SystemExit) as exc_info:
+        pt.main(
+            [
+                "--account",
+                str(tmp_path / "missing.csv"),
+                "--holdings",
+                str(tmp_path / "h.csv"),
+                "--risk-state",
+                str(tmp_path / "r.json"),
+            ]
+        )
+    assert exc_info.value.code == 3
+
+    meta = rr.list_runs(root=str(out_dir / "runs"))[0]
+    assert meta["status"] == "failed" and meta["exit_code"] == 3
+    steps = {s["id"]: s for s in meta["steps"]}
+    assert steps["preflight"]["status"] == "failed"
+    events = rr.read_events(meta["run_id"], root=str(out_dir / "runs"))
+    assert any(e["type"] == "note" and e.get("level") == "error" for e in events)
+
+
+def test_registry_can_be_disabled(monkeypatch, tmp_path):
+    import predict_tomorrow as pt
+
+    out_dir = tmp_path / "outputs"
+    monkeypatch.setattr(C, "OUTPUT_DIR", str(out_dir))
+    monkeypatch.setenv("RUN_REGISTRY", "0")
+    monkeypatch.setattr(C, "USE_PREFLIGHT", True)
+    panel = _make_panel()
+    monkeypatch.setattr(pt, "load_live_panel", lambda **kwargs: (panel, ["feature_00"]))
+    with pytest.raises(SystemExit):
+        pt.main(
+            [
+                "--account",
+                str(tmp_path / "missing.csv"),
+                "--holdings",
+                str(tmp_path / "h.csv"),
+                "--risk-state",
+                str(tmp_path / "r.json"),
+            ]
+        )
+    assert not (out_dir / "runs").exists()

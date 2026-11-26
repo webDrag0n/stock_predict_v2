@@ -6,7 +6,7 @@
 |------|------|--------|
 | `run_walkforward.py` | walk-forward 回测 CLI | DEVELOPMENT.md、CLAUDE.md |
 | `eval_factors.py` | 单因子评估 CLI（前端 factoreval 会话是等价入口） | SKILLS.md、DEVELOPMENT.md、README_CN.md |
-| `diagnose_factors.py` | 因子诊断三件套 CLI | webapp/pages/factor_workbench.py |
+| `diagnose_factors.py` | 因子诊断三件套 CLI | webapp2/pages/factors.py |
 | `measure_alpha.py` | Newey-West alpha（被当库 import） | src/perf_metrics.py、src/multiseed_eval.py |
 | `diagnostics/` | diag_decile / diag_linear_vs_gbm / diag_option_iv（诊断工具箱） | DEVELOPMENT.md |
 | `demo/` | demo_optimize_daily_synthetic / demo_liquidity_ablation_synthetic（合成数据端到端冒烟） | 修复方案全局验证清单、CLAUDE.md |

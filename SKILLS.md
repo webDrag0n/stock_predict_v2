@@ -51,10 +51,10 @@
 ### 3.1 启动前端
 
 ```bash
-uv run python run_webapp.py
+uv run python run_webapp2.py
 ```
 
-默认端口 `8050`。可打开浏览器访问 `http://localhost:8050`。
+默认端口 `8060`。可打开浏览器访问 `http://localhost:8060`。
 
 ### 3.2 启动次日订单 CLI
 
@@ -66,8 +66,8 @@ uv run python predict_tomorrow.py
 
 ### 3.3 注意
 
-- 不要在前端正在运行 session 时重启 webapp，会丢失子进程跟踪。
-- 若端口被占用，检查是否有残留的 `python run_webapp.py` 进程。
+- 重启前端不影响正在运行的任务：任务是独立子进程，状态在 `outputs/runs/<run_id>/`，前端重启后照常看到。
+- 若端口被占用，检查是否有残留的 `python run_webapp2.py` 进程（按 PID 结束，不要用 `pkill -f` 以免误杀自己的 shell）。
 
 ---
 
@@ -108,12 +108,12 @@ uv run python predict_tomorrow.py
 
 - `pipeline/context.py` 的 `fig_*` 构造器
 - `src/walkforward.py:plot_dashboard`
-- `webapp/render.py` 对 figure spec 的渲染
+- `webapp2/report_view.py` 对 figure spec 的渲染
 - 任何诊断脚本中的 `matplotlib`/`plotly` 图
 
 ### 5.2 设计约定
 
-- 跟随项目已有的 light-theme 风格（`webapp/theme.py` 的 `PALETTE`）。
+- 跟随项目已有的 light-theme 风格（`webapp2/ui.py` 的 `C` 调色板与 `assets/app.css`）。
 - 折线图：策略用 `#1a7f37`（绿），基准用 `#ff7f0e`（橙），回撤用 `#d62728`（红），alpha 用 `#7b3fb5`（紫）。
 - 柱状图：`diverging=True` 时正负自动着色。
 - 直方图：服务端预分箱（参考 `fig_hist`），不要把原始数组塞进 JSON。

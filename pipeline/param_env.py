@@ -1,7 +1,7 @@
 """会话参数 → 环境变量 的映射（独立轻量模块，**不 import steps_*/config**）。
 
 时序约束：config 在 import 时读取 os.environ，而 `pipeline.registry` import
-steps_* 即触发 config。因此 run_session.py 必须先从本模块拿到映射、写好
+steps_* 即触发 config。因此 scripts/run_pipeline.py 必须先从本模块拿到映射、写好
 os.environ，再去 import registry——否则 PARAM_ENV 通道整个是死代码。
 registry 从这里 re-export，保持旧调用点（registry.env_overrides）可用。
 """

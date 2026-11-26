@@ -1,9 +1,9 @@
 """会话流水线的执行上下文与 step report 构造辅助。
 
 每个模块(步骤)是一个函数 `fn(ctx) -> dict`，返回一个**自描述的 step report**：
-前端用一个通用渲染器(webapp/render.py)即可展示，无需为每种步骤写专门页面。
+前端用通用渲染器(webapp2/report_view.py)即可展示，无需为每种步骤写专门页面。
 
-report 结构（落盘为 sessions/<id>/steps/NN_<step>.json）::
+report 结构（落盘为 runs/<id>/reports/NN_<step>.json）::
 
     {
       "step": "data_import", "title": "数据导入", "status": "done",
@@ -63,9 +63,9 @@ class StepContext:
     session_dir : 本会话目录（artifacts/ 落盘在此）
     params      : 会话参数 dict（已在进程启动前写入 os.environ → config）
     shared      : 内存对象在步骤间传递（如 panel / factors / oos），不落盘
-    on_progress : 可选 callback，签名 cb(dict)。run_session 会装上 ProgressBridge，
+    on_progress : 可选 callback，签名 cb(dict)。scripts/run_pipeline.py 会把它桥接到 run registry，
                   步骤函数可通过 ctx.report_progress() 主动汇报阶段内进度。
-    step_started_at : 当前步骤起始 wall time（run_session 在进入步骤时填充）
+    step_started_at : 当前步骤起始 wall time（run_pipeline 在进入步骤时填充）
     """
 
     session_dir: str

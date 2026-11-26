@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # ============================================================================
-# daily_run.sh —— 每个交易日收盘后的实盘例行（3 万本金配置）
+# daily_run.sh —— 每个交易日收盘后的实盘例行（默认 3 万本金，可选小资金配置）
 #
 # 用法：
 #   ./daily_run.sh           # 出单模式：交易日门控 → 更新数据 → 生成明日订单
 #   ./daily_run.sh commit    # 确认今日订单已成交后：目标持仓写回 holdings.csv
+#   CAPITAL_PROFILE=small ./daily_run.sh  # 2 万元预设；可用 CAPITAL/MAX_POS 等覆盖
 #
 # 建议 cron（周一至周五 18:10；tushare 日线约 17:00 就绪，hk_hold 晚间披露）：
-#   10 18 * * 1-5  cd /home/webdrag0n/stock_predict_v2 && ./daily_run.sh
+#   10 18 * * 1-5  cd /home/webdrag0n/webdrag0n-massive-storage/WORK_quant/stock_predict_v2 && ./daily_run.sh
 #
 # 数据更新（日线/估值/北向增量）在面板加载时自动完成；自适应重训与
 # champion/staging 门控由 predict_tomorrow 内部处理（默认每晚先评估
@@ -16,13 +17,25 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# --- 3 万本金参数 -----------------------------------------------------------
-# 最低佣金 5 元/笔是小账户的主要成本约束：单笔成交额 ≥5000 元才能把单边
-# 佣金压到 ≤0.1%。3 万 / 6 仓 ≈ 5000 元/仓，正好卡在阈值上。
-CAPITAL=30000
-MAX_POS=6          # 持仓数：再多 → 单笔金额跌破最低佣金甜点区
-MAX_WEIGHT=0.20    # 6 仓等权 ≈16.7%，上限留一点头部空间
-MIN_NOTIONAL=2000  # 调仓差单下限：低于 2000 元的碎单佣金占比 ≥0.25%，不值得
+# --- 资金参数 ---------------------------------------------------------------
+# 最低佣金 5 元/笔是小账户的主要成本约束：standard 保持 3 万 / 6 仓；
+# small 默认 2 万 / 4 仓，并由 CLI 加最低建仓金额与现金校验。
+CAPITAL_PROFILE="${CAPITAL_PROFILE:-standard}"
+if [ "$CAPITAL_PROFILE" = "small" ]; then
+    CAPITAL="${CAPITAL:-20000}"
+    MAX_POS="${MAX_POS:-4}"
+    MAX_WEIGHT="${MAX_WEIGHT:-0.25}"
+    MIN_NOTIONAL="${MIN_NOTIONAL:-}"
+else
+    CAPITAL="${CAPITAL:-30000}"
+    MAX_POS="${MAX_POS:-6}"
+    MAX_WEIGHT="${MAX_WEIGHT:-0.20}"
+    MIN_NOTIONAL="${MIN_NOTIONAL:-2000}"
+fi
+MIN_NOTIONAL_ARGS=()
+if [ -n "$MIN_NOTIONAL" ]; then
+    MIN_NOTIONAL_ARGS=(--min-notional "$MIN_NOTIONAL")
+fi
 # 风控五层（vol 目标/回撤刹车/IC 降仓/IV 降仓）保持默认全开：风控对照实验
 # （outputs/ablations/walkforward_riskoff）证明 Sharpe +2.48 中约 +0.98
 # 来自风控层——小本金更亏不起回撤。
@@ -83,9 +96,10 @@ echo "== $(date '+%F %T') 生成明日订单（日志 $LOG）=="
 set +e
 uv run python predict_tomorrow.py \
     --capital "$CAPITAL" \
+    --capital-profile "$CAPITAL_PROFILE" \
     --max-positions "$MAX_POS" \
     --max-weight "$MAX_WEIGHT" \
-    --min-notional "$MIN_NOTIONAL" \
+    "${MIN_NOTIONAL_ARGS[@]}" \
     --allowed-boards main \
     --skip-unaffordable \
     2>&1 | tee -a "$LOG"

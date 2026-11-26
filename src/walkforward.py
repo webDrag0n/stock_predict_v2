@@ -947,6 +947,12 @@ def save_walkforward_result(res: dict, outdir: str | None = None) -> str:
             "strategy": res.get("strategy") or "long_topk",
             "engine": res.get("engine", "windowed"),
             "initial_capital": C.INITIAL_CAPITAL,
+            "commission_rate": C.COMMISSION_RATE,
+            "stamp_duty_rate": C.STAMP_DUTY_RATE,
+            "min_commission": C.MIN_COMMISSION,
+            "impact_k": C.IMPACT_K,
+            "use_impact_cost": C.USE_IMPACT_COST,
+            "max_participation": C.MAX_PARTICIPATION,
             "universe_mode": C.UNIVERSE_MODE,
             "universe_size": C.UNIVERSE_SIZE,
         },
@@ -1013,6 +1019,12 @@ def _finalize_walkforward_result(
         "forward_window": C.FORWARD_WINDOW,
         "model_objective": C.MODEL_OBJECTIVE,
         "initial_capital": C.INITIAL_CAPITAL,
+        "commission_rate": C.COMMISSION_RATE,
+        "stamp_duty_rate": C.STAMP_DUTY_RATE,
+        "min_commission": C.MIN_COMMISSION,
+        "impact_k": C.IMPACT_K,
+        "use_impact_cost": C.USE_IMPACT_COST,
+        "max_participation": C.MAX_PARTICIPATION,
         "replay_params": clean_replay,
     }
     log_trial("walkforward", config, oos_result["metrics"])
@@ -1169,7 +1181,16 @@ def run_walkforward(
             te_lo_i = first_i + win_id * step
             te_dates = dates[te_lo_i : te_lo_i + test_w]
             w_daily = daily.iloc[win_id * test_w : (win_id + 1) * test_w]
-            m = daily_replay_metrics(w_daily, cash0)
+            # 增量引擎是一个跨窗口连续的账户：第 k 窗口的起点基准是上一窗口末日的
+            # 总值，而非初始资金。daily_replay_metrics 把首日收益记为「相对 initial_cash」，
+            # 传 cash0 会让第 2 窗口起每个窗口都掺入此前累积的盈亏（与 _holdout_summary
+            # 同一约定）。窗口内只用已实现日值，无未来信息。
+            w_base = (
+                float(cash0)
+                if win_id == 0
+                else float(daily["total_value"].iloc[win_id * test_w - 1])
+            )
+            m = daily_replay_metrics(w_daily, w_base)
             pred_ic, _ = _pred_ic(oos[oos["date"].isin(te_dates)])
             window_metrics.append(
                 {

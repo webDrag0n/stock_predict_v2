@@ -141,6 +141,9 @@ def test_train_candidate(train_ctx):
     ):
         assert k in recipe, f"recipe 缺 {k}"
     assert recipe["train_window"] == PARAMS["train_window"]
+    assert "train_update" in recipe
+    assert recipe["new_matured_days"] > 0
+    assert recipe["maturity_cutoff"] < recipe["panel_latest_date"]
 
 
 def test_gate_eval_no_champion(train_ctx):
@@ -209,3 +212,37 @@ def test_gate_eval_with_champion_never_promotes(train_ctx):
     labels = [k["label"] for k in rep["kpis"]]
     assert any("staging" in lb for lb in labels)
     assert any("门控判定" in lb for lb in labels)
+
+
+def test_training_summary_distinguishes_no_new_from_real_fitting():
+    class Dummy:
+        models = ("gbm_l2", "ic_linear")
+
+    no_new = T._training_summary(
+        Dummy(), {"train_update": {"gbm_l2": "no-new"}}, "abc", "2026-09-03"
+    )
+    assert "复用 champion 参数" in no_new and "已训练" not in no_new
+    full = T._training_summary(
+        Dummy(), {"train_update": {"gbm_l2": "full×51"}}, "abc", "2026-09-03"
+    )
+    assert "全量重建完成" in full
+    incr = T._training_summary(Dummy(), {"train_update": {"gbm_l2": "+60@2d"}}, "abc", "2026-09-03")
+    assert "增量续训完成" in incr
+
+
+def test_data_import_preserves_unlabeled_days_for_maturity_boundary(train_ctx, monkeypatch):
+    """回归：先删未打标日会让 train_candidate_ensemble 重复扣除 fw+embargo。"""
+    panel = train_ctx.shared["panel"].copy()
+    cutoff = panel["date"].max() - pd.Timedelta(days=7)
+    panel.loc[panel["date"] >= cutoff, C.TARGET] = np.nan
+    captured = {}
+
+    def _loader(**kwargs):
+        captured.update(kwargs)
+        return panel
+
+    monkeypatch.setattr(T, "load_factor_panel", _loader)
+    T.data_import(train_ctx)
+    assert captured["keep_unlabeled"] is True
+    assert train_ctx.shared["panel"]["date"].max() == panel["date"].max()
+    assert train_ctx.shared["panel"][C.TARGET].isna().any()

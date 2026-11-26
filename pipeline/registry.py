@@ -1,6 +1,6 @@
 """模式 → 步骤序列 + 可调参数 schema 的注册表。
 
-run_session.py 按 STEPS[mode] 顺序执行步骤；前端按 PARAM_SCHEMA[mode]
+scripts/run_pipeline.py 按 STEPS[mode] 顺序执行步骤；前端按 PARAM_SCHEMA[mode]
 动态渲染创建会话的参数表单。新增模式/步骤只改这里。
 
 模式分两类（MODE_CATEGORY）：
@@ -87,6 +87,14 @@ _SHARED: dict[str, dict] = {
         "min": 10000,
         "max": 1000000000,
         "step": 10000,
+    },
+    "capital_profile": {
+        "key": "capital_profile",
+        "label": "资金配置",
+        "type": "select",
+        "default": "standard",
+        "options": ["standard", "small"],
+        "hint": "small：4仓、单票25%、最低金额约束与现金校验",
     },
     "initial_holdings": {
         "key": "initial_holdings",
@@ -258,7 +266,11 @@ def _sp(key: str, **over) -> dict:
 
 PARAM_SCHEMA = {
     "walkforward": [
-        _sp("capital", label="初始资金(元)", hint="仅用于净值图的金额口径"),
+        _sp("capital", label="初始资金(元)", hint="参与仓位、整手和费用计算"),
+        _sp("capital_profile"),
+        _sp("max_positions"),
+        _sp("max_weight"),
+        _sp("min_notional"),
         _sp("train_window"),
         {
             "key": "engine",
@@ -302,6 +314,7 @@ PARAM_SCHEMA = {
         },
     ],
     "train": [
+        _sp("capital_profile"),
         {
             "key": "ensemble_models",
             "label": "集成子模型",
@@ -445,6 +458,7 @@ PARAM_SCHEMA = {
     ],
     "nextday": [
         _sp("capital", label="组合资金(元)"),
+        _sp("capital_profile"),
         _sp("initial_holdings", label="当前持仓(每行 代码:股数)"),
         _sp("topk"),
         _sp("max_positions"),

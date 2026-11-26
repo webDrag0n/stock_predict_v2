@@ -226,7 +226,8 @@ def train_candidate_ensemble(
     返回 (ens, recipe)：
       ens   : 训练好的 IncrementalEnsemble（已具备预测能力）。
       recipe: 生效配方 dict（六个配方键按 config 默认值归一后的实际值，
-              另附 train_mode=incremental/full 训练路径标记），
+              另附 train_mode、train_update，以及 panel_latest_date /
+              maturity_cutoff / new_matured_days 成熟期诊断），
               可直接作 model_store 配方指纹 / manifest config_snapshot 的
               params 输入（两者均按键白名单取），以及门控评估的候选配方。
     """
@@ -305,10 +306,20 @@ def train_candidate_ensemble(
             f"[训练] 配方指纹与 champion（{champ_manifest.get('model_id')}）一致，"
             f"增量续训（训练截止 {champ_manifest.get('train_end_date')} → 新成熟日）"
         )
+    previous_train_end = ens._last_trained_date
+    new_matured_days = (
+        int((matured_dates > previous_train_end).sum())
+        if previous_train_end is not None
+        else len(matured_dates)
+    )
     train_info = ens.update(matured, asof_date=latest, force_full=force_full)
     logger.info(f"[训练] update: {train_info}")
 
     recipe["train_mode"] = "full" if force_full else "incremental"
+    recipe["train_update"] = train_info
+    recipe["panel_latest_date"] = str(pd.Timestamp(latest).date())
+    recipe["maturity_cutoff"] = str(pd.Timestamp(mat_cut).date())
+    recipe["new_matured_days"] = new_matured_days
     return ens, recipe
 
 

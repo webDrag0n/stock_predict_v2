@@ -46,27 +46,6 @@ def test_incremental_seed_has_independent_env(monkeypatch):
     assert env["ENSEMBLE_N_SEEDS"] == "5"
 
 
-def test_status_gate_uses_tracking_trading_day_age(monkeypatch):
-    from webapp.pages import pipeline_lab
-
-    monkeypatch.setattr(pipeline_lab.dataio, "champion_manifest", lambda: {"model_id": "m1"})
-    monkeypatch.setattr(C, "MAX_MODEL_AGE_DAYS", 60)
-    for age, expected in ((10, "ok"), (48, "warn"), (61, "bad")):
-        monkeypatch.setattr(
-            pipeline_lab.dataio,
-            "tracking_report",
-            lambda age=age: {"champion": {"age_days": age}},
-        )
-        level, text = pipeline_lab._status_gate()
-        assert level == expected
-        assert str(age) in text and "交易日" in text
-
-    monkeypatch.setattr(pipeline_lab.dataio, "tracking_report", lambda: None)
-    assert pipeline_lab._status_gate()[0] == "idle"
-    monkeypatch.setattr(pipeline_lab.dataio, "champion_manifest", lambda: None)
-    assert pipeline_lab._status_gate()[0] == "bad"
-
-
 def test_tracking_report_passes_manifest_training_metadata():
     manifest = {
         "model_id": "m1",

@@ -185,6 +185,71 @@ def test_run_gate_config_change_triggers_evaluation(model_dir):
         assert g2["champion_recipe"] is not None
 
 
+def test_gate_replays_champion_with_its_own_feature_columns(model_dir, monkeypatch):
+    """champion 与候选特征列不同（如旧 champion 多一列）时，双回放必须各用各自的列。
+
+    回归：evaluate_pair 曾把候选的 feat_cols 同时喂给 champion 回放，两侧得到逐位
+    相同的 Sharpe，门控永远「未超过」，超龄 champion 每晚重训都被拒（2026-11-09
+    日志：champion 161 列含 pct_chg，候选 160 列，双方 Sharpe 同为 -1.47）。
+    """
+    import model_gate as gate
+
+    panel = _make_panel()
+    champ_feats = FEATS + ["feature_extra"]
+    panel["feature_extra"] = np.random.RandomState(5).randn(len(panel))
+    champ_ens = IncrementalEnsemble(
+        champ_feats,
+        models=("gbm_l2", "ic_linear"),
+        n_seeds=1,
+        incr_trees=5,
+        rebuild_days=20,
+        train_window=20,
+        ic_window=5,
+    )
+    champ_ens.update(panel.dropna(subset=[C.TARGET]), force_full=True)
+    g1 = run_gate(panel, champ_feats, champ_ens, PARAMS, eval_days=10, progress=False)
+    assert g1["action"] == "bootstrap"
+
+    seen = []
+    real = gate.run_daily_replay
+
+    def spy(panel_, feat_cols, **kwargs):
+        seen.append(list(feat_cols))
+        return real(panel_, feat_cols, **kwargs)
+
+    monkeypatch.setattr(gate, "run_daily_replay", spy)
+    g2 = run_gate(panel, FEATS, _trained_ens(panel), PARAMS, eval_days=10, progress=False)
+    assert g2["action"] in ("promoted", "rejected")
+    assert sorted(map(tuple, seen)) == sorted([tuple(FEATS), tuple(champ_feats)])
+    assert g2["evaluation"]["champion"]["n_features"] == len(champ_feats)
+    assert g2["evaluation"]["candidate"]["n_features"] == len(FEATS)
+    assert g2["evaluation"]["champion_missing_cols"] == []
+
+
+def test_gate_reports_champion_columns_missing_from_panel(model_dir, monkeypatch):
+    """冠军快照列已不在面板时：只用剩余列回放，并把缺列写进评估结果而非静默吞掉。"""
+    panel = _make_panel()
+    champ_feats = FEATS + ["feature_gone"]
+    panel["feature_gone"] = 0.0
+    champ_ens = IncrementalEnsemble(
+        champ_feats,
+        models=("gbm_l2", "ic_linear"),
+        n_seeds=1,
+        incr_trees=5,
+        rebuild_days=20,
+        train_window=20,
+        ic_window=5,
+    )
+    champ_ens.update(panel.dropna(subset=[C.TARGET]), force_full=True)
+    run_gate(panel, champ_feats, champ_ens, PARAMS, eval_days=10, progress=False)
+
+    panel = panel.drop(columns=["feature_gone"])
+    g2 = run_gate(panel, FEATS, _trained_ens(panel), PARAMS, eval_days=10, progress=False)
+    assert g2["action"] in ("promoted", "rejected")
+    assert g2["evaluation"]["champion_missing_cols"] == ["feature_gone"]
+    assert g2["evaluation"]["champion"]["n_features"] == len(FEATS)
+
+
 def test_paired_diff_t_and_promotion_threshold(monkeypatch):
     n = 120
     same_a = np.random.RandomState(0).randn(n) * 0.0005
@@ -250,3 +315,25 @@ if __name__ == "__main__":
         with mock.patch.object(C, "MODEL_DIR", os.path.join(td, "models")):
             test_run_gate_config_change_triggers_evaluation(C.MODEL_DIR)
     print("model_gate tests passed")
+
+
+def test_evaluate_pair_labels_progress_by_replay_side(monkeypatch):
+    import model_gate as gate
+
+    phases = []
+
+    def _fake_replay(_panel, _cols, params, *_args, **_kwargs):
+        params["progress_cb"]("回放决策日", 1, 10)
+        return {"sharpe": 1.0, "max_drawdown": -1.0, "strat_ret": [0.001] * 10}
+
+    monkeypatch.setattr(gate, "_replay_metrics", _fake_replay)
+    gate.evaluate_pair(
+        _make_panel(),
+        FEATS,
+        PARAMS,
+        PARAMS,
+        eval_days=10,
+        progress=False,
+        progress_cb=lambda phase, **_kwargs: phases.append(phase),
+    )
+    assert phases == ["候选 · 回放决策日", "champion · 回放决策日"]

@@ -304,8 +304,9 @@ def decide_orders(
                    择时还需 bb_upper_20/bb_lower_20/rsi_14/limit_flag/pct_chg（缺则跳过对应门）。
         score    : 与 today 行对齐的 ensemble 融合排序分（越大越看好）。
         params   : 覆盖 config 默认（topk/max_positions/bb/rsi/价格模式等）；
-                   allowed_boards 仅限制买入候选板块，skip_unaffordable=True 时
-                   跳过一手都买不起的候选并向后补位，二者默认均不改变旧行为。
+                   min_entry_notional 可单独约束新建仓金额，cash_aware=True 时
+                   按预计现金和佣金约束买单；allowed_boards 仅限制买入候选板块，
+                   skip_unaffordable=True 时跳过一手都买不起的候选并向后补位。
         asof_date: 决策日（用于 T+1 锁仓的建仓日标记）。
         price_col: 用于估值/目标金额计算的价列，实盘建议传 "adj_close"。
 
@@ -329,6 +330,7 @@ def decide_orders(
     rsi_sell_min = float(p.get("rsi_sell_min", C.RSI_SELL_MIN))
     price_mode = str(p.get("order_price_mode", C.ORDER_PRICE_MODE))
     min_notional = float(p.get("min_notional", C.DAILY_MIN_NOTIONAL))
+    min_entry_notional = float(p.get("min_entry_notional", 0.0) or 0.0)
     gross = float(p.get("gross_leverage", C.GROSS_LEVERAGE))
     use_beta_constraint = bool(
         p.get("use_beta_constraint", getattr(C, "USE_BETA_CONSTRAINT", False))
@@ -430,7 +432,7 @@ def decide_orders(
             affordable = []
             for i in pool_idx:
                 shares = int(np.floor(target_notional / close[i] / LOT) * LOT)
-                if shares > 0:
+                if shares > 0 and shares * close[i] >= min_entry_notional:
                     affordable.append(i)
                 if max_pos > 0 and len(affordable) >= max_pos:
                     break
@@ -444,25 +446,8 @@ def decide_orders(
             pool_idx = apply_beta_constraint(pool_idx, beta, rank_pct, max_portfolio_beta)
 
         n_target = len(pool_idx)
-        if n_target == 0:
-            return pd.DataFrame(
-                columns=[
-                    "symbol",
-                    "name",
-                    "side",
-                    "shares",
-                    "limit_price",
-                    "ref_close",
-                    "reason",
-                    "rank_pct",
-                    "bb_pos",
-                    "rsi",
-                    "blocked",
-                    "asof_date",
-                ]
-            )
-        # 等权目标金额（受单股权重上限约束），满仓部署
-        per_name = min(total_val * gross / n_target, total_val * max_w)
+        # 等权目标金额（受单股权重上限约束），满仓部署；空池仍继续生成持仓退出单。
+        per_name = min(total_val * gross / n_target, total_val * max_w) if n_target else 0.0
         target_sh = {}
         for i in pool_idx:
             target_sh[sym[i]] = int(np.floor(per_name / close[i] / LOT) * LOT)
@@ -534,9 +519,10 @@ def decide_orders(
                 continue
             delta = tgt - cur
             px = close[i]
-            # 碎单过滤只挡"加仓微调"（cur>0 的小幅补足）；新建仓(cur==0)永远执行，
-            # 否则在小 per_name / 资金缩水时会陷入"建不起仓→满现金"的死循环。
+            # 加仓微调使用调仓门槛；新建仓使用独立门槛，避免最低佣金占比过高。
             if cur > 0 and delta * px < min_notional:
+                continue
+            if cur == 0 and delta * px < min_entry_notional:
                 continue
             up, _ = _limit_flags(i)
             reason = "再平衡:建仓" if cur == 0 else "再平衡:加仓"
@@ -579,7 +565,7 @@ def decide_orders(
             orders = (
                 orders.sort_values(["_k", "rank_pct"]).drop(columns="_k").reset_index(drop=True)
             )
-        return orders
+        return _apply_cash_budget(state, orders, p)
 
     rows = []
     for i in range(n):
@@ -660,7 +646,8 @@ def decide_orders(
                     continue  # 未回踩到下轨附近，不买（等更好价位）
         # 目标股数：目标金额 / 价，向下取整手
         shares = int(np.floor(target_notional / px / LOT) * LOT)
-        if shares <= 0 or shares * px < min_notional:
+        entry_floor = min_entry_notional if "min_entry_notional" in p else min_notional
+        if shares <= 0 or shares * px < entry_floor:
             continue
         reason = "布林下轨回踩" if use_bb else "进入ML候选池"
         if up_limit:
@@ -747,7 +734,7 @@ def decide_orders(
         # 卖在前(腾现金)、买在后；组内按排名
         orders["_k"] = orders["side"].map({"sell": 0, "buy": 1})
         orders = orders.sort_values(["_k", "rank_pct"]).drop(columns="_k").reset_index(drop=True)
-    return orders
+    return _apply_cash_budget(state, orders, p)
 
 
 def _row(
@@ -779,6 +766,85 @@ def _row(
         "blocked": bool(blocked),
         "asof_date": str(pd.Timestamp(asof_date).date()) if asof_date is not None else None,
     }
+
+
+def _apply_cash_budget(
+    state: PortfolioState, orders: pd.DataFrame, params: dict | None = None
+) -> pd.DataFrame:
+    """Cap buys using estimated sale proceeds and buy commissions.
+
+    This is an order-generation estimate using reference/limit prices, not a
+    guarantee about next-day fills. Sell orders are never removed by this check.
+    Diagnostics are attached to ``orders.attrs['cash_report']``.
+    """
+    p = dict(params or {})
+    if not bool(p.get("cash_aware", False)) or orders.empty:
+        return orders
+    p["use_impact"] = False
+    buffer = max(0.0, float(p.get("cash_buffer", 0.0) or 0.0))
+    available = float(state.cash) - buffer
+    initial_cash = float(state.cash)
+    min_notional = float(p.get("min_notional", C.DAILY_MIN_NOTIONAL))
+    min_entry = float(p.get("min_entry_notional", 0.0) or 0.0)
+    kept = []
+    skipped_buys = []
+    capped_buys = []
+    for row in orders.to_dict(orient="records"):
+        if bool(row.get("blocked", False)):
+            kept.append(row)
+            continue
+        side = str(row.get("side", ""))
+        symbol = row.get("symbol")
+        px = float(row.get("limit_price", row.get("ref_close", np.nan)))
+        shares = int(row.get("shares", 0))
+        if not np.isfinite(px) or px <= 0 or shares <= 0:
+            if side == "buy":
+                skipped_buys.append(str(symbol))
+                continue
+            kept.append(row)
+            continue
+        notional = shares * px
+        if side == "sell":
+            comm, stamp, _ = trade_costs(notional, "sell", params=p)
+            available += notional - float(comm + stamp)
+            kept.append(row)
+            continue
+        if side != "buy":
+            kept.append(row)
+            continue
+
+        current_shares = int(state.holdings.get(symbol, 0))
+        floor = min_notional if current_shares > 0 else min_entry
+        max_shares = min(shares, int(np.floor(max(available, 0.0) / px / LOT) * LOT))
+        total = 0.0
+        while max_shares > 0:
+            candidate_notional = max_shares * px
+            comm, _, _ = trade_costs(candidate_notional, "buy", params=p)
+            total = candidate_notional + float(comm)
+            if total <= available + 1e-6:
+                break
+            max_shares -= LOT
+        if max_shares <= 0 or max_shares * px < floor:
+            skipped_buys.append(str(symbol))
+            continue
+        if max_shares < shares:
+            capped_buys.append(str(symbol))
+            row["reason"] = f"{row.get('reason', '')}；现金约束缩手"
+        row["shares"] = max_shares
+        available -= total
+        kept.append(row)
+
+    result = pd.DataFrame(kept, columns=orders.columns)
+    result.attrs.update(orders.attrs)
+    result.attrs["cash_report"] = {
+        "enabled": True,
+        "initial_cash": initial_cash,
+        "cash_buffer": buffer,
+        "estimated_free_cash": float(available),
+        "skipped_buys": skipped_buys,
+        "capped_buys": capped_buys,
+    }
+    return result
 
 
 # ---------------------------------------------------------------------------

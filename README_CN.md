@@ -17,7 +17,7 @@ tushare行情 (全市场 ~5700 只 ex-ST)  →  技术+基本面因子  →  预
 - **五层风控叠乘链**（`src/risk.py`）：回测与实盘共用唯一实现。
 - **因子准入门槛**（`src/factor_eval.py`）：因子进模型前先过 IC / RankIC / ICIR / t 值 / 分层单调性检验；`factor_library/` 提供 YAML 公式因子库。
 - **基本面因子**：`ep`/`bp`/`sp`/`ln_mv`（akshare 东财估值 `stock_value_em`，免费无限速，`merge_asof(backward)` point-in-time 对齐，杜绝前瞻）。全市场模式（~5700 只）同样可用：逐股缓存于 `data_cache/akshare_value/val_<code>.parquet`，首次回填全市场约 45~60 分钟（分批 + 限流 + 失败容忍，日志每 500 只报进度与 ETA），之后每日只增量重抓有缺口的股票；次新股等无数据股票自动跳过。`USE_AK_VALUE=0` 可单独关闭。财务因子（ROE/YoY 等，`USE_FINANCIAL_FACTORS`）走 tushare `daily_basic`/`fina_indicator`，限速过严，全市场模式下仍自动禁用。
-- **Web 前端**（`run_webapp.py`，Dash）：会话式流水线 + 逐步骤报告——研究类会话（`walkforward` / `train` / `modeleval` / `factoreval`）在模型实验室「新建任务」面板发起，生产类 `nextday` 次日出单在交易台 A 卡「生成次日订单」发起；运行中任务显示进度条。
+- **Web 前端**（`run_webapp2.py`，Dash）：只读 CLI 落盘的文件，并提供触发同一批 CLI 的按钮。每个 CLI 把状态登记到 `outputs/runs/<run_id>/`（`run.json` + `events.jsonl`），前端据此显示实时进度与完整历史，CLI 不依赖前端。共 7 个页面：总览、交易、模型、回测、因子、行情、运行。
 - **实盘工具**（`predict_tomorrow.py`）：次日可执行订单、模型门控（`models/staging/` 晋升）、自适应重训触发、回测 vs 实盘偏差跟踪。
 
 ## 快速开始
@@ -35,9 +35,8 @@ uv sync --extra dev          # 核心 + pytest
 #             --extra ui（webapp）
 
 # 3. 配置 tushare token（见下），然后运行
-uv run python run_webapp.py                  # 前端会话（推荐）
-uv run python run_webapp.py --debug          # 开发模式：热重载，改代码自动生效
-                                             #（默认模式改代码后需重启进程）
+uv run python run_webapp2.py                 # 前端（可选，CLI 不依赖它）
+DEBUG=1 uv run python run_webapp2.py         # 开发模式：热重载，改代码自动生效
 uv run python scripts/run_walkforward.py     # 滚动 walk-forward 样本外回测
 uv run python predict_tomorrow.py            # 生成次日可执行订单
 uv run pytest                                # 测试套件
@@ -97,6 +96,8 @@ uv run python predict_tomorrow.py --commit
 # 每日例行封装（推荐）：交易日门控 + 数据更新 + 出单，小本金参数已内置
 ./daily_run.sh           # 每个交易日收盘后运行（默认按 3 万本金价差约束配置）
 ./daily_run.sh commit    # 确认成交后写回持仓
+CAPITAL_PROFILE=small ./daily_run.sh  # 2 万小资金：4 仓、最低建仓金额和现金校验
+# 也可显式运行：uv run python predict_tomorrow.py --capital 20000 --capital-profile small
 # cron 示例：10 18 * * 1-5  cd <项目目录> && ./daily_run.sh
 
 # 模型门控：新配方模型先入 models/staging/ 双回放对比，Sharpe 更高且回撤不劣才晋升
@@ -107,12 +108,16 @@ uv run python predict_tomorrow.py --promote <id>     # 人工晋升 staging 候�
 uv run python predict_tomorrow.py --force-retrain    # 强制今晚重训
 uv run python predict_tomorrow.py --tracking-report  # 回测 vs 实盘偏差报告
 
-# 单因子评估 / 多 seed 稳健性复核（前端 factoreval 会话是 eval_factors 的等价入口）
+# 小资金样本外回测（与 small 出单配置共用仓位/费用参数）
+uv run python scripts/run_walkforward.py --engine incremental \
+  --capital 20000 --capital-profile small --allowed-boards main
+
+# 单因子评估 / 多 seed 稳健性复核（scripts/run_pipeline.py --mode factoreval 是登记到 outputs/runs/ 的等价入口）
 uv run python scripts/eval_factors.py
 uv run python scripts/research/multiseed_robust.py
 ```
 
-运行后生成 `outputs/`：`orders_*.csv`（次日订单）、`holdings.csv` / `account.csv`（实盘持仓/现金）。walk-forward 产物统一为 canonical 目录 `outputs/walkforward/`（CLI 与前端会话共用契约）：`oos_curve.parquet`（连续 OOS 净值序列）、`window_metrics.parquet`（各窗口 OOS 指标）、`oos_bench.parquet`（等权基准日收益）、`meta.json`（汇总指标 + 配置快照 + 生成时间）；前端模型实验室页直接读取该目录展示「最近一次 CLI Walk-Forward 结果」。所有仪表盘图表已迁移到前端会话，不再输出 PNG。
+运行后生成 `outputs/`：`orders_*.csv`（次日订单）、`holdings.csv` / `account.csv`（实盘持仓/现金）。walk-forward 产物统一为 canonical 目录 `outputs/walkforward/`（CLI 与前端共用契约）：`oos_curve.parquet`（连续 OOS 净值序列）、`window_metrics.parquet`（各窗口 OOS 指标）、`oos_bench.parquet`（等权基准日收益）、`meta.json`（汇总指标 + 配置快照 + 生成时间）；前端回测页直接读取该目录展示「最近一次 Walk-Forward 结果」。所有仪表盘图表都在前端渲染，不再输出 PNG。
 
 ## 防泄露设计（本框架的核心约定）
 
@@ -135,8 +140,7 @@ uv run python scripts/research/multiseed_robust.py
 config.py                  # 所有参数 + 凭证读取（env 可覆盖）
 config_credentials.toml    # tushare token（不提交）
 predict_tomorrow.py        # CLI：生成次日订单
-run_session.py             # 会话执行器（由 webapp 子进程调用）
-run_webapp.py              # Dash 前端入口
+run_webapp2.py             # Dash 前端入口
 
 src/                       # 核心库（顶层模块，src/ 加入 sys.path 后 import）
   data/                    # 数据连接器（tushare/akshare）、因子工程、面板加载
@@ -152,8 +156,8 @@ src/                       # 核心库（顶层模块，src/ 加入 sys.path 后
   live.py / live_state.py / live_tracking.py   # 实盘推理、状态持久化、偏差跟踪
   model_store.py / model_gate.py               # 模型工件存取 + 晋升门控
 
-pipeline/                  # 会话式流水线框架（registry/context/steps）
-webapp/                    # Dash 多页面前端
+pipeline/                  # 研究模式的步骤函数（由 scripts/run_pipeline.py 执行）
+webapp2/                   # Dash 多页面前端（读文件 + 触发 CLI）
 scripts/                   # 研究脚本（活/归档清单见 scripts/README.md）
 factor_library/            # YAML 公式因子库
 tests/                     # pytest 测试套件

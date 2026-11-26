@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import config as C
 from walkforward import run_walkforward, save_walkforward_result
@@ -107,6 +108,73 @@ def test_incremental_matches_windowed_contract(monkeypatch, tmp_path):
         assert "nw_t" in meta
         assert "alpha_ann" in meta
         assert meta["config"]["engine"] == engine
+
+
+def test_incremental_window_metrics_are_window_local(monkeypatch, tmp_path):
+    """增量引擎是单一连续账户：逐窗口 PnL/Sharpe 必须只含该窗口内的日收益。
+
+    回归：曾把 daily.iloc[a:b] 直接交给 daily_replay_metrics，它把首日收益记为
+    「相对初始资金」，第 2 窗口起每个窗口都掺入此前累积的全部盈亏，真实 5/9
+    的「Sharpe 为正窗口」被报成 8/9（3 万口径 9/9），并污染 sharpe_pos_ratio 门禁。
+    """
+    import lightgbm as lgb
+
+    original_regressor = lgb.LGBMRegressor
+
+    def _single_thread(**kwargs):
+        kwargs["n_jobs"] = 1
+        return original_regressor(**kwargs)
+
+    monkeypatch.setattr(lgb, "LGBMRegressor", _single_thread)
+    monkeypatch.setattr(C, "TRAIN_WINDOW", 30)
+    monkeypatch.setattr(C, "TEST_WINDOW", 10)
+    monkeypatch.setattr(C, "WF_STEP", 10)
+    monkeypatch.setattr(C, "N_SEEDS", 1)
+    monkeypatch.setattr(C, "FULL_TREES", 10)
+    monkeypatch.setattr(C, "OUTPUT_DIR", str(tmp_path / "outputs"))
+    replay_params = {
+        "n_seeds": 1,
+        "train_window": 30,
+        "incr_trees": 2,
+        "rebuild_days": 100,
+        "ic_window": 5,
+        "topk": 0.3,
+        "max_positions": 3,
+        "max_weight": 0.34,
+        "min_notional": 1000,
+        "use_vol_target": False,
+        "use_dd_brake": False,
+        "use_ic_scale": False,
+        "use_regime": False,
+        "use_iv_scale": False,
+    }
+    res = run_walkforward(
+        _make_panel(),
+        ["feature_00", "feature_01"],
+        replay_params=replay_params,
+        save=False,
+        verbose=False,
+        engine="incremental",
+    )
+    daily = res["oos_result"]["daily"].reset_index(drop=True)
+    wm = res["window_metrics"]
+    cash0 = float(C.INITIAL_CAPITAL)
+    tv = daily["total_value"].to_numpy(dtype=float)
+    test_w = int(C.TEST_WINDOW)
+    assert len(wm) == len(tv) // test_w >= 2
+
+    for k in range(len(wm)):
+        a, b = k * test_w, (k + 1) * test_w
+        base = cash0 if k == 0 else tv[a - 1]  # 窗口起点的账户总值，不是初始资金
+        r = np.empty(b - a)
+        r[0] = tv[a] / base - 1.0
+        r[1:] = tv[a + 1 : b] / tv[a : b - 1] - 1.0
+        expected_sharpe = r.mean() / r.std(ddof=1) * np.sqrt(252)
+        assert wm.loc[k, "PnL"] == pytest.approx(tv[b - 1] / base - 1.0, abs=1e-9)
+        assert wm.loc[k, "Sharpe"] == pytest.approx(expected_sharpe, rel=1e-6, abs=1e-9)
+
+    # 门禁信号必须由窗口内口径得出
+    assert res["sharpe_pos_ratio"] == pytest.approx(float((wm["Sharpe"] > 0).mean()))
 
 
 def test_pipeline_wf_run_passes_incremental_engine(monkeypatch, tmp_path):

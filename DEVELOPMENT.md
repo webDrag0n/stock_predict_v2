@@ -55,7 +55,7 @@ uv run pytest tests/test_backtest_synthetic.py -v
 
 `config.py` 在 **import 时**从环境变量读取全部配置（模块级副作用，约 120 处
 `os.environ.get`）。因此任何"用 env 覆盖配置"的代码都必须**先写 `os.environ`
-再 import 业务模块**——`run_session.py` 与 `pipeline/param_env.py` 依赖这一时序。
+再 import 业务模块**——`scripts/run_pipeline.py` 与 `pipeline/param_env.py` 依赖这一时序。
 新增配置项时遵循同一模式：在 `config.py` 模块级读取，不要在函数内延迟读。
 
 ### 1.5 架构约定：sys.path 引导
@@ -63,7 +63,7 @@ uv run pytest tests/test_backtest_synthetic.py -v
 本仓库是非包结构：`src/` 下的模块以顶层模块名互相 import（如
 `from walkforward import ...`）。约定如下：
 
-- **入口脚本**（`predict_tomorrow.py`、`run_session.py`、`run_webapp.py`、
+- **入口脚本**（`predict_tomorrow.py`、`scripts/run_pipeline.py`、`run_webapp2.py`、
   `scripts/` 下的活脚本）在文件顶部用统一的三行引导块把仓库根与 `src/`
   加入 `sys.path`：
 
@@ -102,13 +102,27 @@ uv run python scripts/run_walkforward.py
 
 首次会从 tushare 拉取全市场日线并缓存，耗时较长（取决于 token 限速）。产物在 `outputs/`。
 
-### 2.3 跑前端会话
+### 2.3 跑前端
 
 ```bash
-uv run python run_webapp.py
+uv run python run_webapp2.py          # 默认 http://127.0.0.1:8060；HOST / PORT 可覆盖
 ```
 
-默认监听 `8050`。在模型实验室（/models）「新建任务」面板创建研究类会话（walkforward / train / modeleval / factoreval），或在交易台（/）A 卡点「生成次日订单」创建 nextday 会话后，session 在独立子进程运行；运行中任务行显示进度条，完成后刷新查看步骤报告。
+前端是可选的：CLI 在没有它时照常运行。每个 CLI 把状态写进 `outputs/runs/<run_id>/`（`run.json` 快照、
+`events.jsonl` 事件流、`run.log` 原始输出），前端据此显示进度，后启动也能看到全部历史。
+在前端发起的任务（交易页「生成次日订单」、模型页训练/信号评估、回测页 walk-forward、因子页评估）
+就是在后台启动与终端相同的 CLI；`RUN_REGISTRY=0` 可关闭登记。
+
+终端直接跑研究模式：
+
+```bash
+uv run python scripts/run_pipeline.py --mode factoreval --set lookback_days=730
+uv run python scripts/run_pipeline.py --mode factoreval --draft my_factor   # 评估 factor_library 里的公式因子
+uv run python scripts/run_pipeline.py --mode train
+uv run python scripts/run_pipeline.py --mode modeleval --set model_ref=champion
+```
+
+参数按 `pipeline/registry.py::PARAM_SCHEMA` 校验，未知参数/越界/非法选项一律退出码 2，不会静默忽略拼写错误。
 
 ### 2.4 生成次日订单
 
@@ -195,11 +209,13 @@ rm -rf data_cache/dataset_*.parquet
 5. 是否在测试集上选策略/超参？
 6. 是否把未来信息（如次日 open）泄露到特征里？
 
-### 4.5 前端 session 卡死
+### 4.5 前端里的运行卡住或显示「已中断」
 
-- 查看 `outputs/sessions/<id>/session.json` 的 `status` 和 `current_progress`。
-- 子进程 stdout/stderr 通常重定向到 `outputs/job_logs/`。
-- 如果 session 状态为 `failed`，`steps/` 目录下的失败步骤 JSON 包含 traceback。
+- 看 `outputs/runs/<run_id>/run.json` 的 `status`、`progress`、`heartbeat`、`pid`；前端运行详情页显示的就是它。
+- 显示「已中断」= `run.json` 声称 running 但 pid 已不存在（被 kill -9 或机器重启，进程没来得及写终态）。
+- 显示「疑似卡住」= pid 还在但心跳超过 3 分钟没更新。
+- 原始输出在 `outputs/runs/<run_id>/run.log`，事件流在 `events.jsonl`；失败的运行在 `run.json` 的 `failure` 里带完整 traceback。
+- 前端发起的重型任务（nightly / walkforward / train / modeleval / factoreval / impact）同一时刻只允许一个，被拒绝时提示里有正在运行的那个任务。
 
 ---
 
@@ -208,8 +224,8 @@ rm -rf data_cache/dataset_*.parquet
 ### 5.1 格式化
 
 ```bash
-uv run black src/ tests/ pipeline/ webapp/ scripts/ --line-length 100
-uv run ruff check src/ tests/ pipeline/ webapp/ scripts/ --fix
+uv run black src/ tests/ pipeline/ webapp2/ scripts/ --line-length 100
+uv run ruff check src/ tests/ pipeline/ webapp2/ scripts/ --fix
 ```
 
 ### 5.2 类型与文档
@@ -222,8 +238,8 @@ uv run ruff check src/ tests/ pipeline/ webapp/ scripts/ --fix
 
 ```bash
 uv run pytest tests/
-uv run black --check src/ tests/ pipeline/ webapp/ scripts/
-uv run ruff check src/ tests/ pipeline/ webapp/ scripts/
+uv run black --check src/ tests/ pipeline/ webapp2/ scripts/
+uv run ruff check src/ tests/ pipeline/ webapp2/ scripts/
 ```
 
 ---
@@ -253,9 +269,11 @@ uv run ruff check src/ tests/ pipeline/ webapp/ scripts/
 
 ### 6.4 添加前端页面
 
-1. 在 `webapp/pages/` 创建新模块，暴露 `layout` 与可选 `register(app)`。
-2. 在 `webapp/app.py` 的 `PAGES` 和 `NAV_ITEMS` 注册。
-3. 如需新 session 模式，在 `pipeline/registry.py` 添加 `STEPS` + `MODE_CATEGORY` + `PARAM_SCHEMA`。
+1. 纯逻辑放 `webapp2/<page>_logic.py`（不依赖 dash，便于单测），读盘一律经 `webapp2/data.py`，写操作一律放 `webapp2/actions.py`。
+2. 在 `webapp2/pages/` 创建页面模块，暴露 `layout` 与 `register(app)`；在 `webapp2/app.py` 的 `NAV`、`PAGES`、`route()` 注册，并在文件末尾调用 `register(app)`。
+3. 轮询刷新的区域要用「磁盘签名门控」（只有依赖文件变了才重绘），否则用户展开的面板、输入到一半的表单会被定时刷新冲掉；表单与按钮放在被轮询替换的容器之外。
+4. 如需新的研究模式，在 `pipeline/registry.py` 添加 `STEPS` + `MODE_CATEGORY` + `PARAM_SCHEMA`，并把入口加进 `webapp2/actions.py::CLI_ENTRIES`。
+5. 浏览器级验证：`scripts/sandbox_webapp2.py`（临时目录里起一个前端，不碰真实数据）+ `scripts/check_*_flow.py`、`scripts/sweep_pages.py`。
 
 ---
 
@@ -294,8 +312,8 @@ uv sync --extra full --extra ui --extra dev
 uv run pytest tests/ -v
 
 # 格式化
-uv run black src/ tests/ pipeline/ webapp/ scripts/ --line-length 100
-uv run ruff check src/ tests/ pipeline/ webapp/ scripts/ --fix
+uv run black src/ tests/ pipeline/ webapp2/ scripts/ --line-length 100
+uv run ruff check src/ tests/ pipeline/ webapp2/ scripts/ --fix
 
 # 最小回测
 uv run python tests/test_backtest_synthetic.py
@@ -305,7 +323,7 @@ FORWARD_WINDOW=20 TRAIN_WINDOW=500 MODEL_OBJECTIVE=fusion \
 UNIVERSE_MODE=all uv run python scripts/run_walkforward.py
 
 # 前端
-uv run python run_webapp.py
+uv run python run_webapp2.py
 
 # 次日订单
 uv run python predict_tomorrow.py
@@ -319,7 +337,7 @@ rm -rf data_cache/dataset_*.parquet
 
 ## 10. 留出段使用纪律
 
-`HOLDOUT_START` 默认为空，由使用者在研究计划中明确设置（例如最近约 6 个月的起点），不要为了让单次结果更好看而移动它。一旦设定：
+`HOLDOUT_START` 由使用者在研究计划中明确设置，不要为了让单次结果更好看而移动它。**当前设定为 `2026-02-27`**（`config.py` 默认值，2026-11-16 设定；对应第 8 个 OOS 窗口起点，约最近 6 个月，含最近 3 个窗口）。设为空字符串即关闭。一旦设定：
 
 - 调参、因子或模型选型只能查看留出段之前的指标；留出段仅用于最终报告。
 - 自动流程不得读取 `meta.json` 的 `holdout` 字段作为选型依据。

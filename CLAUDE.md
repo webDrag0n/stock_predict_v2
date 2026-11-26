@@ -44,8 +44,8 @@ A-share 量化研究系统：数据 → 因子 → 模型 → 策略 → 回测/
 │  实盘层 (predict_tomorrow.py, src/live.py)                            │
 │  复用同一套 daily engine 代码生成次日可执行订单                        │
 ├──────────────────────────────────────────────────────────────────────┤
-│  交互层 (webapp/, pipeline/, run_session.py)                          │
-│  Dash 前端；session = 独立子进程流水线；运行中显示进度条，完成后可视化      │
+│  交互层 (webapp2/, pipeline/, src/run_registry.py)                    │
+│  Dash 前端只读文件 + 触发 CLI；CLI 独立运行，进度/状态落 outputs/runs/     │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -114,7 +114,7 @@ scripts/                   # 研究脚本（活脚本清单见 scripts/README.md
   research/                # multiseed_robust.py（多 seed 稳健性复核）
   archive/                 # 一次性实验脚本归档（ablation/optimize/research，不再维护）
 
-pipeline/                  # 会话式流水线
+pipeline/                  # 研究模式的步骤函数（由 scripts/run_pipeline.py 执行并登记到 outputs/runs/）
   registry.py              # mode → 步骤序列 + 参数 schema + MODE_CATEGORY（research/production 分类）
   param_env.py             # 参数 → 环境变量映射（轻量，先于 config import 使用）
   context.py               # StepContext + report 构造器
@@ -122,24 +122,30 @@ pipeline/                  # 会话式流水线
   steps_train.py           # 训练候选 ensemble + 门控评估 → staging（research；不自动晋升）
   steps_modeleval.py       # 信号评估模式（research；PredIC/ICIR/分位数收益，不撮合）
   steps_factoreval.py      # 因子库评估模式（research；factor_eval.csv + 分层 parquet）
-  steps_nextday.py         # 次日交易模式（production；交易台「今日操作」卡「生成次日订单」入口）
+  steps_nextday.py         # 次日交易步骤（无前端入口；出单走 predict_tomorrow.py，
+                           #   tests/test_nextday_cli_consistency.py 守着两者口径一致）
 
-webapp/                    # Dash 前端
-  app.py                   # 应用入口与路由（/交易台、/models 模型实验室、/factors 因子工作台、
-                           #   /market 行情观察、/runs/<id> 会话详情）
-  sessions.py              # session 创建/调度/删除（detached 子进程 + 日志）
-  dataio.py                # 轻量缓存加载（面板/净值/因子元数据；产物类 csv 按文件 mtime 失效）
-  components.py            # 共享 UX 组件：page_header（标题+流程面包屑）/ term（术语 Tooltip）
-                           #   / next_step_alert（下一步指引）
-  pages/                   # trading_desk、model_lab、factor_workbench、session_detail、market_explorer
-  render.py                # 通用 step report 渲染器
+webapp2/                   # Dash 前端（只读文件 + 触发 CLI；没有它 CLI 照常运行）
+  app.py                   # 外壳 + 路由：/ 总览、/trade 交易、/models 模型、/backtest 回测、
+                           #   /factors 因子（/factors/<id> 详情、/factors/new 编辑器）、/market 行情、
+                           #   /runs 运行（/runs/<id> 详情）
+  data.py                  # 唯一读盘入口（mtime 键缓存；缺失/损坏一律返回空态）
+  actions.py               # 全部写操作（纯函数 + CLI 白名单启动）：现金/执行勾选/成交确认/
+                           #   晋升/删除/因子草稿/发起任务/终止运行；写操作审计 → models/promotions.log
+  *_logic.py               # 各页纯逻辑（trade/model/backtest/factor/market），不依赖 dash，便于单测
+  explain.py               # 订单「为什么」决策链白话解释
+  report_view.py           # pipeline 步骤报告（outputs/runs/<id>/reports/*.json）通用渲染器
+  pages/                   # overview、trade、models、backtest、factors、market、runs
+  assets/app.css           # 浅色冷灰主题
 
-run_session.py             # 独立子进程执行一个 session
-run_webapp.py              # 启动前端
+src/run_registry.py        # CLI 与前端的唯一对话契约：outputs/runs/<id>/{run.json,events.jsonl,run.log}
+src/factor_draft.py        # 因子草稿校验与落盘（公式校验直接用生产解析器）
+scripts/run_pipeline.py    # 以 run registry 登记的方式运行 train / modeleval / factoreval
+run_webapp2.py             # 启动前端（默认 http://127.0.0.1:8060）
 predict_tomorrow.py        # 生成次日订单 CLI
 
 tests/                     # 单元/集成测试
-outputs/                   # 报告、模型、session 产物
+outputs/                   # 报告、产物、runs/（运行登记）
 models/                    # 模型工件：champion/（生产）+ staging/（候选）+ archive/（退役），见 5.2a
 data_cache/                # 数据与中间面板缓存
 ```
@@ -229,24 +235,41 @@ data_cache/                # 数据与中间面板缓存
 
 ## 5. 主要入口与使用方式
 
-### 5.1 前端会话（推荐）
+### 5.1 前端（可选，CLI 不依赖它）
 
 ```bash
-uv run python run_webapp.py
+uv run python run_webapp2.py          # http://127.0.0.1:8060；PORT=... HOST=... 可覆盖
 ```
 
-浏览器打开后按任务类型创建会话。pipeline 现有 5 个模式，按 `registry.MODE_CATEGORY` 分两类：
+前端只做两件事：读 `outputs/`、`models/`、`factor_library/` 下的文件；或触发与终端完全相同的 CLI。
+CLI 自己把状态写进 `outputs/runs/<run_id>/`（`run.json` 快照 + `events.jsonl` 事件流 + `run.log`），
+前端后启动也能看到全部历史与进行中的运行；进程被 kill -9 时读侧据 pid/心跳显示「已中断」，不会永远转圈。
+`RUN_REGISTRY=0` 可整体关闭登记。
 
-- **research（模型实验室 /models「新建任务」面板）**：
-  - `walkforward`：唯一回测方法，滚动 OOS + PredIC/ICIR；
-  - `train`：训练候选 ensemble + 门控评估 → 落盘 `models/staging/`（不自动晋升，晋升走 §5.2a 门控）；
-  - `modeleval`：信号评估（PredIC/ICIR/分位数收益，不撮合；model_ref 支持 rolling/champion/staging:<id>）；
-  - `factoreval`：因子库评估（全库覆盖写 / factor_subset 合并写 `outputs/factor_eval.csv` + 分层 parquet + 可选诊断产物）。
-- **production（交易台 /）**：`nextday` 次日交易，入口在交易台「今日操作」卡「生成次日订单」按钮（2.5s 轮询进度条）；CLI `./daily_run.sh` 保留。
+| 页面 | 看什么 | 能做什么（写操作） |
+|---|---|---|
+| 总览 `/` | 待办（按紧迫度）、最新订单（过期会标明）、champion、风控、持仓、最近运行 | 现金维护 |
+| 交易 `/trade` | 今日流程四步、订单执行单（含「分析」决策链）、风控五层、账户快照、目标 vs 当前、净值与偏差 | 执行/拒绝勾选、成交确认（二次确认）、现金维护、生成次日订单 |
+| 模型 `/models` | champion / staging / archive、门控结论、A/B 对比（指标 + 配方 + 特征差异） | 晋升（未达门槛须填理由）、删除候选、发起训练 / 信号评估 |
+| 回测 `/backtest` | walk-forward 窗口表、净值曲线、HOLDOUT 与 Deflated Sharpe、多实验对比、冲击成本敏感性 | 发起 walk-forward（增量 / 滚动窗口） |
+| 因子 `/factors` | 因子库主表、冗余簇、模型内贡献、单因子详情六面板 | 公式编辑器（校验 / 保存草稿）、发起单因子 / 全库评估 |
+| 行情 `/market` | 个股 K 线 + 指标、全市场涨跌宽度、涨跌停（按板块幅度） | 无（只读） |
+| 运行 `/runs` | 全部运行列表与详情（步骤、进度、事件、产物、失败堆栈、步骤报告） | 终止运行 |
 
-原 `backtest` / `robustness` 模式已随任务体系重构删除；多 seed 稳健性复核走 CLI `scripts/research/multiseed_robust.py`。会话在独立子进程中运行；运行中的任务行显示进度条（读 session.json 的 `current_progress`，walk-forward 引擎提供窗口粒度 `progress_cb`），完成后查看每一步的可视化。因子工作台 `/factors/new` 保存草稿后可一键「立即评估该因子」创建单因子 factoreval 会话（730 天回看），/factors 总览也有「运行全库评估」入口。
+前端启动的 CLI 一律走 `webapp2/actions.py::CLI_ENTRIES` 白名单（参数字符集受限），重型任务
+（nightly / walkforward / train / modeleval / factoreval / impact）同一时刻只允许一个在跑——它们共用因子面板缓存且各占数 GB 内存。
+终端等价命令：`predict_tomorrow.py`、`scripts/run_walkforward.py`、
+`scripts/run_pipeline.py --mode train|modeleval|factoreval [--set KEY=VALUE ...] [--draft <因子id>]`。
 
-UX 约定：每页统一 `page_header`（标题 + 副标题 + 工作流面包屑：因子研发 → 模型训练与评估 → 回测验证 → 交易执行）；核心术语用 `components.term()` 挂悬停解释；会话详情页按模式智能返回来源页，失败可「以相同参数重试」，完成态给出下一步指引；产物类 csv 的 dataio 缓存按文件 mtime 自动失效（会话落盘后页面即见新结果）。
+注意（均已实测）：
+
+- 评估库里的**公式因子**必须加 `--draft <id>`：`USE_FORMULA_FACTORS` 默认关闭，它们不在因子面板里；
+  `--draft` 会关闭面板磁盘缓存（`FACTOR_PANEL_CACHE=0`），否则会用「只含这一个公式因子」的面板覆盖夜间任务共用的缓存。
+- 改动 `factor_library/*.yaml`（包括保存草稿）会改变面板缓存签名，下一次读取面板触发全量重建；
+  公式因子加载器不看 `enabled`，`enabled: false` 不是安全开关，真正的开关是 `USE_FORMULA_FACTORS` 与 `FORMULA_FACTOR_SUBSET`。
+- 全库评估的回看天数不得越过面板缓存起点（`actions.full_eval_lookback_days`），否则会重算并覆盖缓存。
+- 增量引擎（`engine=incremental`）在 T17 修复之前生成的产物，`window_metrics.parquet` 的窗口 Sharpe 与 `sharpe_pos_ratio` 偏高；
+  回测页按净值曲线复算并标出不一致，重跑即可得到修正后的存档。
 
 ### 5.2 次日订单 CLI
 
@@ -290,7 +313,7 @@ USE_ADAPTIVE_RETRAIN=0 uv run python predict_tomorrow.py  # 关自适应，每�
 USE_MODEL_GATE=0 uv run python predict_tomorrow.py        # 整体关门控
 ```
 
-门控指标与 webapp 回测报告同源：`src/perf_metrics.py::compute_performance`；
+门控指标与前端回测页同源：`src/perf_metrics.py::compute_performance`；
 活体 IC 与 IC 降仓层同源：`live_state.collect_matured_ics`（纯函数）。
 `USE_ADAPTIVE_RETRAIN=0` 时退回"每晚重训 + 门控"（即初版门控行为）。
 
@@ -371,7 +394,7 @@ uv run python scripts/demo/demo_liquidity_ablation_synthetic.py
 - 模块级常量 `UPPER_CASE`，函数/变量 `snake_case`。
 - 跨模块复用的函数用公开名（不带前导下划线）；`walkforward`/`factor_eval` 等模块末尾的 `_xxx = xxx` 行是向后兼容别名（供 `scripts/archive/` 使用），新代码一律用公开名。
 - 配置变量优先从 `config as C` 读取；`config.py` 在 import 时读 env，因此"先写 `os.environ` 再 import 业务模块"的时序不可破坏。
-- 日志：库模块用 `logger = logging.getLogger(__name__)` 记录进度/告警（`logger.info`/`logger.warning`），不在库模块内调 `basicConfig`；入口脚本（`predict_tomorrow.py`、`run_session.py`）在 main 开头配 `basicConfig`，其用户可见输出保留 `print`。
+- 日志：库模块用 `logger = logging.getLogger(__name__)` 记录进度/告警（`logger.info`/`logger.warning`），不在库模块内调 `basicConfig`；入口脚本（`predict_tomorrow.py`、`scripts/run_pipeline.py`）在 main 开头配 `basicConfig`，其用户可见输出保留 `print`。
 - 涉及“是否含未来信息”的操作必须加注释说明防泄露机制。
 
 ---
@@ -387,6 +410,6 @@ uv run python scripts/demo/demo_liquidity_ablation_synthetic.py
 - `stock-predict-v2-phase2-alpha-beta`：Phase2 回测优化终局。
 - `stock-predict-v2-daily-trading-engine`：每日策略 + 逐笔模拟重构。
 - `stock-predict-v2-whole-market`：全市场结果与纠错教训。
-- `stock-predict-v2-session-pipeline`：前端会话架构。
+- `stock-predict-v2-session-pipeline`：旧前端会话架构（已移除，新契约见 `src/run_registry.py`）。
 
 阅读或修改相关模块前，先回顾对应记忆。
